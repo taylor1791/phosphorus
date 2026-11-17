@@ -84,6 +84,9 @@ func (s *State) slotFindings() []Finding {
 		if sa == nil {
 			continue
 		}
+		if reviewed && wsa != nil && sf.Keys != nil && !sf.BadKeys {
+			out = append(out, proposedFindings(base, sf, sa, wsa)...)
+		}
 
 		// require_pq: every named device must have a hybrid key.
 		eligible, skipped := sa.Eligible()
@@ -499,9 +502,14 @@ func (s *State) removedFindings() []Finding {
 
 // hasPendingRevocation reports whether key has a slot for a device policy
 // does not name.
+// hasPendingRevocation reports whether trunk's current key has a slot that
+// `apply` rotates away: a device trunk policy no longer names, or one whose
+// slot records a different public key than policy now lists for it (a
+// re-keyed device, slot.rekeyed).
 func hasPendingRevocation(key *store.Key, sa *policy.ScopeAccess) bool {
 	for dev := range key.Slots {
-		if !sa.Names(dev) {
+		d, named := sa.Device(dev)
+		if !named || key.SlotTo[dev] != d.RecipientHash() {
 			return true
 		}
 	}
@@ -516,4 +524,46 @@ func policyName(p *policy.Policy) string {
 		return "policy (working tree; carbon is not on trunk yet)"
 	}
 	return "policy (working tree; the trunk is \"worktree\")"
+}
+
+// proposedFindings reports what the working tree's policy changes for a
+// scope relative to trunk's: devices it adds (granted by an apply once the
+// change merges) and devices it drops or re-keys (the key rotates once it
+// merges). They are notes for the reviewer, never failures: policy on a
+// branch grants nothing until it is on trunk.
+func proposedFindings(base Finding, sf *ScopeFiles, trunk, wt *policy.ScopeAccess) []Finding {
+	var out []Finding
+	cur := sf.Keys.CurrentKey()
+	wtEligible, _ := wt.Eligible()
+	for _, d := range wtEligible {
+		if _, slot := cur.Slots[d.ID]; slot {
+			continue
+		}
+		if td, ok := trunk.Device(d.ID); ok && td.Recipient == d.Recipient {
+			continue // already a pending grant on trunk
+		}
+		f := base
+		f.Severity, f.Rule, f.Device = Info, RulePolicyGrantProposed, d.ID
+		f.Message = fmt.Sprintf("This change names %s as a reader of %s. Once it merges, a current reader runs `carbon apply` to wrap the key to it.", d.ID, sf.Name())
+		out = append(out, f)
+	}
+	for _, id := range sortedKeys(cur.Slots) {
+		td, onTrunk := trunk.Device(id)
+		if !onTrunk || cur.SlotTo[id] != td.RecipientHash() {
+			continue // already a pending revocation against trunk
+		}
+		wd, named := wt.Device(id)
+		if named && wd.Recipient == td.Recipient {
+			continue
+		}
+		f := base
+		f.Severity, f.Rule, f.Device = Info, RulePolicyRevokeProposed, id
+		if named {
+			f.Message = fmt.Sprintf("This change gives %s a new key. Once it merges, a current reader's `carbon apply` rotates %s's key.", id, sf.Name())
+		} else {
+			f.Message = fmt.Sprintf("This change removes %s from %s. Once it merges, a current reader's `carbon apply` rotates the key; values set before then owe a rotation at their source.", id, sf.Name())
+		}
+		out = append(out, f)
+	}
+	return out
 }

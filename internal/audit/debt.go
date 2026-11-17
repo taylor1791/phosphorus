@@ -24,8 +24,9 @@ type Debt struct {
 	Secret  string    `json:"secret"`
 	Set     time.Time `json:"set"`
 	Kind    string    `json:"kind"`
-	// Removed is who was removed (the retired key's reason without
-	// "removed "), and Key the retired key id, for a removal.
+	// Removed is who may hold the retired key (see [Exposed]: removed
+	// readers, and "<device>'s old key" for a re-keyed device), and Key
+	// the retired key id, for a removal.
 	Removed string `json:"removed,omitempty"`
 	Key     string `json:"key,omitempty"`
 	// RotateAfter is the declaration's rotate_after, for that kind.
@@ -51,9 +52,43 @@ func (d Debt) Describe() string {
 // RemovalPrefix starts the reason of a key retired by a removal.
 const RemovalPrefix = "removed "
 
+// RekeyPrefix starts the part of a reason that names devices whose key
+// changed (the old key may be in someone else's hands).
+const RekeyPrefix = "rekeyed "
+
+// Exposed reads a retired key's reason, as `carbon apply` writes it
+// ("removed sam", "removed sam, lin", "rekeyed ada/laptop", "removed sam,
+// rekeyed ada/laptop"), and returns who may still hold the key: removed
+// readers by name, and re-keyed devices as "<device>'s old key". ok is
+// false for any other reason (free text), which owes no rotation.
+func Exposed(reason string) (who string, ok bool) {
+	var out []string
+	mode := ""
+	for _, part := range strings.Split(reason, ",") {
+		part = strings.TrimSpace(part)
+		switch {
+		case strings.HasPrefix(part, RemovalPrefix):
+			mode, part = "removed", strings.TrimPrefix(part, RemovalPrefix)
+		case strings.HasPrefix(part, RekeyPrefix):
+			mode, part = "rekeyed", strings.TrimPrefix(part, RekeyPrefix)
+		}
+		part = strings.TrimSpace(part)
+		if mode == "" || part == "" {
+			return "", false
+		}
+		if mode == "rekeyed" {
+			part += "'s old key"
+		}
+		out = append(out, part)
+	}
+	return strings.Join(out, ", "), len(out) > 0
+}
+
 // Debts returns the rotation debt of every scope, measured at now: a value
-// set before the retirement of a key whose reason is a removal (debt from the
-// earliest such removal after it was set), and a value older than its
+// set no later than the retirement of a key whose reason is a removal or a
+// re-key (debt from the earliest such retirement at or after it was set;
+// set times have whole seconds, so a value set in the same second as the
+// rotation counts as exposed), and a value older than its
 // rotate_after (debt from when that elapsed). Retired keys are read from the
 // working tree and trunk together, so deleting a retired key on a branch does
 // not hide debt.
@@ -74,7 +109,7 @@ func (s *State) Debts(now time.Time) []Debt {
 		}
 		retired := map[string]*store.Key{}
 		for id, k := range records {
-			if strings.HasPrefix(k.Reason, RemovalPrefix) {
+			if _, ok := Exposed(k.Reason); ok {
 				retired[id] = k
 			}
 		}
@@ -86,14 +121,14 @@ func (s *State) Debts(now time.Time) []Debt {
 			firstID := ""
 			for _, id := range ids {
 				k := retired[id]
-				if e.Set.Before(k.Retired) && (first == nil || k.Retired.Before(first.Retired)) {
+				if !e.Set.After(k.Retired) && (first == nil || k.Retired.Before(first.Retired)) {
 					first, firstID = k, id
 				}
 			}
 			if first != nil {
 				r := d
 				r.Kind, r.Key, r.Since = DebtRemoval, firstID, first.Retired
-				r.Removed = strings.TrimPrefix(first.Reason, RemovalPrefix)
+				r.Removed, _ = Exposed(first.Reason)
 				out = append(out, r)
 			}
 			if decl, ok := sf.Package.Secrets[name]; ok && decl.RotateAfter != "" {

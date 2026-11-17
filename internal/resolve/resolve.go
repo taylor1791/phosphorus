@@ -77,6 +77,10 @@ const (
 // gitx's scrub list: neither a subprocess nor a template may receive them.
 var forbiddenEnv = map[string]bool{"CARBON_IDENTITY": true, "CARBON_IDENTITY_FILE": true}
 
+// ForbiddenEnv reports whether ${env:name} is refused in an [env] template:
+// name carries carbon's identity. `carbon check` uses it too.
+func ForbiddenEnv(name string) bool { return forbiddenEnv[name] }
+
 // Error is a resolution failure, naming the [env] entry and the reference.
 type Error struct {
 	Kind Kind

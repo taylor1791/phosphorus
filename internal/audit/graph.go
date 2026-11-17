@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/taylor1791/phosphorus/internal/config"
+	"github.com/taylor1791/phosphorus/internal/resolve"
 )
 
 // Ref is one ${name} or ${pkg.name} reference in a package's [env] table.
@@ -193,6 +194,19 @@ func (s *State) graphFindings(unused bool) []Finding {
 				out = append(out, Finding{Severity: Error, Rule: RuleGraphSecretAndVar, Package: p.Name, Secret: n, File: p.File,
 					Message: fmt.Sprintf("%s declares %s both under [secrets] and as [vars.%s]; secrets and vars share one namespace.", p.File, n, n),
 					Hint:    "Keep one of them in " + p.File + "."})
+			}
+		}
+		for _, key := range sortedKeys(p.Env) {
+			parts, err := config.ParseTemplate(p.Env[key])
+			if err != nil {
+				continue
+			}
+			for _, part := range parts {
+				if r := part.Ref; r != nil && r.Kind == config.RefEnv && resolve.ForbiddenEnv(r.Name) {
+					out = append(out, Finding{Severity: Error, Rule: RuleGraphForbiddenEnv, Package: p.Name, File: p.File,
+						Message: fmt.Sprintf("%s [env] %s references ${env:%s}, which holds carbon's private key material: carbon run and export refuse it.", p.File, key, r.Name),
+						Hint:    fmt.Sprintf("Remove %s from the [env] table in %s. A process that needs secrets gets them through [env] references, not carbon's identity.", key, p.File)})
+				}
 			}
 		}
 		for _, r := range Refs(p) {

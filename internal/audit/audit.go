@@ -59,6 +59,7 @@ const (
 	RuleGraphSecretAndVar = "graph.secret-and-var"
 	RuleGraphVarUnset     = "graph.var-unset"
 	RuleGraphCycle        = "graph.cycle"
+	RuleGraphForbiddenEnv = "graph.forbidden-env"
 
 	// Declared versus stored, and entries against trunk's.
 	RuleSecretUnset          = "secret.unset"
@@ -101,9 +102,11 @@ const (
 	RuleDebtRotateAfter = "debt.rotate-after"
 
 	// Policy hygiene.
-	RulePolicyUnknownReader = "policy.unknown-reader"
-	RulePolicyUnknownMember = "policy.unknown-member"
-	RulePolicyNoDevices     = "policy.no-devices"
+	RulePolicyUnknownReader  = "policy.unknown-reader"
+	RulePolicyUnknownMember  = "policy.unknown-member"
+	RulePolicyNoDevices      = "policy.no-devices"
+	RulePolicyGrantProposed  = "policy.grant-proposed"
+	RulePolicyRevokeProposed = "policy.revoke-proposed"
 )
 
 // RuleInfo describes a rule for documentation and `carbon check --json`.
@@ -134,6 +137,7 @@ var Rules = []RuleInfo{
 	{RuleGraphSecretAndVar, Error, "a name is both a secret and a var in one package", false},
 	{RuleGraphVarUnset, Error, "a referenced var has no value (and no default) for an environment", false},
 	{RuleGraphCycle, Error, "packages reference each other in a cycle", false},
+	{RuleGraphForbiddenEnv, Error, "an [env] template references ${env:CARBON_IDENTITY} or ${env:CARBON_IDENTITY_FILE}, which never leave carbon", false},
 	{RuleSecretUnset, Error, "a declared secret has no value in an environment (every workspace environment counts)", false},
 	{RuleSecretUndeclared, Error, "a stored value has no declaration", false},
 	{RuleSecretUnknownKey, Error, "a stored value names a key id the scope's keys file does not have", false},
@@ -169,6 +173,8 @@ var Rules = []RuleInfo{
 	{RulePolicyUnknownReader, Error, "an access entry names no team, person or machine", false},
 	{RulePolicyUnknownMember, Warning, "a team lists a person with no person file", false},
 	{RulePolicyNoDevices, Warning, "a person file lists no devices", false},
+	{RulePolicyGrantProposed, Info, "this change names a new reader of a scope; once it merges, a reader runs `carbon apply` (never raised by --strict)", false},
+	{RulePolicyRevokeProposed, Info, "this change removes a reader of a scope or changes its key; once it merges, a reader's `carbon apply` rotates (never raised by --strict)", false},
 }
 
 // Banner reports whether findings of rule are listed in check's review
