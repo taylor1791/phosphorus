@@ -150,7 +150,7 @@ func ConflictErr(path string) *Error {
 		e.Hint = "Resolve the conflict by keeping one side of each conflicting line; each line is self-contained:\n" +
 			"- One side rotated the key (every line re-sealed) and the other added or set secrets: keep the rotated side's lines,\n" +
 			"  then add back each line the other side added or changed, exactly as it was. It still opens through the retired key,\n" +
-			"  and the next `carbon apply` lists it and re-seals it under the current key.\n" +
+			"  and the next `carbon apply` lists it as unproven (it re-seals it only with --reseal-unproven).\n" +
 			"- Both sides set the same secret: keep either line; each is a valid value or drop."
 	}
 	return e

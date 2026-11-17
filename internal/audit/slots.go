@@ -500,8 +500,6 @@ func (s *State) removedFindings() []Finding {
 	return out
 }
 
-// hasPendingRevocation reports whether key has a slot for a device policy
-// does not name.
 // hasPendingRevocation reports whether trunk's current key has a slot that
 // `apply` rotates away: a device trunk policy no longer names, or one whose
 // slot records a different public key than policy now lists for it (a
