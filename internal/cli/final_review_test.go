@@ -130,3 +130,37 @@ func TestRedatingCannotHideDebt(t *testing.T) {
 	setTime(t, w, co+"/.carbon/staging.secrets.toml", "webhook_secret", "2099-01-01T00:00:00Z")
 	ci(t, w.Repo, 4).has(t, "secret.future", "checkout/staging webhook_secret")
 }
+
+// Finding 5: a rename done as documented failed check. It is now one
+// banner item per scope, and any change beyond the rename is an error.
+func TestJourneyRename(t *testing.T) {
+	w := clitest.Standard(t)
+	co := w.PkgDir
+	setAll(t, w)
+	w.Branch("rename")
+	w.Lin.Must("rename", "checkout", "shop", "--yes")
+	w.Commit("rename checkout to shop")
+	cj := ci(t, w.Repo, 0)
+	cj.has(t, "scope.renamed", "shop/dev", "shop/staging", "shop/prod")
+	cj.lacks(t, "key.removed", "key.new", "trunk.unreadable", "key.changed", "slot.unbacked")
+	for _, b := range cj.banner() {
+		if b != "scope.renamed" {
+			t.Fatalf("banner %v\n%s", cj.banner(), cj)
+		}
+	}
+	// Anything beyond the rename is an error: a re-dated line here.
+	keep := w.Read(co + "/.carbon/dev.secrets.toml")
+	setTime(t, w, co+"/.carbon/dev.secrets.toml", "stripe_api_key", "2020-01-01T00:00:00Z")
+	ci(t, w.Repo, 4).has(t, "key.changed", "error shop/dev")
+	w.Write(co+"/.carbon/dev.secrets.toml", keep)
+
+	w.Checkout("main")
+	w.Merge("rename")
+	ci(t, w.Repo, 0).clean(t)
+	if got := w.Lin.In(co).Must("get", "stripe_api_key", "--env", "prod").Stdout; got != "sk_prod" {
+		t.Fatalf("get after rename = %q", got)
+	}
+	if got := w.Deploy.Must("get", "stripe_api_key", "--package", "shop", "--env", "prod").Stdout; got != "sk_prod" {
+		t.Fatalf("deploy get after rename = %q", got)
+	}
+}

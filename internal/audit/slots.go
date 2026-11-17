@@ -81,6 +81,9 @@ func (s *State) slotFindings() []Finding {
 			}
 		}
 
+		if sf.RenamedFrom != "" {
+			continue // compared with trunk's files under the old name (scope.renamed)
+		}
 		if sa == nil {
 			continue
 		}

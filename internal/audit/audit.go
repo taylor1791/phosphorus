@@ -93,6 +93,7 @@ const (
 	RuleKeyNew                = "key.new"
 	RuleKeyRotated            = "key.rotated"
 	RuleScopeRemoved          = "scope.removed"
+	RuleScopeRenamed          = "scope.renamed"
 	RuleDropForbidden         = "drop.forbidden"
 	RuleDropPending           = "drop.pending"
 
@@ -168,6 +169,7 @@ var Rules = []RuleInfo{
 	{RuleKeyBehindTrunk, Info, "this branch still uses a key that trunk has retired and has not changed it; merge trunk", false},
 	{RuleKeyNew, Info, "a scope has a key in the working tree and none on trunk: confirm its author is a reader (never raised by --strict)", true},
 	{RuleKeyRotated, Info, "the scope key changed from trunk's: confirm the author is a current reader (never raised by --strict)", true},
+	{RuleScopeRenamed, Info, "a scope is renamed (carbon rename): its structure matches trunk's under the old name; confirm the author is a reader", true},
 	{RuleScopeRemoved, Info, "a scope with keys on trunk is removed together with its files", true},
 	{RuleDropForbidden, Error, "a drop in an environment where drops are off", true},
 	{RuleDropPending, Info, "a drop awaiting review and promotion by a reader", true},
@@ -312,6 +314,8 @@ func bannerText(f Finding) string {
 		return "NEW SLOT for " + f.Device + ": confirm the author is a current reader of " + f.Scope
 	case RuleScopeRemoved:
 		return "SCOPE REMOVED with its keys"
+	case RuleScopeRenamed:
+		return "RENAMED: confirm the author is a reader of " + f.Scope
 	case RuleKeyRotated:
 		return "KEY ROTATED: confirm the author is a current reader of " + f.Scope
 	}

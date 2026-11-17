@@ -55,6 +55,7 @@ type State struct {
 	trunkSrc     *gitx.RefSource
 	badDirs      []string // package directories whose carbon.toml did not parse
 	loadFindings []Finding
+	renamed      map[string]bool // trunk package names renamed in the working tree
 }
 
 // ScopeFiles is one scope's keys and secrets files.
@@ -76,6 +77,10 @@ type ScopeFiles struct {
 	SecretFile   string
 
 	BadKeys, BadSecrets bool
+	// RenamedFrom is the package name trunk has in this scope's directory
+	// when this change renames the package (carbon rename): trunk's files
+	// there name the old package, and the new name is not on trunk.
+	RenamedFrom string
 }
 
 // Name is "<package>/<env>".
@@ -108,7 +113,7 @@ func Load(repo *gitx.Repo, getenv func(string) string) (*State, error) {
 	if err != nil {
 		return nil, err
 	}
-	st := &State{Root: repo.Root, Repo: repo, Workspace: ws}
+	st := &State{Root: repo.Root, Repo: repo, Workspace: ws, renamed: map[string]bool{}}
 	pkgs, err := st.loadPackages(src, ws)
 	if err != nil {
 		return nil, err
@@ -406,6 +411,14 @@ func (s *State) loadScopes() {
 					s.add(Finding{Severity: Error, Rule: RuleTrunkUnreadable, Scope: sf.Name(), Package: p.Name, Env: env,
 						Message: fmt.Sprintf("The keys file of %s on trunk cannot be read: %v. Key changes in %s were not checked.", sf.Name(), err, sf.Name()),
 						Hint:    "Fix the keys file on trunk."})
+				case tk != nil && tk.Scope != sf.Name() && s.renamedFrom(p, env, tk) != "":
+					old := s.renamedFrom(p, env, tk)
+					sf.RenamedFrom = old
+					s.renamed[old] = true
+					ts := s.trunkSecrets(sf, at, env)
+					s.add(renameFinding(sf, old, tk, ts))
+					s.Scopes = append(s.Scopes, sf)
+					continue
 				case tk != nil && tk.Scope != sf.Name():
 					s.add(Finding{Severity: Error, Rule: RuleTrunkUnreadable, Scope: sf.Name(), Package: p.Name, Env: env,
 						Message: fmt.Sprintf("The keys file of %s on trunk says scope = %q.", sf.Name(), tk.Scope),
@@ -464,6 +477,9 @@ func (s *State) loadRemoved() {
 		for _, env := range s.Trunk.Workspace.Environments {
 			if wp, ok := s.Worktree.Packages[name]; ok && s.Workspace.HasEnvironment(env) && wp != nil {
 				continue
+			}
+			if s.renamed[name] {
+				continue // renamed in the working tree (scope.renamed)
 			}
 			tk, err := scope.ReadKeysAt(s.trunkSrc, tp.Dir, env)
 			if err != nil || tk == nil {
