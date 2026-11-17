@@ -35,8 +35,11 @@ func checkEditLog(t *testing.T, log string) {
 		t.Fatalf("the editor did not run: %v", err)
 	}
 	f := strings.Fields(string(b))
-	if len(f) != 3 || f[1] != "0600" || f[2] != "0700" {
+	if len(f) != 4 || f[1] != "0600" || f[2] != "0700" {
 		t.Fatalf("editor saw %q, want file 0600 in a 0700 directory", b)
+	}
+	if f[3] != "identity-vars=false" {
+		t.Fatalf("the editor received CARBON_IDENTITY or CARBON_IDENTITY_FILE: %q", b)
 	}
 	if _, err := os.Stat(filepath.Dir(f[0])); !os.IsNotExist(err) {
 		t.Fatalf("temporary directory %s still exists (%v)", filepath.Dir(f[0]), err)
@@ -227,7 +230,7 @@ func TestDoctor(t *testing.T) {
 	res := w.Lin.In(w.PkgDir).Must("doctor")
 	contains(t, "doctor", res.Stdout,
 		"ok    git", "ok    workspace", "carbon.toml format 1, environments dev, staging, prod",
-		"ok    trunk", "main at ", "holds 1 key(s)", "hybrid post-quantum",
+		"ok    trunk", "main (from git config carbon.trunk) at ", "holds 1 key(s)", "hybrid post-quantum",
 		"you are lin (device laptop), a member of @engineering and @payments",
 		"ok    environment", "dev (the default)",
 		"checkout/dev: you have a slot (lin/laptop)",
@@ -291,5 +294,5 @@ func TestDoctorBootstrapAndOutsideAWorkspace(t *testing.T) {
 	ada := r.Person("ada")
 	ada.Join()
 	res = ada.Must("doctor")
-	contains(t, "doctor", res.Stdout, "WARN  trunk", "trunk main does not exist: bootstrap mode", "you are ada")
+	contains(t, "doctor", res.Stdout, "WARN  trunk", "no trunk yet (no remote, no git config carbon.trunk): bootstrap mode", "you are ada")
 }

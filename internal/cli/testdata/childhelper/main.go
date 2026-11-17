@@ -4,7 +4,7 @@
 //	childhelper env [code]   print {"args": [...], "env": [...]} as JSON, exit code
 //	childhelper exit         exit 0 at once (for timing)
 //	childhelper edit <file>  act as an editor, driven by HELPER_EDIT_* variables:
-//	    HELPER_EDIT_LOG     append "path mode dirmode" to this file
+//	    HELPER_EDIT_LOG     append "path mode dirmode identity-vars=<bool>" to this file
 //	    HELPER_EDIT_SET     JSON {"name": "value"}: replace or uncomment that line
 //	    HELPER_EDIT_APPEND  text appended to the file
 //	    HELPER_EDIT_EXIT    exit with this status after editing
@@ -51,7 +51,9 @@ func edit(path string) {
 			os.Exit(9)
 		}
 		f, _ := os.OpenFile(log, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-		fmt.Fprintf(f, "%s %04o %04o\n", path, fi.Mode().Perm(), di.Mode().Perm())
+		_, id := os.LookupEnv("CARBON_IDENTITY")
+		_, idf := os.LookupEnv("CARBON_IDENTITY_FILE")
+		fmt.Fprintf(f, "%s %04o %04o identity-vars=%v\n", path, fi.Mode().Perm(), di.Mode().Perm(), id || idf)
 		f.Close()
 	}
 	data, err := os.ReadFile(path)

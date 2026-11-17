@@ -13,6 +13,7 @@ import (
 
 	"github.com/taylor1791/phosphorus/internal/config"
 	"github.com/taylor1791/phosphorus/internal/gitx"
+	"github.com/taylor1791/phosphorus/internal/policy"
 	"github.com/taylor1791/phosphorus/internal/store"
 )
 
@@ -23,14 +24,19 @@ func init() {
 		Summary: "Create a workspace, or a package in the current directory",
 		Help: `At the top of a repository with no carbon.toml, init creates the workspace:
 carbon.toml, .carbon/teams.toml, and a .gitattributes line that marks keys
-files as generated. Every environment is readable by @engineering, and the
-first person to run "carbon join" joins every team.
+files as generated. Every environment is readable by @engineering, and,
+until carbon is on trunk, the first person to run "carbon join" joins every
+empty team.
 
 Inside a workspace, init creates a package in the current directory. Its name
-is --name, or the directory's name.`,
+is --name, or the directory's name.
+
+Trunk (where access policy and inbox keys are read from) is chosen per clone:
+CARBON_TRUNK, then git config carbon.trunk, then the remote default branch.
+--trunk <ref> runs "git config carbon.trunk <ref>" for this clone only.`,
 		Flags: func(fs *flag.FlagSet) {
 			fs.String("name", "", "package name")
-			fs.String("trunk", "", "trunk ref for policy (default: origin's HEAD, else origin/main)")
+			fs.String("trunk", "", "set git config carbon.trunk for this clone (default: the remote default branch)")
 			fs.String("environments", "dev,staging,prod", "environments, first is the default")
 		},
 		Run: runInit,
@@ -53,6 +59,15 @@ func runInit(c *Context) error {
 	}
 	name := c.String("name")
 	res := initResult{Created: []string{}}
+	if trunk := c.String("trunk"); trunk != "" {
+		if err := config.CheckTrunk(trunk); err != nil {
+			return c.UsageErr("--trunk: %v", err)
+		}
+		if err := repo.ConfigSet(policy.TrunkConfigKey, trunk); err != nil {
+			return err
+		}
+		res.Created = append(res.Created, fmt.Sprintf("git config %s %s (this clone only)", policy.TrunkConfigKey, trunk))
+	}
 
 	rootFile := filepath.Join(repo.Root, config.FileName)
 	_, statErr := os.Stat(rootFile)
@@ -73,7 +88,7 @@ func runInit(c *Context) error {
 		if err := initPackage(c, w, name, &res); err != nil {
 			return err
 		}
-	} else if !res.Workspace {
+	} else if !res.Workspace && c.String("trunk") == "" {
 		return &Error{Code: ExitUsage, Message: "this repository already has a carbon workspace",
 			Hint: "To create a package, run `carbon init` in its directory, or here with --name <package>."}
 	}
@@ -100,15 +115,6 @@ func initWorkspace(c *Context, repo *gitx.Repo, res *initResult) error {
 			return c.UsageErr("%v", err)
 		}
 	}
-	trunk := c.String("trunk")
-	if trunk == "" {
-		trunk = "origin/main"
-		if out, err := repo.Git("symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"); err == nil {
-			if t := strings.TrimSpace(string(out)); t != "" {
-				trunk = t
-			}
-		}
-	}
 	quoted := make([]string, len(envs))
 	var access strings.Builder
 	for i, e := range envs {
@@ -119,13 +125,12 @@ func initWorkspace(c *Context, repo *gitx.Repo, res *initResult) error {
 format = 1
 environments = [%s]
 default_environment = %s
-trunk = %s
 
 # Default readers per environment. A package's own [access] replaces these.
 # A reader is @team, person, or machine:name. The long form also takes
 # require_pq and drops: prod = { readers = ["@sre"], require_pq = true }
 [access]
-%s`, strings.Join(quoted, ", "), quoted[0], config.Quote(trunk), access.String())
+%s`, strings.Join(quoted, ", "), quoted[0], access.String())
 	if err := writeNew(filepath.Join(repo.Root, config.FileName), ws); err != nil {
 		return err
 	}

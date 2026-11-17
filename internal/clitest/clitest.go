@@ -96,7 +96,9 @@ type Repo struct {
 	T testing.TB
 	// Dir is the repository root.
 	Dir string
-	// Trunk is the trunk ref written into carbon.toml ("main").
+	// Trunk is the trunk branch, "main". NewRepo and NewWorkspace leave it
+	// unconfigured (the bootstrap case: no remote, no carbon.trunk);
+	// Standard runs `git config carbon.trunk main` once main exists.
 	Trunk string
 	base  string
 	anon  *Person
@@ -120,11 +122,12 @@ func NewRepo(t testing.TB) *Repo {
 	return r
 }
 
-// NewWorkspace is NewRepo plus `carbon init --trunk main`, uncommitted.
+// NewWorkspace is NewRepo plus `carbon init`, uncommitted, with no trunk
+// configured: the bootstrap case.
 func NewWorkspace(t testing.TB) *Repo {
 	t.Helper()
 	r := NewRepo(t)
-	r.anon.Must("init", "--trunk", r.Trunk)
+	r.anon.Must("init")
 	return r
 }
 
@@ -210,6 +213,10 @@ func (r *Repo) Commit(msg string) {
 	r.Git("add", "-A")
 	r.Git("commit", "-q", "--allow-empty", "-m", msg)
 }
+
+// SetTrunk runs `git config carbon.trunk <ref>` in the repo (a ref, or
+// "worktree"); the ref must exist for carbon commands that read trunk.
+func (r *Repo) SetTrunk(ref string) { r.T.Helper(); r.Git("config", "--local", "carbon.trunk", ref) }
 
 // Branch creates and checks out a branch.
 func (r *Repo) Branch(name string) { r.T.Helper(); r.Git("checkout", "-q", "-b", name) }
@@ -402,8 +409,8 @@ webhook_secret = { description = "Stripe webhook signing secret" }
 
 // Standard builds the scenario from the design, committed to trunk (main):
 //
-//   - workspace: environments dev, staging, prod; trunk main; every
-//     environment readable by @engineering
+//   - workspace: environments dev, staging, prod; every environment
+//     readable by @engineering; git config carbon.trunk main (trunk mode)
 //   - people ada, lin, sam (device "laptop" each, hybrid keys)
 //   - teams: engineering = [ada, lin, sam], payments = [lin]
 //   - machine:deploy-checkout
@@ -424,5 +431,6 @@ func Standard(t testing.TB) *World {
 	w.Deploy = r.Machine("deploy-checkout")
 	r.AddPackage(w.PkgDir, "checkout", CheckoutPackage)
 	r.Commit("carbon workspace")
+	r.SetTrunk(r.Trunk)
 	return w
 }

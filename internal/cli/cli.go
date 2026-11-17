@@ -116,8 +116,11 @@ type IO struct {
 	Stdin          io.Reader
 	Stdout, Stderr io.Writer
 	Getenv         func(string) string
-	Cwd            string
-	Now            func() time.Time
+	// Environ is the whole process environment ("K=V"), for `run` and to
+	// tell an empty variable from an unset one. Nil means empty.
+	Environ func() []string
+	Cwd     string
+	Now     func() time.Time
 	// StdinIsTerminal reports whether prompts can be shown. Main sets it
 	// from the real stdin.
 	StdinIsTerminal bool
@@ -134,7 +137,7 @@ func Main(args []string) int {
 	}
 	return Run(args, IO{
 		Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr,
-		Getenv: os.Getenv, Cwd: cwd, Now: time.Now,
+		Getenv: os.Getenv, Environ: os.Environ, Cwd: cwd, Now: time.Now,
 		StdinIsTerminal:  isTerminal(os.Stdin),
 		StdoutIsTerminal: isTerminal(os.Stdout),
 	})

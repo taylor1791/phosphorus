@@ -3,7 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
-	"os"
+	"strings"
 
 	"github.com/taylor1791/phosphorus/internal/agewrap"
 	"github.com/taylor1791/phosphorus/internal/config"
@@ -42,18 +42,26 @@ func (c *Context) resolvePackageEnv(w *Workspace, pkg *config.Package, env strin
 	return res, nil
 }
 
-// lookupEnv is the calling process's environment for ${env:NAME}. Context
-// only exposes Getenv, which cannot tell empty from unset, so an empty
-// answer is checked against the real process environment: a variable set
-// to "" is set.
+// lookupEnv is the calling process's environment for ${env:NAME}. A
+// variable set to "" is set; Getenv cannot tell, so Environ decides.
 func (c *Context) lookupEnv(name string) (string, bool) {
 	if v := c.Getenv(name); v != "" {
 		return v, true
 	}
-	if _, ok := os.LookupEnv(name); ok {
-		return "", true
+	for _, kv := range c.environ() {
+		if k, _, _ := strings.Cut(kv, "="); k == name {
+			return "", true
+		}
 	}
 	return "", false
+}
+
+// environ is the process environment, or nothing when IO has none.
+func (c *Context) environ() []string {
+	if c.Environ == nil {
+		return nil
+	}
+	return c.Environ()
 }
 
 type scopeOpener struct {
@@ -91,6 +99,12 @@ func (o *scopeOpener) open(p *config.Package) (resolve.Values, error) {
 		return nil, o.c.NoAccessErr(o.pol, p.Name, o.env, o.me, s.SlotIDs())
 	}
 	if err != nil {
+		return nil, err
+	}
+	// The same check OpenScope makes: never read under a key that does not
+	// descend from trunk's.
+	if err := o.c.VerifyTrunk(o.w, p, opened); err != nil {
+		opened.Close()
 		return nil, err
 	}
 	return opened, nil

@@ -98,9 +98,15 @@ func runSet(c *Context) error {
 			if err != nil && !errors.Is(err, scope.ErrNotReader) {
 				return err
 			}
+			if opened != nil {
+				if err := c.VerifyTrunk(w, pkg, opened); err != nil {
+					opened.Close()
+					return err
+				}
+			}
 		}
 		if opened == nil {
-			if inbox, err = c.dropTarget(w, pkg, env); err != nil {
+			if inbox, err = c.dropTarget(w, s, pkg, env); err != nil {
 				return err
 			}
 			if !c.JSON() {
@@ -122,17 +128,30 @@ func runSet(c *Context) error {
 		if err != nil {
 			return err
 		}
-		if opened, err = s.Create(devices, c.Now()); err != nil {
-			return err
-		}
-		res.CreatedKey = true
+		// Only a device that policy names may create the key, so that the
+		// first key, like every sealed value, comes from a reader.
 		for _, id := range ids {
 			for _, d := range devices {
-				if d.Recipient == id.Recipient {
+				if id.Recipient != "" && d.Recipient == id.Recipient {
 					res.Reader = true
 				}
 			}
 		}
+		if !res.Reader {
+			sa, _ := pol.Scope(pkg.Name, env)
+			readers := "the readers in its [access] entry"
+			if sa != nil && len(sa.Readers) > 0 {
+				readers = joinAnd(sa.Readers)
+			}
+			return &Error{Code: ExitNoAccess,
+				Message: fmt.Sprintf("nobody has created the key for %s yet, and you cannot read it", s.Name()),
+				Details: []string{"Only a reader may create a scope's key, so that every sealed value proves a reader wrote it."},
+				Hint:    fmt.Sprintf("A reader must create it, with `carbon set` or `carbon apply`: any of %s.", readers)}
+		}
+		if opened, err = s.Create(devices, c.Now()); err != nil {
+			return err
+		}
+		res.CreatedKey = true
 	}
 	if opened != nil {
 		defer opened.Close()
@@ -183,14 +202,11 @@ func runSet(c *Context) error {
 		default:
 			fmt.Fprintf(out, "Sealed. %s\n", commit)
 		}
-		if res.CreatedKey && !res.Reader {
-			fmt.Fprintf(out, "You are not a reader of %s, so you cannot read it back.\n", s.Name())
-		}
 	})
 }
 
 // dropTarget checks that drops are allowed and returns trunk's inbox.
-func (c *Context) dropTarget(w *Workspace, pkg *config.Package, env string) (scope.Inbox, error) {
+func (c *Context) dropTarget(w *Workspace, s *scope.Scope, pkg *config.Package, env string) (scope.Inbox, error) {
 	pol, err := c.TrunkPolicy(w)
 	if err != nil {
 		return scope.Inbox{}, err
@@ -220,6 +236,16 @@ func (c *Context) dropTarget(w *Workspace, pkg *config.Package, env string) (sco
 			Message: fmt.Sprintf("%s has a key on this branch but not on trunk", name),
 			Details: []string{"A drop goes to the inbox key on trunk, so that a key swapped on a branch is never used."},
 			Hint:    "Merge the branch that created the scope first, or ask one of its readers to set the value."}
+	}
+	// A working tree that already retired trunk's current key means the local
+	// trunk ref is behind: its inbox is one readers may no longer use.
+	if pol.Origin == policy.OriginTrunk && s.Keys != nil {
+		if r, ok := s.Keys.Keys[keys.Current]; ok && r.IsRetired() {
+			return scope.Inbox{}, &Error{Code: ExitError,
+				Message: fmt.Sprintf("your copy of trunk (%s) is behind this branch for %s", pol.Ref, name),
+				Details: []string{fmt.Sprintf("Trunk's current key %s is retired in %s.", keys.Current, w.Rel(s.KeysPath()))},
+				Hint:    "Update it, then try again:   git fetch"}
+		}
 	}
 	inbox, err := scope.TrunkInbox(keys, pkg.Name, env)
 	if err != nil {

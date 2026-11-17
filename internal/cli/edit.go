@@ -17,6 +17,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 
 	"github.com/taylor1791/phosphorus/internal/config"
+	"github.com/taylor1791/phosphorus/internal/gitx"
 	"github.com/taylor1791/phosphorus/internal/scope"
 )
 
@@ -221,6 +222,7 @@ func (c *Context) editInTemp(argv []string, content []byte) ([]byte, error) {
 
 	cmd := exec.Command(argv[0], append(argv[1:], path)...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = c.Stdin, c.Stdout, c.Stderr
+	cmd.Env = gitx.ScrubbedEnviron(c.environ()) // the editor never sees CARBON_IDENTITY
 	if c.JSON() {
 		cmd.Stdout = c.Stderr
 	}

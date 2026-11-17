@@ -181,24 +181,19 @@ func (d *doctor) attributes(w *Workspace) {
 // trunk reports where policy comes from and returns trunk policy (nil when
 // it cannot be read).
 func (d *doctor) trunk(w *Workspace) *policy.Policy {
-	ws := w.Config
-	if ws.TrunkIsWorktree() {
-		d.add("trunk", checkWarn, `trunk = "worktree": policy is read from the working tree, so access is not gated by review`,
-			`Set trunk to your protected branch (for example trunk = "origin/main") in carbon.toml.`)
-	} else if ok, err := w.Repo.RefExists(ws.Trunk); err != nil {
-		d.addErr("trunk", err)
-		return nil
-	} else if !ok {
-		fix := fmt.Sprintf("Commit the workspace and push it, or fix trunk = %q in carbon.toml.", ws.Trunk)
-		if remote, _, found := strings.Cut(ws.Trunk, "/"); found && remote != "" {
-			fix = fmt.Sprintf("Fetch it:   git fetch %s\n", remote) + fix
-		}
-		d.add("trunk", checkWarn, fmt.Sprintf("trunk %s does not exist: bootstrap mode, policy comes from the working tree", ws.Trunk), fix)
-	}
-	pol, err := policy.LoadTrunk(w.Repo, ws)
+	t, err := policy.ResolveTrunk(w.Repo, d.c.Getenv)
 	if err != nil {
 		d.addErr("trunk", err)
 		return nil
+	}
+	pol, err := policy.LoadTrunkAt(w.Repo, t)
+	if err != nil {
+		d.addErr("trunk", err)
+		return nil
+	}
+	undo := "git config --unset " + policy.TrunkConfigKey
+	if t.From == policy.TrunkFromEnv {
+		undo = "unset " + policy.TrunkEnv
 	}
 	switch pol.Origin {
 	case policy.OriginTrunk:
@@ -206,10 +201,16 @@ func (d *doctor) trunk(w *Workspace) *policy.Policy {
 		if len(id) > 10 {
 			id = id[:10]
 		}
-		d.add("trunk", checkOK, fmt.Sprintf("%s at %s; policy is read from it", pol.Ref, id), "")
+		d.add("trunk", checkOK, fmt.Sprintf("%s (from %s) at %s; policy is read from it", t.Ref, t.From, id), "")
+	case policy.OriginWorktreeTrunk:
+		d.add("trunk", checkWarn, fmt.Sprintf("trunk is \"worktree\" (from %s): policy is read from the working tree, so access is not gated by review", t.From),
+			"Use your protected branch instead:   "+undo+"\nor:   git config "+policy.TrunkConfigKey+" origin/main")
 	case policy.OriginBootstrap:
-		if ok, _ := w.Repo.RefExists(ws.Trunk); ok {
-			d.add("trunk", checkWarn, fmt.Sprintf("trunk %s has no carbon.toml: bootstrap mode, policy comes from the working tree", ws.Trunk),
+		if t.From == policy.TrunkFromNone {
+			d.add("trunk", checkWarn, "no trunk yet (no remote, no git config "+policy.TrunkConfigKey+"): bootstrap mode, policy comes from the working tree",
+				"Once the workspace is on a remote:   git fetch\nOr name the trunk for this clone:   git config "+policy.TrunkConfigKey+" <ref>")
+		} else {
+			d.add("trunk", checkWarn, fmt.Sprintf("trunk %s (from %s) has no carbon.toml: bootstrap mode, policy comes from the working tree", t.Ref, t.From),
 				"Merge the carbon workspace to trunk so that access is gated by review.")
 		}
 	}
@@ -435,4 +436,3 @@ func (d *doctor) drops(s *scope.Scope) {
 			"Review them, then promote with:   carbon apply")
 	}
 }
-

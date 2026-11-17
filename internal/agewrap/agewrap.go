@@ -108,7 +108,7 @@ func DecodeBlob(blob string) ([]byte, error) {
 	if !ok {
 		return nil, fmt.Errorf("age blob does not start with %q", BlobPrefix)
 	}
-	raw, err := seal.Encoding.DecodeString(rest)
+	raw, err := seal.DecodeBase64(rest)
 	if err != nil {
 		return nil, fmt.Errorf("age blob is not valid base64: %w", err)
 	}

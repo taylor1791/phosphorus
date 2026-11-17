@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/taylor1791/phosphorus/internal/gitx"
 	"github.com/taylor1791/phosphorus/internal/resolve"
 )
 
@@ -56,7 +57,8 @@ func runRun(c *Context) error {
 	if err != nil {
 		return err
 	}
-	envv := mergeEnviron(os.Environ(), res)
+	// The command never sees carbon's own identity variables.
+	envv := mergeEnviron(gitx.ScrubbedEnviron(c.environ()), res)
 	res.Zero()
 
 	path, err := findExecutable(argv[0], lookupIn(envv, "PATH"))
