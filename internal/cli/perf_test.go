@@ -49,6 +49,8 @@ func TestRunOverhead(t *testing.T) {
 			Must("set", fmt.Sprintf("s%03d", i))
 	}
 	r.Commit("secrets")
+	// Trunk mode, as in a real clone: run also checks the key against trunk.
+	r.SetTrunk("main")
 	if !strings.Contains(r.Read(".carbon/people/ada.toml"), "age1pq1") {
 		t.Fatal("ada's identity is not hybrid")
 	}
