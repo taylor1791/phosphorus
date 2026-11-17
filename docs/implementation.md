@@ -387,23 +387,66 @@ checks) reads the working tree.
 
 ## `check` rules for slots and keys
 
-`check` needs no identity. For each scope it compares the working tree with
-trunk:
+`check` needs no identity, and therefore cannot tell a key change made by a
+reader from one forged with public keys only. It enforces every structural
+rule a legitimate `apply` commit satisfies, and lists every key change in a
+review banner (below). A passing check on a change to keys files is not "safe
+to merge without review": its author must be a current reader.
 
-- A slot whose device trunk policy names: fine.
-- A slot whose device trunk policy does not name, and which is not on trunk:
-  **error** (a grant that merged policy does not back).
+Trunk: as chosen in the Trunk section. With no trunk ref at all (no remote
+refs, no override) `check` fails unless `--bootstrap` is given.
+
+Scopes are the union of trunk's and the working tree's packages ×
+environments. For each scope it compares the working tree with trunk:
+
+- A slot whose device trunk policy names: fine. If the slot is new relative
+  to trunk it is listed in the banner (`slot.granted`), and its `to` must be
+  the hash of that device's trunk policy key (`slot.recipient`, **error**).
+- A slot whose device trunk policy does not name, and which is not on trunk
+  (the identical line, `to` included): **error** (`slot.unbacked`). In an
+  environment trunk has no access entry for, every slot is unbacked: a
+  scope's keys cannot be created before its policy merges.
 - A slot whose device trunk policy does not name, and which is on trunk:
-  **pending revocation**, a warning (an error under `--strict`).
+  **pending revocation**, a warning (an error under `--strict`). A slot on
+  trunk whose `to` no longer matches its device's trunk policy key: the key
+  changed, a pending revocation (`slot.rekeyed`, warning).
 - A device trunk policy names that has no slot: **pending grant**, reported,
   not a failure (an error under `--strict`).
-- `current` or `inbox` differs from trunk's while trunk had a key, and trunk's
-  current key had no pending revocation: **error**.
+- Same `current` as trunk: `inbox` and `inbox_sealed` must equal trunk's, and
+  every slot of trunk's current key must be present and identical
+  (`slot.removed`): slots are append-only until a rotation. **errors**.
+- A different `current`: a rotation, always in the banner (`key.rotated`,
+  info, never raised by `--strict`). It is acceptable only if trunk's current
+  key had a pending revocation; trunk's current key is kept as a retired
+  record (successor, reason, sealed, trunk's `created` and `inbox_sealed`)
+  whose successors reach the new current key; the new key's slots are only
+  for devices trunk policy grants, each `to` that device's key hash; it has an
+  inbox; and every value trunk has is still present with trunk's `set` time.
+  Otherwise **error** (`key.changed`).
+- `current` is a key trunk has retired: if trunk's tip is an ancestor of HEAD
+  it is a rollback, **error**; otherwise the branch is behind and its keys
+  file must be unchanged since the merge base (**error** if changed, **error**
+  `key.unverified` if the merge base cannot be computed); unchanged is
+  `key.behind-trunk`, info.
+- Every retired record trunk has is present and identical: **error**
+  (`key.retired-changed`) otherwise.
+- A keys file only in the working tree: `key.new`, banner. A keys file trunk
+  has that is gone while the scope exists, or that stays while its package or
+  environment was removed: **error** (`key.removed`); removed together with
+  its scope: `scope.removed`, banner. A keys or secrets file that belongs to
+  no working-tree scope: **error** (`store.orphan`).
 - A slot whose age file does not parse or has a recipient-stanza count other
   than one: **error**. `require_pq` scopes: a slot whose stanza type is not the
-  hybrid type, or a named device whose public key is not hybrid: **error**.
-- A drop in an environment where drops are off: **error**. Any other drop:
-  listed by name, not a failure.
+  hybrid type, a named device whose public key is not hybrid, or an inbox key
+  that is not hybrid: **error**.
+- A value under an older key than trunk's value for the same name: **error**
+  (`secret.rolled-back`). Under the same key with an earlier `set`: warning,
+  banner (`secret.older-than-trunk`). Under a retired key: warning, banner
+  (`secret.stale-key`, or `secret.stale-after-retirement` when set after the
+  retirement).
+- A drop in an environment where drops are off (in trunk's policy or the
+  working tree's): **error**. Any other drop: listed in the banner, not a
+  failure.
 
 The remaining rules (graph, declared-versus-stored, reader coverage of
 referenced scopes, debt) are in the design under CI.
