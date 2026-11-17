@@ -10,6 +10,8 @@ deviate from this file, write the deviation and the reason in
 
 - Go 1.25. Not installed globally: run everything as
   `nix shell nixpkgs#go -c go ...` (add `nixpkgs#git` etc. as needed).
+- `flake.nix` at the repo root has a dev shell (`nix develop`: go, git, age,
+  sops) and a package `carbon` built with `CGO_ENABLED=0`.
 - Module path `github.com/taylor1791/phosphorus`. Binary `carbon` at
   `cmd/carbon`.
 - Allowed dependencies: `filippo.io/age` (v1.3.2 or later; hybrid keys need
@@ -154,8 +156,11 @@ sealed = "carbon1:..."
 ```
 
 A retired key keeps no slots and no `inbox`; it may keep `inbox_sealed` so
-that drops written to its inbox on older branches still open. `reason` is `removed <who>`
-(comma-separated when several) for a removal, or free text otherwise.
+that drops written to its inbox on older branches still open. `reason` is
+what `apply` rotated for: `removed <who>` for a removal, `rekeyed <device>`
+for a device whose public key changed, or both (`removed sam, rekeyed
+ada/laptop`), each list comma-separated when several; any other reason is
+free text.
 
 ## Encodings
 
@@ -293,15 +298,17 @@ Two documented exceptions read policy from the working tree:
    policy from the working tree always. `check` reports this as a warning.
 
 **Readers check the keys file against trunk.** After opening a scope, every
-command that reads or seals (`get`, `run`, `export`, `set`, `apply`) compares
-the working tree's keys file with trunk's for that scope, when trunk is a ref
-and has one (`scope.Opened.VerifyTrunk`):
+command that reads or seals (`get`, `run`, `export`, `set`, `edit`, `apply`,
+`rename`) compares the working tree's keys file with trunk's for that scope,
+when trunk is a ref and has one (`scope.Opened.VerifyTrunk`):
 
 - same `current` id: the working tree's `inbox` and `inbox_sealed` for it must
   equal trunk's;
 - the working tree's current key is a key trunk has retired (the branch is
-  behind): accepted, and when trunk's record keeps `inbox_sealed` the opened
-  key must unseal it;
+  behind, or reverted a rotation): accepted for reading, and when trunk's
+  record keeps `inbox_sealed` the opened key must unseal it. `set` and `edit`
+  refuse to seal under it (exit 1): a value sealed under a retired key is
+  readable by whoever it was retired from. The fix is to merge trunk;
 - trunk's current key is a retired key in the working tree's chain that opened,
   and that key unseals trunk's `inbox_sealed` for that id to trunk's `inbox`
   (the branch rotated past trunk, by someone who held trunk's key): accepted;
@@ -322,7 +329,13 @@ the work tree, mode 0600):
 
 After the trunk check, on every reader path (`scope.Opened.CheckPin`):
 
-- no pin: pin the current key (trust on first use);
+- no pin: pin the current key (trust on first use), with one exception.
+  When trunk is a reviewed ref and has no keys file for the scope (the key
+  exists only on this branch), carbon cannot tell whether a reader created
+  it: the reader may read, nothing is pinned, and `set` and `edit` refuse to
+  seal (exit 1) until the reader has a pin for the key or the key is on
+  trunk. The reader who created it has a pin; anyone else gets one only with
+  `carbon trust`;
 - pinned id is the current id: the fingerprints must match;
 - pinned id is a retired key that opened through the chain: its fingerprint
   must match the pin, then the pin moves to the current key;
@@ -334,14 +347,19 @@ After the trunk check, on every reader path (`scope.Opened.CheckPin`):
   keys and the last commit to the keys file, asks for confirmation, and
   re-pins.
 
-A key the caller creates (`set`) or rotates (`apply`, after saving) is pinned
-by the caller. `rename` moves pins to the new scope name. A corrupt pins file
-is an error that names the file; deleting it re-pins on next use.
+A key the caller creates (`set`, `apply`) or rotates (`apply`, after saving)
+is pinned by the caller. `rename` moves pins to the new scope name. A corrupt
+pins file is an error that names the file; deleting it re-pins on next use.
+Pins are per clone and per reader identity; what they do not protect is in
+`docs/deviations.md` under Limits.
 
 The drop path of `set` also refuses when the working tree lists trunk's
 current key as retired (the local trunk ref is behind: `git fetch`).
 
-Everything else (`who`, `access`, `status`, `run`'s environment, the graph
+`status` reads trunk's keys files and runs `check`'s key rules to list the
+scopes a reader would refuse; for a scope whose key id changed since the
+caller pinned it, it unwraps the key to run the pin check. Everything else
+(`who`, `access`, the rest of `status`, `run`'s environment, the graph
 checks) reads the working tree.
 
 ## Scope lifecycle
@@ -353,15 +371,16 @@ checks) reads the working tree.
   readers who can. carbon generates the key and inbox pair and wraps the key to
   every device that policy names. carbon cannot prove who generated a
   scope's first key: a new keys file in a pull request is a trusted act to
-  review, like a drop, and `check` lists new scope keys.
+  review, like a drop, and `check` lists it (`key.new`).
 - **Grant.** `apply`, run by a reader, adds a slot for each device trunk policy
   names that has none.
 - **Removal.** When the current key has a slot for a device trunk policy no
   longer names, or a slot whose `to` is not the hash of the device's
-  current policy key (re-keyed device), `apply` rotates: new key and inbox pair, slots for the readers
-  that remain, every value re-sealed under the new key **keeping its `set`
-  time**, the old key retired and sealed under the new one with
-  `reason = "removed <who>"`.
+  current policy key (re-keyed device), `apply` rotates: new key and inbox
+  pair, slots for the readers that remain, every value under the current key
+  re-sealed under the new key **keeping its `set` time**, the old key retired
+  and sealed under the new one with a reason naming the removals and re-keys
+  (`removed sam`, `rekeyed ada/laptop`, `removed sam, rekeyed ada/laptop`).
 - **Removed readers cannot write.** `set` refuses (exit 3) when the policy in
   effect no longer names the caller's device for the scope, even while its
   slot still opens the key before the rotation.
@@ -375,13 +394,17 @@ checks) reads the working tree.
   opened retired key. A retired `inbox_sealed` that fails to open is tampering,
   and drops under it report it. A value under a retired key proves only that
   its writer held that key, which a removed reader still may: `ls` marks it
-  "stale: retired key, author unproven", and `apply` lists such values
-  (`scope.StaleEntries`, `RefreshDetailed`) for confirmation before re-sealing
-  them under the current key. A drop that does not open never blocks
+  "stale: retired key, author unproven", `status` lists it under
+  "Unproven", and `apply` lists such values (`scope.StaleEntries`) and leaves
+  them as they are. Only `apply --reseal-unproven` re-seals them under the
+  current key, which vouches for them. A drop that does not open never blocks
   rotation or refresh: it is left as it is and reported.
-- **Rotation debt.** A secret owes a rotation when its `set` time is earlier
-  than the `retired` time of a key whose reason is a removal, or when it is
-  older than its `rotate_after`. Debt clears when a new value is set.
+- **Rotation debt.** A secret owes a rotation when its `set` time is at or
+  before (`set <= retired`; both are whole seconds) the `retired` time of a
+  key whose reason names a removal or a re-key, in any form `apply` writes
+  (`audit.Exposed`), or when it is older than its `rotate_after`. Retired
+  records are read from trunk and the working tree together, trunk's record
+  winning. Debt clears when a new value is set.
 - **Conflicts.** If a keys or secrets file contains git conflict markers,
   every command stops with an error that names the file and the fix.
 
@@ -391,7 +414,9 @@ checks) reads the working tree.
 reader from one forged with public keys only. It enforces every structural
 rule a legitimate `apply` commit satisfies, and lists every key change in a
 review banner (below). A passing check on a change to keys files is not "safe
-to merge without review": its author must be a current reader.
+to merge without review": its author must be a current reader. No commit
+that changes a keys file, `apply`'s included, is exempt from review. What
+this leaves open is in `docs/deviations.md` under Limits.
 
 Trunk: as chosen in the Trunk section. With no trunk ref at all (no remote
 refs, no override) `check` fails unless `--bootstrap` is given.
@@ -412,12 +437,20 @@ environments. For each scope it compares the working tree with trunk:
   changed, a pending revocation (`slot.rekeyed`, warning).
 - A device trunk policy names that has no slot: **pending grant**, reported,
   not a failure (an error under `--strict`).
+- When trunk is a reviewed ref and the scope has a key, what the working
+  tree's policy changes relative to trunk's: a device it adds is
+  `policy.grant-proposed`, a device it removes or gives a new key is
+  `policy.revoke-proposed`. Both are info, never raised by `--strict`, so a
+  `request` or `remove` pull request shows the grant or rotation it leads
+  to. Policy on a branch grants nothing until it is on trunk.
 - Same `current` as trunk: `inbox` and `inbox_sealed` must equal trunk's, and
   every slot of trunk's current key must be present and identical
   (`slot.removed`): slots are append-only until a rotation. **errors**.
 - A different `current`: a rotation, always in the banner (`key.rotated`,
   info, never raised by `--strict`). It is acceptable only if trunk's current
-  key had a pending revocation; trunk's current key is kept as a retired
+  key had a pending revocation (a slot for a device trunk policy no longer
+  names, or a slot whose `to` no longer matches its device's trunk policy
+  key: a re-keyed device); trunk's current key is kept as a retired
   record (successor, reason, sealed, trunk's `created` and `inbox_sealed`)
   whose successors reach the new current key; the new key's slots are only
   for devices trunk policy grants, each `to` that device's key hash; it has an
@@ -449,19 +482,37 @@ environments. For each scope it compares the working tree with trunk:
   failure.
 
 The remaining rules (graph, declared-versus-stored, reader coverage of
-referenced scopes, debt) are in the design under CI.
+referenced scopes, debt) are in the design under CI, with these additions:
+
+- An `[env]` template that references `${env:CARBON_IDENTITY}` or
+  `${env:CARBON_IDENTITY_FILE}`: **error** (`graph.forbidden-env`); `run`
+  and `export` refuse it too.
+- A stored empty value counts as set (`secret.unset` does not fire), as it
+  does for `run` and `export`.
+- Rotation debt (`debt.removal`, `debt.rotate-after`) follows the rule in
+  Scope lifecycle.
 
 ## Command line conventions
 
 - Global flags, accepted before or after the subcommand and interleaved with
-  positionals: `--env <name>`, `--json`, `--yes`, `-C <dir>`, `--no-color`.
+  positionals: `--env <name>`, `--package <name>`, `--json`, `--yes`,
+  `-C <dir>`, `--no-color`, `--help`/`-h`, `--version`.
+- `carbon help` lists commands in groups (Daily use, Access, Inspection,
+  Setup; each command's `Group` field), and prints the global flags and the
+  exit-code table. `carbon help <command>` shows that command's own flags
+  apart from the global ones. An unknown command is a usage error that
+  suggests the nearest command name. `carbon version` and `--version` print
+  `cli.Version`: `1.0.0-dev` unless set with
+  `-ldflags "-X github.com/taylor1791/phosphorus/internal/cli.Version=..."`;
+  a `go install ...@vX` build reports its module version.
 - Environment resolution: `--env`, then `CARBON_ENV`, then `carbon env use`
   (stored in the worktree's git dir as `carbon-env`), then
   `default_environment`.
 - Package resolution: `--package <name>` or the nearest `carbon.toml` with a
   `name` at or above the current directory.
 - Human output on stdout, diagnostics on stderr. With `--json`, stdout is one
-  JSON document and an error is `{"error": {"code", "message", "hint"}}`.
+  JSON document and an error is
+  `{"error": {"code", "message", "details", "hint"}}`.
 - Errors say what happened, why, and the next command (see the design's
   example). An error type carries a code, a message, detail lines and a hint.
 - Exit codes: 0 success; 1 unexpected error; 2 usage; 3 no access to a scope;
@@ -475,6 +526,10 @@ referenced scopes, debt) are in the design under CI.
 - `set` reads the value from a hidden prompt on a terminal, otherwise from
   stdin (one trailing newline is stripped). Never from an argument. An empty
   value is refused unless `--allow-empty` is given.
+- `edit --allow-empty` means the same. Without it, emptying a set value saves
+  nothing and names the flag, and an uncommented `name = ""` for an unset
+  secret is ignored; with it, both store the empty value. `run`, `export`
+  and `check` treat a stored empty value as set.
 - `export` writes mode 0600 and refuses a path git does not ignore; `-` means
   stdout. Formats: `dotenv`, `json`.
 - `apply` writes its changes and commits exactly the files it changed, with a
@@ -485,6 +540,10 @@ referenced scopes, debt) are in the design under CI.
 ```
 cmd/carbon/            main, nothing else
 internal/cli/          one file per command; each registers itself in init()
+internal/audit/        check, status and debt rules (no identity needed)
+internal/pins/         the per-clone pins file
+internal/resolve/      [env] template resolution for run and export
+internal/tomledit/     line-preserving edits to people-written TOML
 internal/seal/         sealed blobs
 internal/agewrap/      slots, drops, recipients, identities, fingerprints
 internal/store/        secrets and keys files: parse, deterministic write
@@ -499,8 +558,9 @@ tools/decrypt.py       reference decryptor
 migrate/               carbon-migrate: its own Go module, uses only the CLI
 ```
 
-Each command lives in its own file and registers itself, so parallel work adds
-files and does not edit a shared list.
+Each command lives in its own file and registers itself, with a `Group` that
+places it in `carbon help`, so parallel work adds files and does not edit a
+shared list.
 
 ## Tests
 
