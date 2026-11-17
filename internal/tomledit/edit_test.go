@@ -302,6 +302,46 @@ func TestReaders(t *testing.T) {
 	}
 }
 
+func TestCRLFIsPreserved(t *testing.T) {
+	d := mustParse(t, "[access]\r\nprod = [\r\n  \"a\",\r\n  \"b\"\r\n]\r\n")
+	if _, err := d.ArrayAdd(p("access.prod"), "sam"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetKey(p("access"), "dev", []string{"x"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetKey(p("secrets"), "k", "v"); err != nil {
+		t.Fatal(err)
+	}
+	want := "[access]\r\nprod = [\r\n  \"a\",\r\n  \"b\",\r\n  \"sam\"\r\n]\r\ndev = [\"x\"]\r\n\r\n[secrets]\r\nk = \"v\"\r\n"
+	if got := string(d.Bytes()); got != want {
+		t.Fatalf("got\n%q\nwant\n%q", got, want)
+	}
+	if strings.Contains(strings.ReplaceAll(want, "\r\n", ""), "\n") {
+		t.Fatal("bare LF")
+	}
+	d = mustParse(t, "[access]\r\nprod = [\r\n  \"a\",\r\n  \"sam\",\r\n]\r\n")
+	if _, err := d.ArrayRemove(p("access.prod"), "sam"); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(d.Bytes()); got != "[access]\r\nprod = [\r\n  \"a\",\r\n]\r\n" {
+		t.Fatalf("%q", got)
+	}
+}
+
+// Removing every occurrence is one operation: if one occurrence cannot be
+// removed, none is.
+func TestArrayRemoveIsAllOrNothing(t *testing.T) {
+	in := "[access]\nprod = [\"\"\"sam\"\"\", 'sam', \"s\\u0061m\"]\n"
+	d := mustParse(t, in)
+	if _, err := d.ArrayRemove(p("access.prod"), "sam"); err == nil {
+		t.Fatal("removed a multi-line string element")
+	}
+	if got := string(d.Bytes()); got != in {
+		t.Fatalf("half-edited:\n%q", got)
+	}
+}
+
 func TestParseRejectsInvalid(t *testing.T) {
 	if _, err := Parse("bad.toml", []byte("a = [")); err == nil {
 		t.Fatal("parsed invalid TOML")

@@ -395,9 +395,9 @@ func (d *Doc) ArrayAdd(path []string, s string) (bool, error) {
 			}
 			line := indent + Quote(s)
 			if trailingComma {
-				next = splice(src, insertAt, insertAt, line+",\n")
+				next = splice(src, insertAt, insertAt, line+","+d.nl())
 			} else {
-				next = splice(src, insertAt, insertAt, line+"\n")
+				next = splice(src, insertAt, insertAt, line+d.nl())
 				next = splice(next, last.end, last.end, ",")
 			}
 		} else {
@@ -434,12 +434,34 @@ func (d *Doc) ArrayRemove(path []string, s string) (bool, error) {
 	if count == 0 {
 		return false, nil
 	}
-	for ; count > 0; count-- {
-		if err := d.removeOne(path, s, manual); err != nil {
-			return false, err
+	err := d.atomically(func() error {
+		for ; count > 0; count-- {
+			if err := d.removeOne(path, s, manual); err != nil {
+				return err
+			}
 		}
+		return nil
+	})
+	return err == nil, err
+}
+
+// atomically runs fn and restores the document if it fails, so an
+// operation made of several edits is all or nothing.
+func (d *Doc) atomically(fn func() error) error {
+	src, idx := d.src, d.idx
+	if err := fn(); err != nil {
+		d.src, d.idx = src, idx
+		return err
 	}
-	return true, nil
+	return nil
+}
+
+// nl is the document's line ending: CRLF if it uses any, else LF.
+func (d *Doc) nl() string {
+	if bytes.Contains(d.src, []byte("\r\n")) {
+		return "\r\n"
+	}
+	return "\n"
 }
 
 func (d *Doc) removeOne(path []string, s, manual string) error {
@@ -561,14 +583,14 @@ func (d *Doc) EnsureTable(table []string) error {
 	for i, k := range table {
 		keys[i] = Key(k)
 	}
-	header := "[" + strings.Join(keys, ".") + "]\n"
+	header := "[" + strings.Join(keys, ".") + "]" + d.nl()
 	src := d.src
 	prefix := ""
 	if len(src) > 0 && src[len(src)-1] != '\n' {
-		prefix = "\n"
+		prefix = d.nl()
 	}
 	if len(src) > 0 {
-		prefix += "\n"
+		prefix += d.nl()
 	}
 	next := append(append([]byte(nil), src...), prefix+header...)
 	return d.commit(next, func(m map[string]any) bool { return set(m, table, map[string]any{}) },
@@ -593,6 +615,10 @@ func (d *Doc) SetKey(table []string, key string, value any) error {
 	if d.Has(full...) {
 		return d.refuse(describe(full)+" already exists", manual)
 	}
+	return d.atomically(func() error { return d.setKey(table, full, line, manual, value) })
+}
+
+func (d *Doc) setKey(table, full []string, line, manual string, value any) error {
 	if err := d.EnsureTable(table); err != nil {
 		var e *Error
 		if errors.As(err, &e) {
@@ -619,9 +645,9 @@ func (d *Doc) SetKey(table []string, key string, value any) error {
 	src := d.src
 	prefix := ""
 	if at > 0 && src[at-1] != '\n' {
-		prefix = "\n"
+		prefix = d.nl()
 	}
-	next := splice(src, at, at, prefix+line+"\n")
+	next := splice(src, at, at, prefix+line+d.nl())
 	return d.commit(next, func(m map[string]any) bool { return set(m, full, semanticValue(value)) }, manual)
 }
 
