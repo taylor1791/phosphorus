@@ -43,6 +43,10 @@ type Command struct {
 	Run func(c *Context) error
 	// Hidden commands are left out of `carbon help`.
 	Hidden bool
+	// StopAtPositional ends flag parsing at the first positional argument
+	// (as well as at "--"), for commands such as run whose positionals are
+	// another program's command line.
+	StopAtPositional bool
 }
 
 var registry = map[string]*Command{}
@@ -170,7 +174,11 @@ func (c *Context) dispatch(args []string) error {
 	if cmd != nil && cmd.Flags != nil {
 		cmd.Flags(fs)
 	}
-	pos, dash, err := parseInterspersed(fs, rest)
+	parse := parseInterspersed
+	if cmd != nil && cmd.StopAtPositional {
+		parse = parseUntilPositional
+	}
+	pos, dash, err := parse(fs, rest)
 	if err != nil {
 		e := Errorf(ExitUsage, "%s", err)
 		if cmd != nil {

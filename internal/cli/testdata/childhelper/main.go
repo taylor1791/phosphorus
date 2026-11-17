@@ -3,6 +3,7 @@
 //
 //	childhelper env [code]   print {"args": [...], "env": [...]} as JSON, exit code
 //	childhelper exit         exit 0 at once (for timing)
+//	childhelper pwd          print the working directory
 //	childhelper edit <file>  act as an editor, driven by HELPER_EDIT_* variables:
 //	    HELPER_EDIT_LOG     append "path mode dirmode identity-vars=<bool>" to this file
 //	    HELPER_EDIT_SET     JSON {"name": "value"}: replace or uncomment that line
@@ -26,6 +27,10 @@ func main() {
 	}
 	switch os.Args[1] {
 	case "exit":
+		os.Exit(0)
+	case "pwd":
+		wd, _ := os.Getwd()
+		fmt.Println(wd)
 		os.Exit(0)
 	case "env":
 		env := os.Environ()

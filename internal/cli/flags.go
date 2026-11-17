@@ -36,6 +36,21 @@ func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, int, error) {
 	}
 }
 
+// parseUntilPositional parses flags up to the first positional or "--";
+// everything from there on is positional, flags included. The dash index
+// is 0 when "--" ended the flags, else -1.
+func parseUntilPositional(fs *flag.FlagSet, args []string) ([]string, int, error) {
+	if err := fs.Parse(args); err != nil {
+		return nil, -1, err
+	}
+	rest := fs.Args()
+	consumed := len(args) - len(rest)
+	if consumed > 0 && args[consumed-1] == "--" && !isFlagValue(fs, args, consumed-1) {
+		return rest, 0, nil
+	}
+	return rest, -1, nil
+}
+
 // isFlagValue reports whether args[i] is the value of a preceding
 // non-boolean flag (as in "--env --").
 func isFlagValue(fs *flag.FlagSet, args []string, i int) bool {

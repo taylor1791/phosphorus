@@ -16,17 +16,22 @@ import (
 func init() {
 	Register(&Command{
 		Name:    "run",
-		Usage:   "[--env <env>] [--package <name>] -- <command> [args...]",
+		Usage:   "[--env <env>] [--package <name>] [--] <command> [args...]",
 		Summary: "Run a command with the package's environment",
 		Help: `run resolves the package's [env] table, decrypting in memory, and replaces
 itself with the command (execve): there is no shell in between, signals go
 straight to the command, and the exit code is the command's. The command
 gets carbon's own environment plus the resolved variables, which win on a
-clash. Names are case-sensitive. Nothing is written to disk.
+clash. Names are case-sensitive. Nothing is written to disk. With -C the
+command starts in that directory.
 
-Put the command after "--" so that its flags are not read as carbon's.`,
+carbon's own flags go before the command: everything from the first
+argument that is not a flag on belongs to the command, so
+"carbon run make -C build" passes -C build to make. "--" also ends
+carbon's flags.`,
 		MinArgs: 1, MaxArgs: -1,
-		Run: runRun,
+		StopAtPositional: true,
+		Run:              runRun,
 	})
 }
 
@@ -61,6 +66,11 @@ func runRun(c *Context) error {
 	envv := mergeEnviron(gitx.ScrubbedEnviron(c.environ()), res)
 	res.Zero()
 
+	// The command starts where carbon was asked to work (-C), and a
+	// relative command path is found from there.
+	if err := os.Chdir(c.Cwd); err != nil {
+		return Errorf(ExitError, "cannot change to %s: %v", c.Cwd, err)
+	}
 	path, err := findExecutable(argv[0], lookupIn(envv, "PATH"))
 	if err != nil {
 		return err
@@ -91,9 +101,11 @@ func mergeEnviron(parent []string, res *resolve.Result) []string {
 	return out
 }
 
+// lookupIn returns the first entry for name, which is the one getenv in
+// the command (libc) will see.
 func lookupIn(envv []string, name string) string {
-	for i := len(envv) - 1; i >= 0; i-- {
-		if k, v, ok := strings.Cut(envv[i], "="); ok && k == name {
+	for _, kv := range envv {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == name {
 			return v
 		}
 	}
@@ -101,13 +113,18 @@ func lookupIn(envv []string, name string) string {
 }
 
 // findExecutable resolves the command the way execvp would, using the PATH
-// the command will see. Relative PATH entries are skipped, so a command is
-// never picked up from the current directory by accident.
+// the command will see and the first match in PATH order. Relative (and
+// empty) PATH entries are skipped, so a command is never picked up from the
+// current directory by accident; the error says so when that is the only
+// place it is.
 func findExecutable(name, pathEnv string) (string, error) {
+	hint := "Check the spelling, install it, or give its path (for example ./" + name + ")."
+	if strings.Contains(name, "/") {
+		hint = "Check the path, and that the file is executable."
+	}
 	notFound := func(details ...string) error {
 		return &Error{Code: ExitError, Message: fmt.Sprintf("command not found: %s", name),
-			Details: details,
-			Hint:    "Check the spelling, install it, or give its path (for example ./" + name + ")."}
+			Details: details, Hint: hint}
 	}
 	if strings.Contains(name, "/") {
 		if err := checkExecutable(name); err != nil {
@@ -118,14 +135,29 @@ func findExecutable(name, pathEnv string) (string, error) {
 	if name == "" {
 		return "", notFound()
 	}
+	skipped, found := "", false
 	for _, dir := range filepath.SplitList(pathEnv) {
 		if dir == "" || !filepath.IsAbs(dir) {
+			d := dir
+			if d == "" {
+				d = "."
+			}
+			if !found && checkExecutable(filepath.Join(d, name)) == nil {
+				skipped, found = dir, true
+			}
 			continue
 		}
 		p := filepath.Join(dir, name)
 		if checkExecutable(p) == nil {
 			return p, nil
 		}
+	}
+	if found {
+		hint = "Give its path instead, for example:   " + filepath.Join(skipped, name)
+		if skipped == "" || skipped == "." {
+			hint = "Give its path instead:   ./" + name
+		}
+		return "", notFound(fmt.Sprintf("It is only in the relative PATH entry %q, which carbon skips so that a command is never taken from the current directory by accident.", skipped))
 	}
 	if pathEnv == "" {
 		return "", notFound("PATH is empty.")
