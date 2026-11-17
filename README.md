@@ -57,7 +57,6 @@ $ git init -q -b main shop && cd shop
 $ carbon init --environments dev,prod
 Created carbon.toml
 Created .carbon/teams.toml
-Created .gitattributes entry for keys files
 
 Next: carbon join, then carbon init in each package that has secrets.
 
@@ -66,7 +65,7 @@ notice: this repository has no trunk yet (no remote and no carbon.trunk); readin
 Created your identity   ~/.config/carbon/identity   (device: laptop)
 Added your public key   .carbon/people/ada.toml
 Joined team             @engineering   (first person in this workspace)
-Fingerprint             use-mosquito-poverty-else
+Fingerprint             bike-three-dream-cancel
 
 You read every environment those teams are granted, because carbon is not on trunk yet.
 Next: carbon init in each package directory, declare its secrets, then carbon set <name>.
@@ -108,8 +107,8 @@ $ carbon ls
 api/dev
 
 NAME          STATE    SET                    KEY
-db_password   sealed   2026-11-17T04:37:36Z   kpvctg
-session_key   sealed   2026-11-17T04:37:36Z   kpvctg
+db_password   sealed   2026-11-17T05:09:26Z   k59thq
+session_key   sealed   2026-11-17T05:09:26Z   k59thq
 
 $ carbon run -- printenv DATABASE_URL
 postgres://api:correct-horse@localhost:5432/api
@@ -131,14 +130,17 @@ $ printf %s "prod-horse" | carbon set db_password --env prod
 $ carbon set session_key --generate --env prod
 ```
 
-Commit, and tell this clone which branch is trunk (with a remote, the
-remote's default branch is used without this):
+Commit, and tell this clone which branch is trunk. `git config` is local to
+this clone and is never committed; it is needed here only because the
+repository has no remote yet. Once you push and others clone, carbon uses
+the remote's default branch (`refs/remotes/origin/main`), and you should
+remove the setting: `git config --unset carbon.trunk`.
 
 ```console
 $ cd ../.. && git add -A && git commit -qm "Adopt carbon"
 $ git config carbon.trunk main
 $ carbon check
-Compared with trunk: main (from git config carbon.trunk)
+Compared with trunk: refs/heads/main at 300eac5 (from git config carbon.trunk)
 
 check passed: 0 errors, 0 warnings.
 
@@ -161,9 +163,10 @@ public key per device, written by `carbon join`; teams are
 `.carbon/teams.toml`.
 
 **Trunk** is the branch whose files have been reviewed: the remote default
-branch, or what `CARBON_TRUNK` or `git config carbon.trunk` name. Carbon
-reads policy and public keys from trunk, never from your working tree, when
-it grants access. A branch cannot grant itself anything.
+branch, or what `CARBON_TRUNK` or `git config carbon.trunk` name, always
+resolved to a branch (never a tag). Carbon reads policy and public keys from
+trunk, never from your working tree, when it grants access. A branch cannot
+grant itself anything, provided nobody can push to trunk without review.
 
 Access changes in two steps:
 
@@ -211,7 +214,11 @@ explains each. Every command takes `--json`.
 ## CI and deploys
 
 Run `carbon check` on every pull request and push, with trunk fetched and
-named in `CARBON_TRUNK`. Deploy jobs use a machine identity
+named in full: `CARBON_TRUNK=refs/remotes/origin/main`. Forbid direct pushes
+to trunk (on trunk, `check` compares trunk with itself), and protect
+`.github/workflows/` and `CODEOWNERS`: the workflow that runs `check` comes
+from the pull request being checked. Deploy secrets belong in a GitHub
+Environment restricted to the default branch. Deploy jobs use a machine identity
 (`carbon join --machine <name>`), supplied as `CARBON_IDENTITY`, and run
 `carbon run --env prod -- ./deploy`. [docs/ci.md](docs/ci.md) has a GitHub
 Actions example and explains the review banner, `--strict` and
@@ -254,6 +261,33 @@ What carbon does not protect against, stated plainly:
 
 [docs/threat-model.md](docs/threat-model.md) has the full adversary table
 and limits.
+
+## Known issues
+
+These came out of the final review and are not fully closed:
+
+- **CI protection is outside carbon.** `check` is only a gate if trunk
+  cannot be pushed to directly, the workflow that runs it cannot be edited
+  by the pull request it judges, and deploy secrets are released only to
+  the default branch (a GitHub Environment with a deployment branch
+  policy). carbon cannot verify any of these; [docs/ci.md](docs/ci.md)
+  says how to set them up.
+- **A rename and a directory move in one change is not recognised.**
+  `check`, `apply` and readers accept a `carbon rename` only while the
+  package stays in its directory; move it in a separate pull request.
+  For a renamed scope `check` compares structure only (key ids, slot
+  devices and their recorded keys, names and set times), because every
+  ciphertext changes; the banner asks the reviewer to confirm the author.
+- **Set times are chosen by their writer.** `check` rejects a re-dated line
+  (`secret.redated`) and any set time more than ten minutes in the future
+  (`secret.future`), and debt uses trunk's set time for an unchanged line,
+  but a reader can still seal a new value with a back-dated set time.
+- **A symbolic link as the root `carbon.toml`** stops every command,
+  `check` included, with an error rather than a finding; links in package
+  files and `.carbon` directories are findings.
+- **Trunk names that are both a local and a remote-tracking branch** (a
+  local branch called `origin/main`) are refused until you name the full
+  ref.
 
 ## Recovering a secret without carbon
 
@@ -298,10 +332,14 @@ list on a branch and ask a reader to run `apply` there. So `apply` reads
 policy and public keys from trunk, `check` compares every keys file with
 trunk's, and readers refuse a key that does not descend from trunk's.
 
-Trunk is chosen by the clone, never by a commit: `CARBON_TRUNK`, else
-`git config carbon.trunk`, else the remote default branch. In CI, set
-`CARBON_TRUNK` and fetch that ref; if carbon cannot find trunk it stops
-rather than guess. A repository with no protected branch can set
+Trunk is chosen by the clone, not by a file carbon reads from the
+repository: `CARBON_TRUNK`, else `git config carbon.trunk`, else the remote
+default branch, always resolved to a branch ref, never a tag. In CI, set
+`CARBON_TRUNK=refs/remotes/origin/main` and fetch that ref; if carbon cannot
+find trunk it stops rather than guess. In CI the variable is set by the
+workflow file, which the pull request under test can change: protect
+`.github/workflows/` with CODEOWNERS or run `check` as a required workflow
+from a repository ruleset (see docs/ci.md). A repository with no protected branch can set
 `carbon.trunk` to `worktree`, and `check` warns that nothing is then
 reviewed.
 

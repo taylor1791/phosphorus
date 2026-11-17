@@ -31,7 +31,11 @@ webhook_secret = { key = "k3f9q2", set = 2026-11-10T08:12:40Z, drop = "age1:…"
 ```
 
 `key` is the id of the scope key the value is sealed under, or whose inbox the
-drop was written to. `set` is authenticated: editing it breaks decryption.
+drop was written to. For a `value`, `set` is part of the associated data:
+editing it breaks decryption. For a `drop`, the set time is inside the
+encrypted payload and a reader compares it with the line after decrypting;
+it is not authenticated as associated data, and whoever wrote the drop
+chose it.
 
 `<package dir>/.carbon/<env>.keys.toml`:
 
@@ -54,7 +58,8 @@ retired = 2026-11-02T17:04:11Z
 reason = "removed sam"
 successor = "k3f9q2"
 sealed = "carbon1:…"
-inbox_sealed = "carbon1:…"   # optional; lets drops written before the rotation open
+inbox_sealed = "carbon1:…"   # optional: k1a8c0's own inbox identity, still sealed under k1a8c0,
+                             # so drops written to its inbox open once the chain opens k1a8c0
 ```
 
 ## Sealed blob: `carbon1:<base64(nonce ‖ ciphertext)>`
@@ -139,7 +144,8 @@ python3 tools/decrypt.py unwrap "age1:…the drop field…" | age -d -i inbox.tx
 
 # 4. A value under a retired key k_old: unseal k_old with its successor first.
 OLDKEY=$(python3 tools/decrypt.py open "$KEY" "carbon1:…sealed of k_old…" \
-  carbon/v1/retired checkout prod k_old "$KID" <retired time> "<reason>" | base64 -w0)
+  carbon/v1/retired checkout prod k_old "$KID" <retired time> "<reason>" | base64 | tr -d '\n=')
+# (base64 without line breaks or padding, which is what decrypt.py expects as a key)
 python3 tools/decrypt.py open "$OLDKEY" "carbon1:…" carbon/v1/value checkout prod <name> k_old <set time>
 ```
 
@@ -150,7 +156,8 @@ time.
 
 - `testdata/vectors/sealed.json`: fixed key, nonce, associated data,
   plaintext and expected blob for each sealed-blob kind. Regenerate with
-  `go run ./tools/genvectors`, which does not use carbon's own code. Check with
+  `go run ./tools/genvectors > testdata/vectors/sealed.json`, which does not
+  use carbon's own code. Check with
   `python3 tools/decrypt.py vectors testdata/vectors/sealed.json`; the Go test
   is `internal/seal` `TestVectors`.
 - `testdata/vectors/scope/`: a complete `checkout/prod` scope with an X25519

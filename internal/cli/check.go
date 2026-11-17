@@ -24,33 +24,39 @@ declared versus stored secrets (every workspace environment counts), slots and
 keys compared with trunk, reader coverage of referenced scopes, rotation debt,
 and policy hygiene. It never loads an identity.
 
-It exits 4 when there are errors, and 0 otherwise. Pending grants (policy
-names a device that has no slot yet) and drops are reported without failing;
-pending revocations and other warnings are reported too.
+Exit codes: 0 passed; 4 check found errors; 1 check could not run (no
+trunk, or trunk without a carbon workspace and no --bootstrap); 2 bad
+flags. Warnings, pending grants (policy names a device that has no slot
+yet) and notes are reported without failing.
 
-  --strict         also fail on warnings, pending grants and pending revocations
+  --strict         every warning (pending revocations, rotation debt, values
+                   under retired keys, ...) and every pending grant fails;
+                   notes, including the review banner, never do
   --max-debt 14d   fail on rotation debt older than the limit (<n>d or <n>h)
   --unused         also list secrets that no [env] table references
-  --bootstrap      allow a check with no trunk at all (a brand-new repository)
+  --bootstrap      check the working tree against itself when trunk has no
+                   carbon workspace (a new repository, or the migration
+                   cutover); check never does this without it
 
 What check cannot prove: it opens nothing, so it cannot tell a rotation or a
 new scope key made by a reader from one forged by someone else. It enforces
 every structural rule a legitimate "carbon apply" commit satisfies, and it
-lists every key change (new key, rotation, new slot, removed scope), every
-drop and every value under a retired or older key in a banner at the top. A
+lists every key change (new key, rotation, new slot, rename, removed scope,
+changed device key, new device), every drop and every value under a retired or older key in a banner at the top. A
 passing check on a change to keys files is not "safe to merge without
 review": confirm its author is a current reader of the scope.
 
 Trunk is CARBON_TRUNK, else git config carbon.trunk, else the remote default
-branch; check says which it compared against. In CI, set CARBON_TRUNK and
-fetch that ref: with no trunk at all, check fails unless --bootstrap is given.
+branch, always resolved to a branch (refs/remotes/... or refs/heads/...),
+never a tag; check prints the ref and commit it compared against. In CI, set
+CARBON_TRUNK=refs/remotes/origin/main and fetch that ref.
 
 With --json, stdout is {"ok", "trunk", "counts", "findings", "rules"}.`,
 		Flags: func(fs *flag.FlagSet) {
-			fs.Bool("strict", false, "fail on warnings, pending grants and pending revocations too")
+			fs.Bool("strict", false, "fail on every warning and pending grant too (never on notes)")
 			fs.String("max-debt", "", "fail on rotation debt older than this (`duration`, e.g. 14d)")
 			fs.Bool("unused", false, "list secrets that no [env] table references")
-			fs.Bool("bootstrap", false, "allow checking with no trunk at all (a new repository with no remote and no carbon.trunk)")
+			fs.Bool("bootstrap", false, "check the working tree against itself when trunk has no carbon workspace")
 		},
 		Run: runCheck,
 	})
