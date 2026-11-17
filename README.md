@@ -14,10 +14,12 @@ The proof of concept this replaces is [carbon 0.0.3](https://github.com/taylor17
 
 ## Status
 
-**Pre-release. Carbon 1.0 has not been externally audited.** The format and
-the code have been reviewed only by the people who wrote them. Do not rely
-on it for secrets whose disclosure you could not survive until it has had
-an independent review.
+**Pre-release. Carbon 1.0 has not been audited by a person.** The code was
+written and adversarially reviewed by AI agents (Claude) working from the
+design; those reviews found and fixed real security bugs, which is a reason
+to expect more. No human has yet reviewed the cryptographic code or the
+format. Do not rely on it for secrets whose disclosure you could not
+survive until it has had an independent review.
 
 - Hardware and plugin identities (`age1yubikey1…`, `age1se1…`, TPM) are
   accepted through the age plugin protocol but are **untested**.
