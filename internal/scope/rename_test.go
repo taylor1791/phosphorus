@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/taylor1791/phosphorus/internal/agewrap"
+	"github.com/taylor1791/phosphorus/internal/store"
 )
 
 func TestRename(t *testing.T) {
@@ -98,5 +99,43 @@ func TestRename(t *testing.T) {
 	s2.Keys.Scope = "old/prod"
 	if _, err := s2.Open(lin.ids); err == nil {
 		t.Fatal("renamed slots open under the old name")
+	}
+}
+
+func TestVerifyTrunkAfterRename(t *testing.T) {
+	lin := newPerson(t, "lin/laptop", agewrap.KindHybrid)
+	o := mustCreate(t, t.TempDir(), "old", "prod", lin)
+	o.Seal("a", []byte("A"), t0)
+	trunk, err := store.ParseKeys("trunk", o.Keys.Marshal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Another key under the same old name and id: not trunk's.
+	other := mustCreate(t, t.TempDir(), "old", "prod", lin)
+	foreign, _ := store.ParseKeys("foreign", other.Keys.Marshal())
+	foreign.Keys = map[string]*store.Key{trunk.Current: foreign.CurrentKey()}
+	foreign.Current = trunk.Current
+
+	if err := o.Rename("new", devices(lin)); err != nil {
+		t.Fatal(err)
+	}
+	if err := o.VerifyTrunk(trunk); err != nil {
+		t.Fatalf("renamed scope vs trunk under the old name: %v", err)
+	}
+	if err := o.VerifyTrunk(foreign); !errors.Is(err, ErrNotFromTrunk) {
+		t.Fatalf("foreign key accepted: %v", err)
+	}
+	staging, _ := store.ParseKeys("x", trunk.Marshal())
+	staging.Scope = "old/staging"
+	if err := o.VerifyTrunk(staging); !errors.Is(err, ErrWrongScope) {
+		t.Fatalf("other environment: %v", err)
+	}
+
+	// The branch rotates after renaming: trunk's key is retired here.
+	if _, err := o.Rotate(devices(lin), "removed sam", t0.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := o.VerifyTrunk(trunk); err != nil {
+		t.Fatalf("rotated past trunk after rename: %v", err)
 	}
 }
