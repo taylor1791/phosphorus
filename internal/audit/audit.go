@@ -70,6 +70,8 @@ const (
 	RuleSecretRolledBack     = "secret.rolled-back"
 	RuleSecretOlderThanTrunk = "secret.older-than-trunk"
 	RuleSecretUnused         = "secret.unused"
+	RuleSecretRedated        = "secret.redated"
+	RuleSecretFuture         = "secret.future"
 
 	// Slots and keys, compared with trunk.
 	RuleSlotUnbacked          = "slot.unbacked"
@@ -145,6 +147,8 @@ var Rules = []RuleInfo{
 	{RuleSecretStaleAfter, Warning, "a value under a retired key claims a set time after that key was retired: suspect", true},
 	{RuleSecretRolledBack, Error, "a value is under an older key than trunk's value for the same name: replaced by someone holding a retired key", false},
 	{RuleSecretOlderThanTrunk, Warning, "a value under the same key as trunk's has an earlier set time: an older line restored", true},
+	{RuleSecretRedated, Error, "a value has trunk's ciphertext but a different set time: the line was re-dated (which hides rotation debt)", false},
+	{RuleSecretFuture, Error, "a stored entry claims a set time in the future (beyond a small clock-skew allowance)", false},
 	{RuleSecretUnused, Info, "a secret no [env] table references (only with --unused)", false},
 	{RuleSlotUnbacked, Error, "a slot for a device trunk policy does not name, not on trunk: a grant merged policy does not back", false},
 	{RuleSlotPendingRevocation, Warning, "a slot for a device trunk policy no longer names; `carbon apply` rotates the key", false},
@@ -268,6 +272,7 @@ func (s *State) Check(opts Options) *Report {
 	fs = append(fs, s.loadFindings...)
 	fs = append(fs, s.graphFindings(opts.Unused)...)
 	fs = append(fs, s.storedFindings()...)
+	fs = append(fs, s.futureFindings(opts.Now)...)
 	fs = append(fs, s.slotFindings()...)
 	fs = append(fs, s.coverageFindings()...)
 	fs = append(fs, s.debtFindings(opts.Now, opts.MaxDebt)...)

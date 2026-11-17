@@ -3,8 +3,10 @@ package cli_test
 // Regression tests for the final review's findings.
 
 import (
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/taylor1791/phosphorus/internal/clitest"
 )
@@ -85,4 +87,46 @@ func TestApplyLeavesDropsThatAreNotOnTrunk(t *testing.T) {
 	res = w.Lin.Must("apply", "--yes")
 	mustContain(t, "apply on trunk", res.Stdout, "promotes drop", "webhook_secret")
 	ci(t, w.Repo, 0).lacks(t, "drop.pending")
+}
+
+// setTime rewrites the set time of name in a secrets file, as anyone with
+// a text editor can.
+func setTime(t *testing.T, w *clitest.World, file, name, newSet string) {
+	t.Helper()
+	s := w.Read(file)
+	re := regexp.MustCompile(`(?m)^(` + name + ` = \{ key = "[^"]+", set = )[0-9TZ:-]+`)
+	if !re.MatchString(s) {
+		t.Fatalf("no line for %s in\n%s", name, s)
+	}
+	w.Write(file, re.ReplaceAllString(s, "${1}"+newSet))
+}
+
+// Finding 4: re-dating a line (same ciphertext, new set time) hid its
+// rotation debt and passed check silently.
+func TestRedatingCannotHideDebt(t *testing.T) {
+	w := clitest.Standard(t)
+	co := w.PkgDir
+	setAll(t, w)
+	w.Ada.Must("remove", "sam", "--yes")
+	w.Commit("remove sam")
+	w.Lin.Must("apply", "--yes")
+	ci(t, w.Repo, 0).has(t, "debt.removal", "checkout/dev stripe_api_key")
+
+	w.Branch("redate")
+	setTime(t, w, co+"/.carbon/dev.secrets.toml", "stripe_api_key", "2099-01-01T00:00:00Z")
+	setTime(t, w, co+"/.carbon/dev.secrets.toml", "session_key", time.Now().UTC().Add(time.Hour).Format("2006-01-02T15:04:05Z"))
+	w.Commit("innocent")
+	cj := ci(t, w.Repo, 4)
+	cj.has(t, "secret.redated", "error checkout/dev stripe_api_key", "error checkout/dev session_key")
+	cj.has(t, "secret.future", "error checkout/dev stripe_api_key", "error checkout/dev session_key")
+	cj.has(t, "debt.removal", "checkout/dev stripe_api_key", "checkout/dev session_key")
+	res := w.Lin.Must("status", "--all")
+	mustContain(t, "status", res.Stdout, "checkout/dev", "stripe_api_key")
+
+	// A future set time on a fresh line is an error too.
+	w.Checkout("main")
+	w.Branch("future")
+	w.Lin.In(co).Stdin("v").Must("set", "webhook_secret", "--env", "staging")
+	setTime(t, w, co+"/.carbon/staging.secrets.toml", "webhook_secret", "2099-01-01T00:00:00Z")
+	ci(t, w.Repo, 4).has(t, "secret.future", "checkout/staging webhook_secret")
 }

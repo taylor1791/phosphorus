@@ -116,6 +116,14 @@ func (s *State) Debts(now time.Time) []Debt {
 		ids := sortedKeys(retired)
 		for _, name := range sf.Secrets.Names() {
 			e := sf.Secrets.Entries[name]
+			// A line whose ciphertext is trunk's is trunk's value: its set
+			// time is trunk's, whatever this line claims (re-dating it must
+			// not hide debt).
+			if sf.TrunkSecrets != nil {
+				if te, ok := sf.TrunkSecrets.Entries[name]; ok && sameCiphertext(e, te) {
+					e.Set = te.Set
+				}
+			}
 			d := Debt{Scope: sf.Name(), Package: sf.Package.Name, Env: sf.Env, Secret: name, Set: e.Set}
 			var first *store.Key
 			firstID := ""

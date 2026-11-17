@@ -2,8 +2,10 @@ package audit
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/taylor1791/phosphorus/internal/scope"
+	"github.com/taylor1791/phosphorus/internal/store"
 )
 
 // storedFindings compares each scope's declarations with its secrets file.
@@ -112,6 +114,14 @@ func againstTrunk(sf *ScopeFiles, base Finding, ref string) []Finding {
 		f.Secret, f.File = name, sf.SecretFile
 		set := we.Set
 		f.Set = &set
+		if sameCiphertext(we, te) && !we.Set.Equal(te.Set) {
+			f.Severity, f.Rule = Error, RuleSecretRedated
+			f.Message = fmt.Sprintf("%s in %s has trunk's ciphertext but a different set time (%s here, %s on trunk): the line was re-dated, not set again. A re-dated value no longer opens, and its rotation debt is hidden.",
+				name, sf.Name(), we.Set.Format("2006-01-02T15:04:05Z"), te.Set.Format("2006-01-02T15:04:05Z"))
+			f.Hint = fmt.Sprintf("Restore trunk's line: git checkout %s -- %s", ref, sf.SecretFile)
+			out = append(out, f)
+			continue
+		}
 		if we.Key == te.Key {
 			if we.Set.Before(te.Set) {
 				f.Severity, f.Rule = Warning, RuleSecretOlderThanTrunk
@@ -141,4 +151,38 @@ func kindOf(drop bool) string {
 		return "drop"
 	}
 	return "value"
+}
+
+// sameCiphertext reports whether two entries carry the same sealed value
+// or drop.
+func sameCiphertext(a, b store.Entry) bool {
+	return a.Value == b.Value && a.Drop == b.Drop && (a.Value != "" || a.Drop != "")
+}
+
+// ClockSkew is how far in the future a set time may be before check calls
+// it an error (secret.future).
+const ClockSkew = 10 * time.Minute
+
+// futureFindings reports entries whose set time is in the future: set
+// times are chosen by their writer, and a future one hides rotation debt.
+func (s *State) futureFindings(now time.Time) []Finding {
+	var out []Finding
+	for _, sf := range s.Scopes {
+		if sf.BadSecrets {
+			continue
+		}
+		for _, name := range sf.Secrets.Names() {
+			e := sf.Secrets.Entries[name]
+			if !e.Set.After(now.Add(ClockSkew)) {
+				continue
+			}
+			set := e.Set
+			out = append(out, Finding{Severity: Error, Rule: RuleSecretFuture, Scope: sf.Name(), Package: sf.Package.Name, Env: sf.Env,
+				Secret: name, File: sf.SecretFile, Set: &set,
+				Message: fmt.Sprintf("The %s of %s in %s claims it was set %s, in the future. Set times are chosen by their writer; a future one hides rotation debt.",
+					kindOf(e.IsDrop()), name, sf.Name(), e.Set.Format("2006-01-02T15:04:05Z")),
+				Hint: fmt.Sprintf("Restore the line from trunk, or set the value again: carbon set %s --package %s --env %s", name, sf.Package.Name, sf.Env)})
+		}
+	}
+	return out
 }
