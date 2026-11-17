@@ -1,0 +1,6 @@
+/carbon
+/carbon-migrate
+/dist/
+*.test
+.direnv/
+result
