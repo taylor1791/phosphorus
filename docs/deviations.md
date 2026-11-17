@@ -74,3 +74,30 @@ Each entry says what differs from `docs/implementation.md` and why.
 13. **`DirSource.Find` skips** directories whose name starts with `.` and
     `node_modules` when looking for package files, in the working tree and at
     a ref alike.
+
+## carbon-migrate
+
+Where the design's migration table (design.md, "Migration from 0.0.3 and
+rollout") was not enough. Details are in `migrate/README.md`.
+
+1. **`{{pull.x}}` becomes the pull's reference, not `${x}`.** The table maps
+   `{{pull.x}}` to `${x}`, but in 1.0 `${x}` is this package's secret or var
+   and `[env]` entries cannot reference each other, so a derive gets the
+   pull's target: `{{pull.db_password}}` becomes `${db.password}`.
+2. **`registry_pattern` keeps 0.0.3's precedence**, which is not
+   first-match-wins: exactly one matching pattern wins, otherwise the single
+   variant without a pattern, and two matches is an error in 0.0.3 (so that
+   environment gets no value and the item is listed). Patterns are matched
+   against the old registry name, `""` for the default registry.
+3. **A push key with a `command` in any variant is a secret** in every
+   environment; its values come from the registries. A key whose variants are
+   all static values is a var.
+4. **Derives whose variants are plain text become a var** per environment plus
+   `[env] X = "${X}"`; variants with templates cannot vary by environment in
+   1.0 and are listed for a manual choice.
+5. **Readers are the registry's actual sops recipients**, not the creation
+   rule: a key that requested access but was never rekeyed gets a person
+   file and no access.
+6. **Values are piped to `carbon set` and must round-trip `carbon get` before
+   anything old is deleted**; the identity is installed before verification
+   so the check also proves the moved key works.
