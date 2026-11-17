@@ -15,6 +15,7 @@ import (
 	"github.com/taylor1791/phosphorus/internal/config"
 	"github.com/taylor1791/phosphorus/internal/policy"
 	"github.com/taylor1791/phosphorus/internal/scope"
+	"github.com/taylor1791/phosphorus/internal/seal"
 	"github.com/taylor1791/phosphorus/internal/store"
 )
 
@@ -29,12 +30,19 @@ public keys are read from the trunk ref, never from the working tree, so a
 branch cannot grant itself access. For each scope it:
 
   - creates the key of a scope that declares secrets and has none yet,
-    wrapped to the devices trunk policy names;
+    wrapped to the devices trunk policy names (only if you are one of them);
   - adds a slot for each device trunk policy names that has none (a grant);
   - rotates the key when it has a slot for a device trunk policy no longer
     names: a new key and inbox, every value re-sealed keeping its set time,
     the old key retired with reason "removed <who>";
-  - promotes drops to sealed values and re-seals values under retired keys.
+  - promotes drops to sealed values;
+  - re-seals values under retired keys. Whoever wrote those held a retired
+    key, which a removed reader may still hold, so the plan lists each one
+    (marking any whose set time is after its key was retired); re-sealing
+    vouches for them. --skip-unproven leaves them as they are.
+
+Every scope's key is checked against trunk's before anything is done to it.
+Drops that do not open are left as they are and reported.
 
 It does what you can do (the scopes you can open) and reports the rest,
 naming who can finish it. It prints the plan and asks for confirmation
@@ -43,6 +51,7 @@ the files it changed. --no-commit leaves them uncommitted.`,
 		Flags: func(fs *flag.FlagSet) {
 			fs.Bool("no-commit", false, "write the changes but do not commit them")
 			fs.Bool("dry-run", false, "print the plan and change nothing")
+			fs.Bool("skip-unproven", false, "leave values under retired keys as they are instead of re-sealing them")
 		},
 		Run: runApply,
 	})
@@ -71,15 +80,21 @@ type applyScope struct {
 	// Status: "planned" (you can do it), "applied", "needs-reader" (someone
 	// else must), "blocked" (out of step or broken), "failed", or "ok"
 	// (nothing to do, but something to report).
-	Status    string         `json:"status"`
-	Create    bool           `json:"create,omitempty"`
-	Grant     []applyGrant   `json:"grant,omitempty"`
-	Revoke    []string       `json:"revoke,omitempty"`
-	Rotate    *applyRotation `json:"rotate,omitempty"`
-	Promote   []string       `json:"promote,omitempty"`
-	Reseal    []string       `json:"reseal,omitempty"`
-	SkippedPQ []string       `json:"skipped_pq,omitempty"`
-	Warnings  []string       `json:"warnings,omitempty"`
+	Status  string         `json:"status"`
+	Create  bool           `json:"create,omitempty"`
+	Grant   []applyGrant   `json:"grant,omitempty"`
+	Revoke  []string       `json:"revoke,omitempty"`
+	Rotate  *applyRotation `json:"rotate,omitempty"`
+	Promote []string       `json:"promote,omitempty"`
+	// Unproven are entries under retired keys: whoever wrote them held that
+	// key, which a removed reader may still. apply re-seals them under the
+	// current key (vouching for them) unless SkipUnproven.
+	Unproven     []applyStale `json:"unproven,omitempty"`
+	SkipUnproven bool         `json:"skip_unproven,omitempty"`
+	// BadDrops are drops that do not open; they are left exactly as they are.
+	BadDrops  []string `json:"bad_drops,omitempty"`
+	SkippedPQ []string `json:"skipped_pq,omitempty"`
+	Warnings  []string `json:"warnings,omitempty"`
 	// Readers are who can finish a needs-reader scope: the holders of the
 	// current key's slots.
 	Readers []string `json:"readers,omitempty"`
@@ -94,8 +109,29 @@ type applyScope struct {
 	missing  []policy.Device
 }
 
+// applyStale is an entry under a retired key.
+type applyStale struct {
+	Name string `json:"name"`
+	Key  string `json:"key"`
+	Set  string `json:"set"`
+	Drop bool   `json:"drop,omitempty"`
+	// SetAfterRetired: its set time is after its key was retired, so it was
+	// written (or claims to be) by someone holding a retired key. Suspect.
+	SetAfterRetired bool `json:"set_after_retired,omitempty"`
+}
+
 func (p *applyScope) hasWork() bool {
-	return p.Create || len(p.Grant) > 0 || p.Rotate != nil || len(p.Promote) > 0 || len(p.Reseal) > 0
+	return p.Create || len(p.Grant) > 0 || p.Rotate != nil || len(p.Promote) > 0 ||
+		(len(p.Unproven) > 0 && !p.SkipUnproven)
+}
+
+func slicesContains(xs []string, x string) bool {
+	for _, y := range xs {
+		if y == x {
+			return true
+		}
+	}
+	return false
 }
 
 type applyResult struct {
@@ -142,19 +178,12 @@ func runApply(c *Context) error {
 	if err != nil {
 		return err
 	}
-	// The ref name comes from the working tree, so a branch could point it
-	// at another ref. Trunk's own workspace file must agree.
-	if pol.Origin == policy.OriginTrunk && pol.Workspace.Trunk != w.Config.Trunk {
-		return &Error{Code: ExitError, Message: fmt.Sprintf("this branch names trunk %q, but %s's own carbon.toml names %q", w.Config.Trunk, pol.Ref, pol.Workspace.Trunk),
-			Details: []string{"apply takes grants only from trunk, so it will not follow a trunk ref that trunk itself does not name."},
-			Hint:    fmt.Sprintf("Restore trunk = %q in carbon.toml, or change it on trunk first.", pol.Workspace.Trunk)}
-	}
 	ids, err := c.Identities(false)
 	if err != nil {
 		return err
 	}
 	prefer := DeviceIDs(Me(pol, ids))
-	res := applyResult{Policy: sourceName(pol), DryRun: c.Bool("dry-run")}
+	res := applyResult{Policy: applyPolicyLabel(pol), DryRun: c.Bool("dry-run")}
 	defer func() {
 		for _, p := range res.Scopes {
 			if p.opened != nil {
@@ -177,7 +206,7 @@ func runApply(c *Context) error {
 		switch p.Status {
 		case "planned":
 			doable = append(doable, p)
-		case "needs-reader", "blocked":
+		case "needs-reader", "blocked", "refused":
 			pending = append(pending, p)
 		}
 	}
@@ -251,6 +280,28 @@ func runApply(c *Context) error {
 
 func firstLineOf(s string) string { l, _, _ := strings.Cut(s, "\n"); return l }
 
+// applyPolicyLabel says where policy came from: "origin/main (remote
+// default)", "main (git config carbon.trunk)", or the working tree.
+func applyPolicyLabel(pol *policy.Policy) string {
+	from := ""
+	if pol.Trunk != nil {
+		from = pol.Trunk.From
+		if from == policy.TrunkFromRemote {
+			from = "remote default"
+		}
+	}
+	switch pol.Origin {
+	case policy.OriginTrunk:
+		if from == "" {
+			return pol.Ref
+		}
+		return fmt.Sprintf("%s (%s)", pol.Ref, from)
+	case policy.OriginWorktreeTrunk:
+		return fmt.Sprintf("the working tree (trunk is \"worktree\", from %s)", from)
+	}
+	return "the working tree (carbon is not on trunk yet)"
+}
+
 // planApplyScope works out what apply would do in one scope, opening it
 // when there is work. It returns nil when there is nothing to report.
 func (c *Context) planApplyScope(w *Workspace, pol *policy.Policy, pkg *config.Package, env string, ids []agewrap.Identity, prefer []string) *applyScope {
@@ -259,7 +310,32 @@ func (c *Context) planApplyScope(w *Workspace, pol *policy.Policy, pkg *config.P
 		p.Status, p.Problem, p.Fix = "blocked", problem, fix
 		return p
 	}
-	sa, err := pol.Scope(pkg.Name, env)
+	// Trunk's keys file for the scope, and the name trunk policy knows the
+	// package by: a package renamed on this branch is still the old name on
+	// trunk, and its access is the old name's, not the workspace default.
+	var tk *store.Keys
+	policyName := pkg.Name
+	if pol.Origin == policy.OriginTrunk {
+		dir := pkg.Dir
+		if tp, ok := pol.Packages[pkg.Name]; ok {
+			dir = tp.Dir
+		}
+		var err error
+		tk, err = scope.ReadKeysAt(w.Repo.Source(pol.Ref), dir, env)
+		if err != nil {
+			e := AsError(err)
+			return block("cannot read the keys file on trunk: "+e.Message, "")
+		}
+		if _, known := pol.Packages[pkg.Name]; !known && tk != nil {
+			if old, _, err := config.ParseScopeName(tk.Scope); err == nil && old != pkg.Name {
+				if tp, ok := pol.Packages[old]; ok && tp.Dir == pkg.Dir {
+					policyName = old
+					p.Warnings = append(p.Warnings, fmt.Sprintf("renamed from %s on this branch; access comes from %s's entry on trunk until the rename merges", old, old))
+				}
+			}
+		}
+	}
+	sa, err := pol.Scope(policyName, env)
 	if err != nil {
 		return block(err.Error(), "")
 	}
@@ -277,24 +353,18 @@ func (c *Context) planApplyScope(w *Workspace, pol *policy.Policy, pkg *config.P
 	}
 	p.s = s
 
+	var outOfStep, outFix string
 	if pol.Origin == policy.OriginTrunk {
-		dir := pkg.Dir
-		if tp, ok := pol.Packages[pkg.Name]; ok {
-			dir = tp.Dir
-		}
-		tk, err := scope.ReadKeysAt(w.Repo.Source(pol.Ref), dir, env)
-		if err != nil {
-			e := AsError(err)
-			return block("cannot read the keys file on trunk: "+e.Message, "")
-		}
 		switch {
 		case tk != nil && s.Keys == nil:
 			return block(fmt.Sprintf("trunk %s has a key for %s that this branch does not have", pol.Ref, p.Scope),
 				fmt.Sprintf("Bring this branch up to date first:   git merge %s", pol.Ref))
 		case tk != nil && tk.Current != s.Keys.Current:
-			return block(fmt.Sprintf("the current key here (%s) differs from trunk's (%s): a rotation on this branch is not merged yet, or trunk rotated and this branch has not merged it",
-				s.Keys.Current, tk.Current),
-				fmt.Sprintf("Merge trunk into this branch (git merge %s) and keep trunk's keys file, or merge this branch to trunk first; then run `carbon apply` again. Applying now would rotate on top of a key trunk does not use.", pol.Ref))
+			// Decided after opening: a key that does not descend from
+			// trunk's is refused; one that does is only out of step.
+			outOfStep = fmt.Sprintf("the current key here (%s) differs from trunk's (%s): a rotation on this branch is not merged yet, or trunk rotated and this branch has not merged it",
+				s.Keys.Current, tk.Current)
+			outFix = fmt.Sprintf("Merge trunk into this branch (git merge %s) and keep trunk's keys file, or merge this branch to trunk first; then run `carbon apply` again. Applying now would rotate on top of a key trunk does not use.", pol.Ref)
 		}
 	}
 
@@ -317,7 +387,18 @@ func (c *Context) planApplyScope(w *Workspace, pol *policy.Policy, pkg *config.P
 		p.Create = true
 		p.missing = eligible
 		p.Grant = applyGrants(sa, eligible)
-		p.Status = "planned"
+		// Only a device trunk policy names for the scope may create its key.
+		for _, d := range eligible {
+			for _, id := range prefer {
+				if d.ID == id {
+					p.Status = "planned"
+					return p
+				}
+			}
+		}
+		p.Status = "needs-reader"
+		p.Problem = "only a device that trunk policy names for " + p.Scope + " may create its key"
+		p.Readers = slotHolders(DeviceIDs(eligible))
 		return p
 	}
 
@@ -329,13 +410,14 @@ func (c *Context) planApplyScope(w *Workspace, pol *policy.Policy, pkg *config.P
 	}
 	p.Grant = applyGrants(sa, p.missing)
 	for _, name := range s.Secrets.Names() {
-		e := s.Secrets.Entries[name]
-		switch {
-		case e.IsDrop():
+		if s.Secrets.Entries[name].IsDrop() {
 			p.Promote = append(p.Promote, name)
-		case e.Key != s.Keys.Current:
-			p.Reseal = append(p.Reseal, name)
 		}
+	}
+	p.SkipUnproven = c.Bool("skip-unproven")
+	for _, st := range s.StaleEntries() {
+		p.Unproven = append(p.Unproven, applyStale{Name: st.Name, Key: st.KeyID, Set: seal.FormatTime(st.Set),
+			Drop: st.Drop, SetAfterRetired: st.SetAfterRetired})
 	}
 	if len(diff.Extra) > 0 {
 		p.Revoke = diff.Extra
@@ -344,15 +426,19 @@ func (c *Context) planApplyScope(w *Workspace, pol *policy.Policy, pkg *config.P
 				p.Revoke = append(p.Revoke, d.ID)
 			}
 		}
+		values := len(s.Secrets.Entries)
+		if p.SkipUnproven {
+			values -= len(p.Unproven)
+		}
 		p.Rotate = &applyRotation{From: s.Keys.Current, Reason: "removed " + removedWho(diff.Extra, s.SlotIDs(), sa),
-			Values: len(s.Secrets.Entries)}
+			Values: values}
 		if len(eligible) == 0 {
 			return block(fmt.Sprintf("%s must rotate (%s), but trunk policy names nobody who could hold the new key", p.Scope, p.Rotate.Reason),
 				"Name at least one reader for "+p.Scope+" in policy, merge it, and run `carbon apply` again.")
 		}
 	}
-	if !p.hasWork() {
-		if len(p.Warnings) == 0 && len(p.SkippedPQ) == 0 {
+	if !p.hasWork() && outOfStep == "" {
+		if len(p.Warnings) == 0 && len(p.SkippedPQ) == 0 && len(p.Unproven) == 0 {
 			return nil
 		}
 		return p
@@ -360,6 +446,8 @@ func (c *Context) planApplyScope(w *Workspace, pol *policy.Policy, pkg *config.P
 
 	o, err := s.Open(ids, prefer...)
 	switch {
+	case errors.Is(err, scope.ErrNotReader) && outOfStep != "":
+		return block(outOfStep, outFix)
 	case errors.Is(err, scope.ErrNotReader):
 		p.Status = "needs-reader"
 		// Who can finish it: the current key's readers that stay readers.
@@ -376,6 +464,45 @@ func (c *Context) planApplyScope(w *Workspace, pol *policy.Policy, pkg *config.P
 		return block(e.Message, e.Hint)
 	}
 	p.opened = o
+	// Verify the key against trunk before doing anything with it.
+	if pol.Origin == policy.OriginTrunk {
+		if err := c.VerifyTrunk(w, pkg, o); err != nil {
+			e := AsError(err)
+			p.Status, p.Problem, p.Fix = "refused", e.Message, e.Hint
+			if len(e.Details) > 0 {
+				p.Problem += " (" + e.Details[0] + ")"
+			}
+			return p
+		}
+	}
+	if outOfStep != "" {
+		return block(outOfStep, outFix)
+	}
+	// Drops that do not open are left alone and reported, never fatal.
+	var good []string
+	for _, name := range p.Promote {
+		v, err := o.Reveal(name)
+		if err != nil {
+			p.BadDrops = append(p.BadDrops, name)
+			continue
+		}
+		v.Zero()
+		good = append(good, name)
+	}
+	p.Promote = good
+	if len(p.BadDrops) > 0 {
+		var unproven []applyStale
+		for _, u := range p.Unproven {
+			if !slicesContains(p.BadDrops, u.Name) {
+				unproven = append(unproven, u)
+			}
+		}
+		p.Unproven = unproven
+		if !p.hasWork() {
+			p.Status = "ok"
+			return p
+		}
+	}
 	p.Status = "planned"
 	return p
 }
@@ -503,9 +630,26 @@ func executeApplyScope(w *Workspace, p *applyScope, now time.Time) ([]string, []
 		lines = append(lines, fmt.Sprintf("%s: create key %s for %s", p.Scope, o.CurrentID(), strings.Join(DeviceIDs(p.eligible), ", ")))
 	case p.Rotate != nil:
 		from := o.CurrentID()
-		to, err := o.Rotate(p.eligible, p.Rotate.Reason, now)
+		// --skip-unproven: entries under retired keys stay as they are; the
+		// retired chain still opens them after the rotation.
+		held := map[string]store.Entry{}
+		if p.SkipUnproven {
+			for _, u := range p.Unproven {
+				held[u.Name] = o.Secrets.Entries[u.Name]
+				delete(o.Secrets.Entries, u.Name)
+			}
+		}
+		to, bad, err := o.RotateSkippingBadDrops(p.eligible, p.Rotate.Reason, now)
+		for name, e := range held {
+			o.Secrets.Entries[name] = e
+		}
 		if err != nil {
 			return nil, nil, err
+		}
+		for _, b := range bad {
+			if !slicesContains(p.BadDrops, b) {
+				p.BadDrops = append(p.BadDrops, b)
+			}
 		}
 		p.Rotate.To = to
 		lines = append(lines, fmt.Sprintf("%s: rotate %s -> %s (%s), re-seal %d value(s)", p.Scope, from, to, p.Rotate.Reason, p.Rotate.Values))
@@ -521,19 +665,49 @@ func executeApplyScope(w *Workspace, p *applyScope, now time.Time) ([]string, []
 			lines = append(lines, fmt.Sprintf("%s: grant %s", p.Scope, strings.Join(added, ", ")))
 		}
 	}
-	promoted, err := o.PromoteDrops()
-	if err != nil {
-		return nil, nil, err
+	// Promote each drop that opens (PromoteAt clamps a future set time);
+	// one that does not is left as it is and reported.
+	var promoted []string
+	for _, name := range o.Secrets.Names() {
+		e := o.Secrets.Entries[name]
+		if !e.IsDrop() || slicesContains(p.BadDrops, name) {
+			continue
+		}
+		if p.SkipUnproven && e.Key != o.CurrentID() {
+			continue
+		}
+		ok, err := o.PromoteAt(name, now)
+		if err != nil {
+			p.BadDrops = append(p.BadDrops, name)
+			continue
+		}
+		if ok {
+			promoted = append(promoted, name)
+		}
 	}
 	if len(promoted) > 0 {
 		lines = append(lines, fmt.Sprintf("%s: promote %s", p.Scope, strings.Join(promoted, ", ")))
 	}
-	resealed, err := o.Refresh()
-	if err != nil {
-		return nil, nil, err
+	if !p.SkipUnproven {
+		r, err := o.RefreshDetailed()
+		if err != nil {
+			return nil, nil, err
+		}
+		var names []string
+		for _, m := range r.Moved {
+			names = append(names, m.Name)
+		}
+		for _, b := range r.SkippedDrops {
+			if !slicesContains(p.BadDrops, b) {
+				p.BadDrops = append(p.BadDrops, b)
+			}
+		}
+		if len(names) > 0 {
+			lines = append(lines, fmt.Sprintf("%s: re-seal %s under %s (unproven: written under a retired key)", p.Scope, strings.Join(names, ", "), o.CurrentID()))
+		}
 	}
-	if len(resealed) > 0 {
-		lines = append(lines, fmt.Sprintf("%s: re-seal %s under %s", p.Scope, strings.Join(resealed, ", "), o.CurrentID()))
+	if len(p.BadDrops) > 0 {
+		lines = append(lines, fmt.Sprintf("%s: left drops that do not open: %s", p.Scope, strings.Join(p.BadDrops, ", ")))
 	}
 	files, err := writeScopeFiles(p.s)
 	if err != nil {
@@ -594,7 +768,9 @@ func applyCommitMessage(ps []*applyScope, log []string) string {
 		}
 		grants += len(p.Grant)
 		promotes += len(p.Promote)
-		reseals += len(p.Reseal)
+		if !p.SkipUnproven {
+			reseals += len(p.Unproven)
+		}
 		if p.Rotate != nil {
 			rotations++
 		}
@@ -654,6 +830,8 @@ func printApplyScope(out io.Writer, p *applyScope) {
 		head += "   (needs a reader; you cannot open it)"
 	case "blocked":
 		head += "   (blocked)"
+	case "refused":
+		head += "   (refused: key not from trunk)"
 	case "failed":
 		head += "   (failed; unchanged)"
 	case "applied":
@@ -684,8 +862,22 @@ func printApplyScope(out io.Writer, p *applyScope) {
 	for _, n := range p.Promote {
 		rows = append(rows, []string{"  promotes drop", n})
 	}
-	for _, n := range p.Reseal {
-		rows = append(rows, []string{"  re-seals", n, "(under a retired key)"})
+	for _, u := range p.Unproven {
+		what := "re-seals as trusted"
+		if p.SkipUnproven {
+			what = "leaves unproven"
+		}
+		note := fmt.Sprintf("under retired key %s, set %s; author unproven", u.Key, u.Set)
+		if u.SetAfterRetired {
+			note += "; SET AFTER ITS KEY WAS RETIRED"
+		}
+		if u.Drop {
+			note = "drop " + note
+		}
+		rows = append(rows, []string{"  " + what, u.Name, note})
+	}
+	for _, n := range p.BadDrops {
+		rows = append(rows, []string{"  leaves drop", n, "does not open; left as it is (ask its author to set it again)"})
 	}
 	for _, id := range p.SkippedPQ {
 		rows = append(rows, []string{"  not wrapped", id, "X25519 key; " + p.Env + " requires post-quantum keys"})
@@ -712,7 +904,7 @@ func printApplyOutcome(out io.Writer, res *applyResult, noCommit bool) {
 		switch p.Status {
 		case "applied":
 			applied++
-		case "needs-reader", "blocked", "failed":
+		case "needs-reader", "blocked", "refused", "failed":
 			left = append(left, p)
 		}
 	}
@@ -731,6 +923,8 @@ func printApplyOutcome(out io.Writer, res *applyResult, noCommit bool) {
 			fmt.Fprintf(out, "Left for a reader of %s: %s\n", p.Scope, strings.Join(p.Readers, ", "))
 		case "failed":
 			fmt.Fprintf(out, "Failed in %s (unchanged): %s\n", p.Scope, p.Problem)
+		case "refused":
+			fmt.Fprintf(out, "Refused %s: %s\n", p.Scope, p.Problem)
 		default:
 			fmt.Fprintf(out, "Blocked in %s: %s\n", p.Scope, p.Problem)
 		}

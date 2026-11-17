@@ -7,8 +7,12 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/taylor1791/phosphorus/internal/agewrap"
 	"github.com/taylor1791/phosphorus/internal/clitest"
+	"github.com/taylor1791/phosphorus/internal/policy"
+	"github.com/taylor1791/phosphorus/internal/scope"
 )
 
 // umGet reads a secret as p and returns its value and set time.
@@ -142,7 +146,7 @@ func TestApplyIgnoresBranchPolicyAdversarially(t *testing.T) {
 	// granted, because trunk's policy is what counts.
 	for _, p := range []*clitest.Person{w.Lin, w.Deploy} {
 		res := p.Must("apply", "--yes")
-		contains(t, "apply on evil branch", res.Stdout, "Policy from trunk main", "Nothing to do")
+		contains(t, "apply on evil branch", res.Stdout, "Policy from main (git config carbon.trunk)", "Nothing to do")
 	}
 	unchanged := func() {
 		t.Helper()
@@ -155,22 +159,61 @@ func TestApplyIgnoresBranchPolicyAdversarially(t *testing.T) {
 	}
 	unchanged()
 
-	// Opting the branch out of trunk, or pointing trunk at a ref the branch
-	// controls, is refused.
-	for _, trunk := range []string{"worktree", "evil"} {
-		w.Write("carbon.toml", regexp.MustCompile(`trunk = "[^"]*"`).ReplaceAllString(w.Read("carbon.toml"), `trunk = "`+trunk+`"`))
-		w.Commit("trunk " + trunk)
-		res := w.Lin.Fails(1, "apply", "--yes")
-		contains(t, "trunk "+trunk, res.Stderr, `names trunk "`+trunk+`"`, `names "main"`)
-		unchanged()
-		// A drop on this branch still goes to trunk's inbox: mallory
-		// cannot redirect it, and lin reads it.
-		mal.In(co).Stdin("dropped_"+trunk).Must("set", "webhook_secret", "--env", "prod")
-		if v, _ := umGet(t, w.Lin, "checkout", "prod", "webhook_secret"); v != "dropped_"+trunk {
-			t.Fatal(v)
-		}
-		mal.Fails(3, "get", "webhook_secret", "--package", "checkout", "--env", "prod")
-		w.Git("checkout", "--", co)
+	// A drop on this branch still goes to trunk's inbox: mallory cannot
+	// redirect it, and lin reads it.
+	mal.In(co).Stdin("dropped").Must("set", "webhook_secret", "--env", "prod")
+	if v, _ := umGet(t, w.Lin, "checkout", "prod", "webhook_secret"); v != "dropped" {
+		t.Fatal(v)
+	}
+	mal.Fails(3, "get", "webhook_secret", "--package", "checkout", "--env", "prod")
+	w.Git("checkout", "--", co)
+
+	// There is no trunk setting a branch could edit: the old one is an
+	// error, not an opt-out.
+	w.Replace("carbon.toml", "[workspace]\n", "[workspace]\ntrunk = \"worktree\"\n")
+	w.Commit("opt out of trunk")
+	res := w.Lin.Fails(1, "apply", "--yes")
+	contains(t, "trunk setting", res.Stderr, "[workspace] trunk")
+	w.Replace("carbon.toml", "trunk = \"worktree\"\n", "")
+	w.Commit("undo")
+	unchanged()
+
+	// mallory replaces the prod keys file with a key she made, wrapped to
+	// herself and to lin's real public key, holding a value of her choosing.
+	// lin can open it, but it does not descend from trunk's key: apply
+	// refuses the scope and get refuses to read it.
+	devOf := func(id, file string) policy.Device {
+		rec := regexp.MustCompile(`laptop = "(age1[^"]+)"`).FindStringSubmatch(file)[1]
+		return policy.Device{ID: id, Recipient: rec, Kind: agewrap.RecipientKind(rec)}
+	}
+	forged, err := scope.Load(t.TempDir(), "checkout", "prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fo, err := forged.Create([]policy.Device{
+		devOf("lin/laptop", w.Git("show", "main:.carbon/people/lin.toml")),
+		devOf("mallory/laptop", w.Read(".carbon/people/mallory.toml")),
+	}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fo.Seal("stripe_api_key", []byte("sk_mallory"), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	w.Write(co+"/.carbon/prod.keys.toml", string(forged.Keys.Marshal()))
+	w.Write(co+"/.carbon/prod.secrets.toml", string(forged.Secrets.Marshal()))
+	w.Commit("rotate prod")
+	forgedKeys := w.Read(co + "/.carbon/prod.keys.toml")
+	res = w.Lin.Fails(1, "apply", "--yes", "--env", "prod")
+	contains(t, "forged key", res.Stdout, "checkout/prod", "refused", "does not descend from trunk", "git checkout main -- "+co+"/.carbon/prod.keys.toml")
+	if w.Read(co+"/.carbon/prod.keys.toml") != forgedKeys {
+		t.Fatal("apply touched a refused scope")
+	}
+	umClean(t, w)
+	res = w.Lin.Fails(1, "get", "stripe_api_key", "--package", "checkout", "--env", "prod")
+	contains(t, "get forged", res.Stderr, "does not descend from trunk")
+	if strings.Contains(res.Stdout, "sk_mallory") {
+		t.Fatal("read a forged value")
 	}
 }
 
@@ -241,32 +284,62 @@ func TestApplyOffboardingDrill(t *testing.T) {
 	if v, _ := umGet(t, w.Ada, "checkout", "staging", "session_key"); v != "sess_staging" {
 		t.Fatal(v)
 	}
-	// In dev every value line was re-sealed, so the new line conflicts
-	// with its neighbours; keeping main's lines plus the branch's new line
-	// resolves it.
+	// sam, removed but still holding the old key, writes on the old branch
+	// after the rotation: a value under a retired key, set after it retired.
+	w.Checkout("old-dev")
+	time.Sleep(1100 * time.Millisecond)
+	w.Sam.In(co).Stdin("sess_from_sam").Must("set", "session_key", "--env", "dev")
+	w.Commit("sam sets session_key after his removal")
+	w.Checkout("main")
+
+	// In dev every value line was re-sealed, so the branch's new line
+	// conflicts (a known merge limit). carbon names the resolution; keeping
+	// main's lines plus the branch's new line resolves it.
 	dev := co + "/.carbon/dev.secrets.toml"
 	mainDev := w.Read(dev)
-	if out, err := tryGit(w, "merge", "-q", "--no-edit", "old-dev"); err == nil {
-		t.Logf("merged cleanly: %s", out)
-	} else {
-		branchLine := ""
-		for _, l := range strings.Split(w.Git("show", "old-dev:"+dev), "\n") {
-			if strings.HasPrefix(l, "session_key") {
-				branchLine = l
-			}
-		}
-		w.Write(dev, branchLine+"\n"+mainDev)
-		w.Git("add", dev)
-		w.Git("commit", "-q", "--no-edit")
+	if _, err := tryGit(w, "merge", "-q", "--no-edit", "old-dev"); err == nil {
+		t.Fatal("expected the known conflict between a rotation and an added secret")
 	}
-	if v, _ := umGet(t, w.Ada, "checkout", "dev", "session_key"); v != "sess_dev" {
+	res = w.Lin.Fails(1, "get", "stripe_api_key", "--package", "checkout", "--env", "dev")
+	contains(t, "conflict hint", res.Stderr, "keep the rotated side's lines", "add back each line the other side added")
+	branchLine := regexp.MustCompile(`(?m)^session_key .*$`).FindString(w.Git("show", "old-dev:"+dev))
+	w.Write(dev, branchLine+"\n"+mainDev)
+	w.Git("add", dev)
+	w.Git("commit", "-q", "--no-edit")
+	if v, _ := umGet(t, w.Ada, "checkout", "dev", "session_key"); v != "sess_from_sam" {
 		t.Fatal(v)
 	}
-	// The next apply re-seals both under the current keys.
+
+	// The plan lists it as unproven, flagged as set after its key retired.
+	res = w.Lin.Must("apply", "--dry-run", "--env", "dev")
+	contains(t, "unproven", res.Stdout, "re-seals as trusted", "session_key", "SET AFTER ITS KEY WAS RETIRED")
+	head := umHead(w)
+	res = w.Lin.Must("apply", "--yes", "--skip-unproven", "--env", "dev")
+	contains(t, "skip", res.Stdout, "leaves unproven", "session_key")
+	if umHead(w) != head {
+		t.Fatal("--skip-unproven committed")
+	}
+	// Confirming re-seals it under the current key.
 	res = w.Lin.Must("apply", "--yes")
-	contains(t, "re-seal", res.Stdout, "re-seals", "session_key")
+	contains(t, "re-seal", res.Stdout, "re-seals as trusted", "session_key")
 	contains(t, "after re-seal", w.Lin.Must("apply").Stdout, "Nothing to do")
-	if v, _ := umGet(t, w.Lin, "checkout", "dev", "session_key"); v != "sess_dev" {
+	if v, _ := umGet(t, w.Lin, "checkout", "dev", "session_key"); v != "sess_from_sam" {
+		t.Fatal(v)
+	}
+}
+
+func TestApplyCreatesOnlyAsANamedDevice(t *testing.T) {
+	w := clitest.Standard(t)
+	// Nobody has set anything: every scope waits for its first key. ada
+	// reads dev and staging but not prod.
+	res := w.Ada.Fails(3, "apply", "--yes", "--env", "prod")
+	contains(t, "ada", res.Stdout, "checkout/prod", "needs a reader", "may create its key", "lin (laptop)", "machine:deploy-checkout")
+	umClean(t, w)
+	res = w.Ada.Must("apply", "--yes", "--env", "dev")
+	contains(t, "ada dev", res.Stdout, "create key", "Committed")
+	res = w.Deploy.Must("apply", "--yes", "--env", "prod")
+	contains(t, "machine prod", res.Stdout, "create key", "lin/laptop")
+	if v := w.Read(w.PkgDir + "/.carbon/prod.keys.toml"); !strings.Contains(v, `"lin/laptop"`) {
 		t.Fatal(v)
 	}
 }
@@ -586,7 +659,9 @@ func TestRename(t *testing.T) {
 	w.Lin.Fails(2, "rename", "checkout", "env", "--yes")
 	w.Lin.Fails(2, "rename", "checkout", "web", "--yes")
 
+	w.Branch("rename")
 	res = w.Lin.Must("rename", "checkout", "shop", "--yes")
+	w.Commit("rename checkout to shop")
 	contains(t, "rename", res.Stdout, "Renamed checkout to shop")
 	if strings.Contains(res.Stdout+res.Stderr, "sk_") || strings.Contains(res.Stdout+res.Stderr, "wh_prod") {
 		t.Fatalf("a value leaked into output:\n%s", res)
@@ -607,25 +682,80 @@ func TestRename(t *testing.T) {
 	if v, _ := umGet(t, w.Sam, "shop", "dev", "stripe_api_key"); v != "sk_dev" {
 		t.Fatal(v)
 	}
+	// On the rename branch, before it merges, readers still verify the key
+	// against trunk's file under the old name, and apply works.
+	// Access still comes from checkout's trunk entry, not the workspace
+	// default that an unknown package name would get.
+	res = w.Lin.Must("apply", "--env", "prod", "--yes")
+	contains(t, "apply on rename branch", res.Stdout, "renamed from checkout", "promotes drop", "Committed")
+	if strings.Contains(res.Stdout, "gains access") || strings.Contains(res.Stdout, "loses access") {
+		t.Fatalf("apply on the rename branch used the wrong policy:\n%s", res)
+	}
+	// A swapped keys file on the rename branch is still refused.
+	other := w.Read(co + "/.carbon/dev.keys.toml")
+	w.Write(co+"/.carbon/prod.keys.toml", strings.Replace(other, `"shop/dev"`, `"shop/prod"`, 1))
+	res = w.Lin.Run("get", "stripe_api_key", "--package", "shop", "--env", "prod")
+	if res.Code == 0 {
+		t.Fatalf("a swapped keys file was read:\n%s", res)
+	}
+	w.Git("checkout", "--", co)
+
+	w.Checkout("main")
+	w.Merge("rename")
+	if v, _ := umGet(t, w.Deploy, "shop", "prod", "stripe_api_key"); v != "sk_prod" {
+		t.Fatal(v)
+	}
+}
+
+// umCopyLine prepends a copy of the line for name, renamed to as: a value
+// or drop moved to another name, which fails authentication.
+func umCopyLine(w *clitest.World, file, name, as string) {
+	sec := w.Read(file)
+	for _, l := range strings.Split(sec, "\n") {
+		if strings.HasPrefix(l, name+" ") {
+			sec = strings.Replace(l, name, as, 1) + "\n" + sec
+		}
+	}
+	w.Write(file, sec)
+}
+
+func TestApplyLeavesBadDropsAndRotates(t *testing.T) {
+	w := clitest.Standard(t)
+	co := w.PkgDir
+	umSetAll(t, w)
+	w.Ada.In(co).Stdin("wh").Must("set", "webhook_secret", "--env", "prod")
+	umCopyLine(w, co+"/.carbon/prod.secrets.toml", "webhook_secret", "session_key")
+	w.Replace(co+"/carbon.toml", `prod = ["@payments", "machine:deploy-checkout"]`, `prod = ["@payments"]`)
+	w.Commit("remove the deploy machine from prod; a bad drop")
+	bad := regexp.MustCompile(`(?m)^session_key .*$`).FindString(w.Read(co + "/.carbon/prod.secrets.toml"))
+
+	res := w.Lin.Must("apply", "--yes", "--env", "prod", "--dry-run")
+	contains(t, "plan", res.Stdout, "leaves drop", "session_key", "promotes drop", "webhook_secret", `reason "removed machine:deploy-checkout"`)
+	res = w.Lin.Must("apply", "--yes", "--env", "prod")
+	contains(t, "apply", res.Stdout, "leaves drop", "session_key", "Committed")
+	sec := w.Read(co + "/.carbon/prod.secrets.toml")
+	if !strings.Contains(sec, bad) {
+		t.Fatalf("the bad drop was changed:\n%s", sec)
+	}
+	contains(t, "commit", w.Git("log", "-1", "--format=%B"), "left drops that do not open: session_key")
+	if v, _ := umGet(t, w.Lin, "checkout", "prod", "webhook_secret"); v != "wh" {
+		t.Fatal(v)
+	}
+	w.Deploy.Fails(3, "get", "stripe_api_key", "--package", "checkout", "--env", "prod")
 }
 
 func TestApplyIsAllOrNothingPerScope(t *testing.T) {
 	w := clitest.Standard(t)
 	co := w.PkgDir
 	umSetAll(t, w)
-	w.Ada.In(co).Stdin("wh").Must("set", "webhook_secret", "--env", "prod")
-	// A drop copied to another name fails authentication on promotion.
-	sec := w.Read(co + "/.carbon/prod.secrets.toml")
-	for _, l := range strings.Split(sec, "\n") {
-		if strings.HasPrefix(l, "webhook_secret") {
-			sec = strings.Replace(l, "webhook_secret", "session_key", 1) + "\n" + sec
-		}
-	}
-	w.Write(co+"/.carbon/prod.secrets.toml", sec)
+	// A sealed value copied to another name fails authentication, which
+	// stops prod's rotation.
+	umCopyLine(w, co+"/.carbon/prod.secrets.toml", "stripe_api_key", "session_key")
+	w.Replace(co+"/carbon.toml", `prod = ["@payments", "machine:deploy-checkout"]`, `prod = ["@payments", "nia"]`)
 	nia := w.Person("nia")
 	nia.Join()
-	w.SetTeams(map[string][]string{"engineering": {"ada", "lin", "sam", "nia"}, "payments": {"lin", "nia"}})
-	w.Commit("nia joins; a bad drop")
+	w.SetTeams(map[string][]string{"engineering": {"ada", "lin", "sam", "nia"}, "payments": {"lin"}})
+	w.Commit("nia joins; a tampered value")
 	prodKeys, prodSecrets := w.Read(co+"/.carbon/prod.keys.toml"), w.Read(co+"/.carbon/prod.secrets.toml")
 
 	res := w.Lin.Fails(1, "apply", "--yes")

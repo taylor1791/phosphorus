@@ -25,7 +25,12 @@ re-wraps the slots to the same devices (public keys from trunk policy),
 updates name in the package's carbon.toml, the scope line of each keys
 file, and ${old.x} references in other packages' [env] tables.
 
-The package directory stays where it is; move it with git mv if you like.`,
+The package directory stays where it is. Until the rename merges, readers
+on the branch check the keys against trunk's file in the same directory
+(under the old name), and apply uses the old name's access from trunk.
+Do not move the directory in the same pull request: with neither the name
+nor the path on trunk, nothing would tie the keys to trunk's. Non-readers
+cannot drop into the package until the rename merges.`,
 		MinArgs: 2, MaxArgs: 2,
 		Run: runRename,
 	})
@@ -227,7 +232,8 @@ func runRename(c *Context) error {
 	res.Files = files
 	return c.Output(res, func(out io.Writer) {
 		fmt.Fprintf(out, "Renamed %s to %s. Changed %s.\n\n", oldName, newName, strings.Join(files, ", "))
-		fmt.Fprintln(out, "Next: commit these files together and open a pull request.")
+		fmt.Fprintln(out, "Next: commit these files together and open a pull request. Move the directory, if")
+		fmt.Fprintln(out, "you want to, in a later pull request; drops into the package wait for the merge.")
 	})
 }
 
