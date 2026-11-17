@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -26,7 +27,7 @@ import (
 func init() {
 	Register(&Command{
 		Name:    "edit",
-		Usage:   "[--env <env>] [--package <name>]",
+		Usage:   "[--allow-empty] [--env <env>] [--package <name>]",
 		Summary: "Bulk-edit the scope's secrets in $EDITOR",
 		Help: `edit decrypts every declared secret of the package in the environment into a
 temporary file, opens it in $VISUAL (else $EDITOR), and re-seals only the
@@ -43,6 +44,12 @@ package does not declare are rejected. A value that cannot be read (a
 damaged drop, a retired key that does not open) is shown as a comment and
 left alone.
 
+As with carbon set, an empty value is refused unless --allow-empty is
+given: then a line changed to name = "" stores the empty value, and so
+does an unset secret's line uncommented as name = "". Without it, an
+uncommented name = "" for an unset secret is ignored, and emptying a set
+value saves nothing and says why.
+
 When the editor exits, carbon reads the scope again and writes only the
 secrets file, with only your changed values sealed under the scope's
 current key: changes others made meanwhile are kept, and if one of them
@@ -50,6 +57,9 @@ touched a value you changed, nothing is saved. Needs read access.
 
 The editor must wait until you close the file; for a GUI editor use its
 wait flag, for example EDITOR="code --wait".`,
+		Flags: func(fs *flag.FlagSet) {
+			fs.Bool("allow-empty", false, "store a value emptied in the editor instead of refusing it")
+		},
 		Run: runEdit,
 	})
 }
@@ -125,6 +135,7 @@ func runEdit(c *Context) error {
 			delete(after, k)
 		}
 	}()
+	allowEmpty := c.Bool("allow-empty")
 	var changed []string
 	var problems []string
 	for _, n := range sortedNames(after) {
@@ -144,9 +155,9 @@ func runEdit(c *Context) error {
 		nv := after[n]
 		switch {
 		case had && bytes.Equal(old, nv):
-		case len(nv) == 0 && !had:
-		case len(nv) == 0:
-			problems = append(problems, fmt.Sprintf("%s is empty; carbon does not store empty values (restore the line to keep it).", n))
+		case len(nv) == 0 && !allowEmpty && !had:
+		case len(nv) == 0 && !allowEmpty:
+			problems = append(problems, fmt.Sprintf("%s is empty; an empty value is stored only with `carbon edit --allow-empty` (or restore the line to keep the value).", n))
 		default:
 			changed = append(changed, n)
 		}
