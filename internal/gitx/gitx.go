@@ -4,15 +4,18 @@
 package gitx
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -41,11 +44,23 @@ func (e *Error) Unwrap() error { return e.Err }
 type Repo struct {
 	// Root is the absolute path of the work tree's top level.
 	Root string
+	// CacheSources makes Source return one RefSource per ref name for the
+	// life of the Repo, so a command reads each ref's file list and files
+	// once. Set it for a Repo that lives for one command; leave it off when
+	// refs move while the Repo is in use (tests that commit in between).
+	CacheSources bool
+
+	mu      sync.Mutex
+	sources map[string]*RefSource
+	// The git directories never change for a work tree: Find fills them,
+	// GitDir and CommonDir remember them.
+	gitDir, commonDir string
 }
 
 // Find returns the repo containing dir.
 func Find(dir string) (*Repo, error) {
-	out, err := run(dir, "rev-parse", "--show-toplevel")
+	// One process answers the three questions every command asks.
+	out, err := run(dir, "rev-parse", "--path-format=absolute", "--show-toplevel", "--absolute-git-dir", "--git-common-dir")
 	if err != nil {
 		var ge *Error
 		if errors.As(err, &ge) && strings.Contains(ge.Stderr, "not a git repository") {
@@ -53,7 +68,11 @@ func Find(dir string) (*Repo, error) {
 		}
 		return nil, err
 	}
-	return &Repo{Root: strings.TrimSpace(string(out))}, nil
+	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	if len(lines) != 3 {
+		return nil, fmt.Errorf("git rev-parse: unexpected output %q", out)
+	}
+	return &Repo{Root: lines[0], gitDir: lines[1], commonDir: lines[2]}, nil
 }
 
 // Git runs git in the repo root and returns stdout.
@@ -76,11 +95,15 @@ func run(dir string, args ...string) ([]byte, error) {
 // GitDir returns the absolute git directory of this work tree (per
 // worktree, so `carbon env use` state is per worktree).
 func (r *Repo) GitDir() (string, error) {
+	if r.gitDir != "" {
+		return r.gitDir, nil
+	}
 	out, err := r.Git("rev-parse", "--absolute-git-dir")
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(string(out)), nil
+	r.gitDir = strings.TrimSpace(string(out))
+	return r.gitDir, nil
 }
 
 // RefExists reports whether ref names a commit.
@@ -150,8 +173,10 @@ func (r *Repo) Rel(abs string) (string, error) {
 }
 
 // RefSource reads files at a git ref. It satisfies config.Source. The file
-// list is read once with `git ls-tree` and file contents with
-// `git cat-file`; nothing in the working tree is consulted.
+// list is read once with `git ls-tree`, and file contents through one
+// long-lived `git cat-file --batch` process, so reading n files costs two
+// git processes, not n+1. Only paths in the ls-tree listing are read;
+// nothing in the working tree is consulted.
 type RefSource struct {
 	Repo *Repo
 	Ref  string
@@ -159,10 +184,105 @@ type RefSource struct {
 	once  sync.Once
 	files map[string]bool
 	err   error
+
+	bmu    sync.Mutex
+	batch  *exec.Cmd
+	bin    io.WriteCloser
+	bout   *bufio.Reader
+	broken bool
 }
 
-// Source returns a RefSource for ref.
-func (r *Repo) Source(ref string) *RefSource { return &RefSource{Repo: r, Ref: ref} }
+// Source returns a RefSource for ref (the same one each time when
+// CacheSources is set).
+func (r *Repo) Source(ref string) *RefSource {
+	if !r.CacheSources {
+		return &RefSource{Repo: r, Ref: ref}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if s, ok := r.sources[ref]; ok {
+		return s
+	}
+	if r.sources == nil {
+		r.sources = map[string]*RefSource{}
+	}
+	s := &RefSource{Repo: r, Ref: ref}
+	r.sources[ref] = s
+	return s
+}
+
+// Close ends the cat-file process, if one was started. A RefSource that is
+// never closed has its process end when carbon exits (or execs: the pipe is
+// close-on-exec, so git sees end of input).
+func (s *RefSource) Close() {
+	s.bmu.Lock()
+	defer s.bmu.Unlock()
+	if s.batch != nil {
+		s.bin.Close()
+		s.batch.Wait()
+		s.batch = nil
+	}
+}
+
+// catFile reads one blob through the batch process, starting it on first
+// use. It falls back to `git cat-file blob` if the batch protocol fails.
+func (s *RefSource) catFile(name string) ([]byte, error) {
+	spec := s.Ref + ":" + name
+	s.bmu.Lock()
+	defer s.bmu.Unlock()
+	if s.broken || strings.ContainsAny(spec, "\n\r") {
+		return s.Repo.Git("cat-file", "blob", spec)
+	}
+	if s.batch == nil {
+		cmd := exec.Command("git", "-c", "core.quotepath=off", "cat-file", "--batch")
+		cmd.Dir = s.Repo.Root
+		cmd.Env = append(ScrubbedEnviron(os.Environ()), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
+		in, err := cmd.StdinPipe()
+		if err != nil {
+			return nil, err
+		}
+		out, err := cmd.StdoutPipe()
+		if err != nil {
+			return nil, err
+		}
+		if err := cmd.Start(); err != nil {
+			s.broken = true
+			return s.Repo.Git("cat-file", "blob", spec)
+		}
+		s.batch, s.bin, s.bout = cmd, in, bufio.NewReader(out)
+	}
+	fail := func(err error) ([]byte, error) {
+		s.broken = true
+		s.bin.Close()
+		s.batch.Wait()
+		s.batch = nil
+		return nil, &Error{Args: []string{"cat-file", "--batch"}, Err: err}
+	}
+	if _, err := io.WriteString(s.bin, spec+"\n"); err != nil {
+		return fail(err)
+	}
+	header, err := s.bout.ReadString('\n')
+	if err != nil {
+		return fail(err)
+	}
+	f := strings.Fields(header)
+	if len(f) != 3 {
+		// "<spec> missing" or "ambiguous": the listing said it exists.
+		return nil, &Error{Args: []string{"cat-file", "--batch"}, Err: fmt.Errorf("%s: %s", spec, strings.TrimSpace(header))}
+	}
+	size, err := strconv.Atoi(f[2])
+	if err != nil || size < 0 {
+		return fail(fmt.Errorf("bad cat-file header %q", header))
+	}
+	buf := make([]byte, size+1)
+	if _, err := io.ReadFull(s.bout, buf); err != nil {
+		return fail(err)
+	}
+	if f[1] != "blob" {
+		return nil, &Error{Args: []string{"cat-file", "--batch"}, Err: fmt.Errorf("%s is a %s, not a file", spec, f[1])}
+	}
+	return buf[:size], nil
+}
 
 func (s *RefSource) String() string { return s.Ref }
 
@@ -207,7 +327,7 @@ func (s *RefSource) ReadFile(name string) ([]byte, error) {
 	if !files[name] {
 		return nil, &fs.PathError{Op: "read", Path: s.Ref + ":" + name, Err: fs.ErrNotExist}
 	}
-	return s.Repo.Git("cat-file", "blob", s.Ref+":"+name)
+	return s.catFile(name)
 }
 
 // ReadDir lists the files directly inside dir at the ref.
@@ -333,9 +453,13 @@ func (r *Repo) RemoteDefault() (ref string, ok bool, err error) {
 // CommonDir returns the absolute git common directory: shared by every
 // worktree of a clone (unlike GitDir, which is per worktree).
 func (r *Repo) CommonDir() (string, error) {
+	if r.commonDir != "" {
+		return r.commonDir, nil
+	}
 	out, err := r.Git("rev-parse", "--path-format=absolute", "--git-common-dir")
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(string(out)), nil
+	r.commonDir = strings.TrimSpace(string(out))
+	return r.commonDir, nil
 }

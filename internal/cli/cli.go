@@ -43,6 +43,10 @@ type Command struct {
 	Run func(c *Context) error
 	// Hidden commands are left out of `carbon help`.
 	Hidden bool
+	// StopAtPositional ends flag parsing at the first positional argument
+	// (as well as at "--"), for commands such as run whose positionals are
+	// another program's command line.
+	StopAtPositional bool
 }
 
 var registry = map[string]*Command{}
@@ -116,8 +120,11 @@ type IO struct {
 	Stdin          io.Reader
 	Stdout, Stderr io.Writer
 	Getenv         func(string) string
-	Cwd            string
-	Now            func() time.Time
+	// Environ is the whole process environment ("K=V"), for `run` and to
+	// tell an empty variable from an unset one. Nil means empty.
+	Environ func() []string
+	Cwd     string
+	Now     func() time.Time
 	// StdinIsTerminal reports whether prompts can be shown. Main sets it
 	// from the real stdin.
 	StdinIsTerminal bool
@@ -134,7 +141,7 @@ func Main(args []string) int {
 	}
 	return Run(args, IO{
 		Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr,
-		Getenv: os.Getenv, Cwd: cwd, Now: time.Now,
+		Getenv: os.Getenv, Environ: os.Environ, Cwd: cwd, Now: time.Now,
 		StdinIsTerminal:  isTerminal(os.Stdin),
 		StdoutIsTerminal: isTerminal(os.Stdout),
 	})
@@ -167,7 +174,11 @@ func (c *Context) dispatch(args []string) error {
 	if cmd != nil && cmd.Flags != nil {
 		cmd.Flags(fs)
 	}
-	pos, dash, err := parseInterspersed(fs, rest)
+	parse := parseInterspersed
+	if cmd != nil && cmd.StopAtPositional {
+		parse = parseUntilPositional
+	}
+	pos, dash, err := parse(fs, rest)
 	if err != nil {
 		e := Errorf(ExitUsage, "%s", err)
 		if cmd != nil {

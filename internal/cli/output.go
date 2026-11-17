@@ -8,6 +8,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/taylor1791/phosphorus/internal/agewrap"
 	"github.com/taylor1791/phosphorus/internal/policy"
 )
 
@@ -24,8 +25,12 @@ type Context struct {
 	// ArgsLenAtDash is the number of positionals before "--", or -1.
 	ArgsLenAtDash int
 
-	ws       *Workspace
-	trunkPol *policy.Policy // cached by TrunkPolicy: loaded once per command
+	ws *Workspace
+	// Loaded once per command (see TrunkPolicy, WorktreePolicy, Identities).
+	trunkPol *policy.Policy
+	trunkErr error
+	wtPol    *policy.Policy
+	ids      []agewrap.Identity
 }
 
 // JSON reports whether --json was given.
