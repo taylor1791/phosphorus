@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 	"io"
-	"sort"
 	"strings"
 
 	"github.com/taylor1791/phosphorus/internal/config"
@@ -206,15 +205,6 @@ func printWhoScope(out io.Writer, ws whoScope, indent string) {
 	for _, u := range ws.Unresolved {
 		fmt.Fprintf(out, "%swarning: %s names %s, which is not a team, person or machine with a file.\n", indent, ws.Scope, u)
 	}
-}
-
-func sortedNames[V any](m map[string]V) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }
 
 type accessScope struct {
