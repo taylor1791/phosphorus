@@ -80,6 +80,7 @@ type renameResult struct {
 }
 
 func runRename(c *Context) error {
+	c.sealing = true // rename re-seals every value under the scope's key
 	oldName, newName := c.Args[0], c.Args[1]
 	if err := config.CheckName("package", newName); err != nil {
 		return c.UsageErr("%v", err)
