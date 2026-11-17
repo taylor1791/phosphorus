@@ -88,10 +88,13 @@ type applyScope struct {
 	// Suspect: refused or blocked for a reason that could be tampering (a
 	// key not from trunk, a key not on trunk, a rotation from files that
 	// differ from trunk's). The command exits 1.
-	Suspect bool           `json:"suspect,omitempty"`
-	Create  bool           `json:"create,omitempty"`
-	Grant   []applyGrant   `json:"grant,omitempty"`
-	Revoke  []string       `json:"revoke,omitempty"`
+	Suspect bool         `json:"suspect,omitempty"`
+	Create  bool         `json:"create,omitempty"`
+	Grant   []applyGrant `json:"grant,omitempty"`
+	Revoke  []string     `json:"revoke,omitempty"`
+	// Rekeyed are devices whose slot was wrapped to a different public key
+	// than trunk lists for them now; the rotation re-grants the new key.
+	Rekeyed []applyRekey   `json:"rekeyed,omitempty"`
 	Rotate  *applyRotation `json:"rotate,omitempty"`
 	Promote []string       `json:"promote,omitempty"`
 	// Unproven are entries under retired keys: whoever wrote them held that
@@ -115,6 +118,15 @@ type applyScope struct {
 	sa       *policy.ScopeAccess
 	eligible []policy.Device
 	missing  []policy.Device
+}
+
+// applyRekey is a device whose key changed: the fingerprint of the key
+// trunk lists now, and the short hash the old slot recorded (all that is
+// known about the old key).
+type applyRekey struct {
+	Device      string `json:"device"`
+	Fingerprint string `json:"fingerprint"`
+	WasTo       string `json:"was"`
 }
 
 // applyStale is an entry under a retired key.
@@ -258,7 +270,7 @@ func runApply(c *Context) error {
 	now := c.Now()
 	failed := 0
 	for _, p := range doable {
-		files, lines, err := executeApplyScope(w, p, now)
+		files, lines, err := c.executeApplyScope(w, p, ids, now)
 		if err != nil {
 			e := AsError(err)
 			p.Status, p.Problem = "failed", e.Message
@@ -478,8 +490,32 @@ func (c *Context) planApplyScope(w *Workspace, pol *policy.Policy, pkg *config.P
 		p.Unproven = append(p.Unproven, applyStale{Name: st.Name, Key: st.KeyID, Set: seal.FormatTime(st.Set),
 			Drop: st.Drop, SetAfterRetired: st.SetAfterRetired})
 	}
+	// A device whose slot was wrapped to another public key than the one
+	// trunk lists now (a relabelled slot, or a device re-added under the
+	// same id) is revoked by rotation and granted its new key.
+	rekeyed := map[string]bool{}
+	cur := s.Keys.CurrentKey()
+	for _, d := range diff.Rekeyed {
+		rekeyed[d.ID] = true
+		p.Rekeyed = append(p.Rekeyed, applyRekey{Device: d.ID, Fingerprint: agewrap.Fingerprint(d.Recipient), WasTo: shortHash(cur.SlotTo[d.ID])})
+	}
 	if len(diff.Extra) > 0 {
-		p.Revoke = diff.Extra
+		var removed, rekeyedIDs []string
+		for _, id := range diff.Extra {
+			if rekeyed[id] {
+				rekeyedIDs = append(rekeyedIDs, id)
+			} else {
+				removed = append(removed, id)
+			}
+		}
+		p.Revoke = removed
+		var reasons []string
+		if len(removed) > 0 {
+			reasons = append(reasons, "removed "+removedWho(removed, s.SlotIDs(), sa))
+		}
+		if len(rekeyedIDs) > 0 {
+			reasons = append(reasons, "rekeyed "+strings.Join(rekeyedIDs, ", "))
+		}
 		for _, d := range skipped {
 			if s.Keys.CurrentKey().Slots[d.ID] != "" {
 				p.Revoke = append(p.Revoke, d.ID)
@@ -489,8 +525,7 @@ func (c *Context) planApplyScope(w *Workspace, pol *policy.Policy, pkg *config.P
 		if p.SkipUnproven {
 			values -= len(p.Unproven)
 		}
-		p.Rotate = &applyRotation{From: s.Keys.Current, Reason: "removed " + removedWho(diff.Extra, s.SlotIDs(), sa),
-			Values: values}
+		p.Rotate = &applyRotation{From: s.Keys.Current, Reason: strings.Join(reasons, ", "), Values: values}
 		if len(eligible) == 0 {
 			return block(fmt.Sprintf("%s must rotate (%s), but trunk policy names nobody who could hold the new key", p.Scope, p.Rotate.Reason),
 				"Name at least one reader for "+p.Scope+" in policy, merge it, and run `carbon apply` again.")
@@ -542,7 +577,7 @@ func (c *Context) planApplyScope(w *Workspace, pol *policy.Policy, pkg *config.P
 	}
 	p.opened = o
 	// Verify the key against trunk before doing anything with it.
-	if pol.Origin == policy.OriginTrunk {
+	{ // also checks and advances this reader's pin, in any trunk mode
 		if err := c.VerifyTrunk(w, pkg, o); err != nil {
 			e := AsError(err)
 			p.Status, p.Problem, p.Fix, p.Suspect = "refused", e.Message, e.Hint, true
@@ -721,7 +756,7 @@ func applyCheckClean(w *Workspace, ps []*applyScope) error {
 
 // executeApplyScope carries out one scope's plan in memory, then writes its
 // two files. On any error nothing in the scope is written.
-func executeApplyScope(w *Workspace, p *applyScope, now time.Time) ([]string, []string, error) {
+func (c *Context) executeApplyScope(w *Workspace, p *applyScope, ids []agewrap.Identity, now time.Time) ([]string, []string, error) {
 	var lines []string
 	o := p.opened
 	switch {
@@ -816,6 +851,17 @@ func executeApplyScope(w *Workspace, p *applyScope, now time.Time) ([]string, []
 	files, err := writeScopeFiles(p.s)
 	if err != nil {
 		return nil, nil, err
+	}
+	// Pin the key this apply made, so this reader's next open does not
+	// mistake it for a replacement.
+	if p.Create || p.Rotate != nil {
+		pinIDs := ids
+		if !p.Create {
+			pinIDs = nil // the identities that opened the scope
+		}
+		if err := c.RecordPin(w, o, pinIDs); err != nil {
+			c.Notice("warning: could not record your pin for %s: %s", p.Scope, AsError(err).Message)
+		}
 	}
 	for i := range files {
 		files[i] = w.Rel(files[i])
@@ -974,6 +1020,9 @@ func printApplyScope(out io.Writer, p *applyScope) {
 	}
 	for _, id := range p.Revoke {
 		rows = append(rows, []string{"  loses access", id})
+	}
+	for _, r := range p.Rekeyed {
+		rows = append(rows, []string{"  key changed", r.Device + "'s key changed", "new " + r.Fingerprint, "old slot was wrapped to " + r.WasTo})
 	}
 	if p.Rotate != nil {
 		to := "a new key"

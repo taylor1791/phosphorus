@@ -80,7 +80,7 @@ func (o *Opened) Rename(newPkg string, devices []policy.Device) error {
 				return err
 			}
 		} else {
-			nr.Slots = map[string]string{}
+			nr.Slots, nr.SlotTo = map[string]string{}, map[string]string{}
 			for dev := range r.Slots {
 				d, ok := byID[dev]
 				if !ok {
@@ -90,7 +90,7 @@ func (o *Opened) Rename(newPkg string, devices []policy.Device) error {
 				if err != nil {
 					return err
 				}
-				nr.Slots[dev] = slot
+				nr.SetSlot(dev, d.RecipientHash(), slot)
 			}
 		}
 		keys[id] = &nr

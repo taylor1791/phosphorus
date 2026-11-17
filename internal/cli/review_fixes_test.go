@@ -73,22 +73,7 @@ func TestApplyRotatesOnlyFromTrunksFiles(t *testing.T) {
 	// On a branch, sam (still holding the current dev key) replaces the
 	// value. Written with the library, as `set` may refuse him.
 	w.Branch("sam-branch")
-	ids, err := agewrap.ParseIdentityFile(mustReadFile(t, w.Sam.IdentityFile()), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s, err := scope.Load(w.Path(co), "checkout", "dev")
-	if err != nil {
-		t.Fatal(err)
-	}
-	o, err := s.Open(ids)
-	if err != nil {
-		t.Fatal(err)
-	}
-	o.Seal("stripe_api_key", []byte("forged"), time.Now())
-	if _, err := s.Save(); err != nil {
-		t.Fatal(err)
-	}
+	umSealAs(t, w, w.Sam, co, "dev", "stripe_api_key", "forged")
 	w.Commit("sam's change")
 	keys, secrets := w.Read(co+"/.carbon/dev.keys.toml"), w.Read(co+"/.carbon/dev.secrets.toml")
 
@@ -165,6 +150,99 @@ func TestRenameIsAllOrNothing(t *testing.T) {
 	contains(t, "rename", res.Stderr, "nothing was changed")
 	umClean(t, w)
 	if _, err := os.Stat(filepath.Join(web, "carbon.toml")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A removed reader relabels his slot as a device that policy names and has
+// no slot yet. The slot's `to` is not that device's key: apply rotates.
+func TestApplyCatchesARelabelledSlot(t *testing.T) {
+	w := clitest.Standard(t)
+	co := w.PkgDir
+	w.Lin.In(co).Stdin("v1").Must("set", "stripe_api_key", "--env", "dev")
+	w.Commit("dev value")
+	desk := w.Person("ada-desk")
+	desk.Must("join", "--person", "ada", "--device", "desk")
+	w.Commit("ada desk")
+	w.Ada.Must("remove", "sam", "--yes")
+	w.Commit("remove sam")
+
+	w.Branch("sam-relabel")
+	w.Replace(co+"/.carbon/dev.keys.toml", `"sam/laptop"`, `"ada/desk"`)
+	w.Commit("carbon apply: grant ada/desk")
+	w.Checkout("main")
+	w.Merge("sam-relabel")
+
+	res := w.Lin.Must("apply", "--yes", "--env", "dev")
+	contains(t, "apply", res.Stdout, "key changed", "ada/desk's key changed", "rotates", `reason "rekeyed ada/desk"`)
+	contains(t, "keys", w.Read(co+"/.carbon/dev.keys.toml"), `reason = "rekeyed ada/desk"`)
+	w.Lin.In(co).Stdin("v2-after-removal").Must("set", "stripe_api_key", "--env", "dev")
+	w.Commit("new value")
+	g := w.Sam.Run("get", "stripe_api_key", "--package", "checkout", "--env", "dev")
+	if g.Code == 0 || strings.Contains(g.Stdout, "v2-after-removal") {
+		t.Fatalf("removed sam reads a later value:\n%s", g)
+	}
+	if v, _ := umGet(t, desk, "checkout", "dev", "stripe_api_key"); v != "v2-after-removal" {
+		t.Fatal(v)
+	}
+}
+
+// A device removed and re-joined under the same id with a new key: the
+// stolen identity must not read values set afterwards.
+func TestApplyRotatesWhenADeviceRejoinsWithANewKey(t *testing.T) {
+	w := clitest.Standard(t)
+	co := w.PkgDir
+	desk := w.Person("ada-desk")
+	desk.Must("join", "--person", "ada", "--device", "desk")
+	w.Commit("ada desk")
+	w.Ada.In(co).Stdin("v1").Must("set", "stripe_api_key", "--env", "dev")
+	w.Commit("dev value")
+	desk.Must("remove", "ada/laptop", "--yes")
+	w.Commit("remove stolen laptop")
+	newLaptop := w.Person("ada-new")
+	newLaptop.Must("join", "--person", "ada", "--device", "laptop")
+	w.Commit("ada's new laptop")
+	fp := regexp.MustCompile(`Fingerprint\s+(\S+)`).FindStringSubmatch(newLaptop.Must("join", "--person", "ada", "--device", "laptop").Stdout)[1]
+
+	// rename will not re-wrap a changed key: it names it and stops.
+	res := w.Lin.Fails(1, "rename", "checkout", "shop", "--yes")
+	contains(t, "rename", res.Stderr, "checkout/dev ada/laptop", fp, "carbon apply")
+	umClean(t, w)
+
+	res = w.Lin.Must("apply", "--yes", "--env", "dev")
+	contains(t, "apply", res.Stdout, "ada/laptop's key changed", "new "+fp, `reason "rekeyed ada/laptop"`)
+	w.Lin.In(co).Stdin("v2").Must("set", "stripe_api_key", "--env", "dev")
+	w.Commit("v2")
+	g := w.Ada.Run("get", "stripe_api_key", "--package", "checkout", "--env", "dev")
+	if g.Code == 0 || strings.Contains(g.Stdout, "v2") {
+		t.Fatalf("the stolen laptop reads a later value:\n%s", g)
+	}
+	if v, _ := umGet(t, newLaptop, "checkout", "dev", "stripe_api_key"); v != "v2" {
+		t.Fatal(v)
+	}
+	contains(t, "after", w.Lin.Must("apply", "--env", "dev").Stdout, "Nothing to do")
+}
+
+// umSealAs seals a value as p directly through the scope API (bypassing
+// the CLI's checks, as a modified client could), and saves the files.
+func umSealAs(t *testing.T, w *clitest.World, p *clitest.Person, dir, env, name, value string) {
+	t.Helper()
+	ids, err := agewrap.ParseIdentityFile(mustReadFile(t, p.IdentityFile()), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := scope.Load(w.Path(dir), "checkout", env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, err := s.Open(ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := o.Seal(name, []byte(value), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Save(); err != nil {
 		t.Fatal(err)
 	}
 }

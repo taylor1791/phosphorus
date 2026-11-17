@@ -7,7 +7,9 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/taylor1791/phosphorus/internal/agewrap"
 	"github.com/taylor1791/phosphorus/internal/config"
+	"github.com/taylor1791/phosphorus/internal/policy"
 	"github.com/taylor1791/phosphorus/internal/scope"
 	"github.com/taylor1791/phosphorus/internal/tomledit"
 )
@@ -39,8 +41,25 @@ type renameScope struct {
 	Scope  string   `json:"scope"`
 	Values int      `json:"values"`
 	Files  []string `json:"files"`
+	// Rekeyed are slots re-wrapped to a public key other than the one the
+	// slot recorded (trunk policy now lists a different key for the device).
+	Rekeyed []renameRekey `json:"rekeyed,omitempty"`
 
 	opened *scope.Opened
+}
+
+type renameRekey struct {
+	Device      string `json:"device"`
+	Fingerprint string `json:"fingerprint"`
+	WasTo       string `json:"was"`
+}
+
+// shortHash shortens "sha256:<hex>" for display.
+func shortHash(h string) string {
+	if len(h) > len("sha256:")+12 {
+		return h[:len("sha256:")+12] + "..."
+	}
+	return h
 }
 
 type renameRef struct {
@@ -111,9 +130,9 @@ func runRename(c *Context) error {
 			return err
 		}
 		devices := pol.AllDevices()
-		known := map[string]bool{}
+		known := map[string]policy.Device{}
 		for _, d := range devices {
-			known[d.ID] = true
+			known[d.ID] = d
 		}
 		for _, s := range toOpen {
 			o, err := c.OpenScope(w, pkg, s)
@@ -126,14 +145,35 @@ func runRename(c *Context) error {
 				}
 				return err
 			}
-			res.Scopes = append(res.Scopes, &renameScope{Scope: s.Name(), Values: len(s.Secrets.Entries), opened: o})
+			rs := &renameScope{Scope: s.Name(), Values: len(s.Secrets.Entries), opened: o}
+			res.Scopes = append(res.Scopes, rs)
 			for _, id := range s.SlotIDs() {
-				if !known[id] {
+				d, ok := known[id]
+				if ok && s.Keys.CurrentKey().SlotTo[id] != d.RecipientHash() {
+					rs.Rekeyed = append(rs.Rekeyed, renameRekey{Device: id, Fingerprint: agewrap.Fingerprint(d.Recipient),
+						WasTo: shortHash(s.Keys.CurrentKey().SlotTo[id])})
+				}
+				if !ok {
 					return &Error{Code: ExitError, Message: fmt.Sprintf("%s has a slot for %s, which trunk policy does not name", s.Name(), id),
 						Details: []string{"rename re-wraps each slot to the same device, and needs its public key from trunk."},
 						Hint:    "Run `carbon apply` first (it rotates the slot away), then rename."}
 				}
 			}
+		}
+		// A slot wrapped to a key other than the one trunk lists now is a
+		// key change that only a rotation settles: re-wrapping it here would
+		// record the new key and hide that the old one still holds the scope
+		// key. Show the fingerprints and stop.
+		var changed []string
+		for _, rs := range res.Scopes {
+			for _, r := range rs.Rekeyed {
+				changed = append(changed, fmt.Sprintf("%s %s: slot wrapped to %s; trunk now lists key %s", rs.Scope, r.Device, r.WasTo, r.Fingerprint))
+			}
+		}
+		if len(changed) > 0 {
+			return &Error{Code: ExitError, Message: "some devices' keys changed since their slots were made, so rename stops",
+				Details: append(changed, "Re-wrapping them would grant the new keys without rotating away the old ones."),
+				Hint:    "Run `carbon apply` first (it rotates and grants the new keys), merge it, then rename."}
 		}
 		for _, rs := range res.Scopes {
 			if err := rs.opened.Rename(newName, devices); err != nil {
@@ -238,6 +278,11 @@ func runRename(c *Context) error {
 		files = append(files, rel)
 	}
 	res.Files = files
+	for _, env := range w.Config.Environments {
+		if err := c.RenamePins(w, config.ScopeName(oldName, env), config.ScopeName(newName, env)); err != nil {
+			return err
+		}
+	}
 	return c.Output(res, func(out io.Writer) {
 		fmt.Fprintf(out, "Renamed %s to %s. Changed %s.\n\n", oldName, newName, strings.Join(files, ", "))
 		fmt.Fprintln(out, "Next: commit these files together and open a pull request. Move the directory, if")

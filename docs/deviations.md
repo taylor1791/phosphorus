@@ -172,8 +172,17 @@ Each entry says what differs from `docs/implementation.md` and why.
     wraps only to hybrid devices.
 24. **Rotation reason.** `removed <who>` names a person when all of their
     slots go and the scope no longer names any of their devices, else each
-    device (`ada/laptop`), and machines as `machine:<name>`. "Can finish
-    it" lists only current readers who stay readers.
+    device (`ada/laptop`), and machines as `machine:<name>`. A device whose
+    slot records (`to`) a different public key than trunk lists for it now
+    (a relabelled slot, or a device removed and re-joined under the same
+    id) is rotated too: the plan says "<device>'s key changed" with the new
+    key's fingerprint and the old slot's short hash, and the reason adds
+    `rekeyed <device>` (`removed sam, rekeyed ada/laptop`, or `rekeyed
+    ada/laptop` alone). Whatever computes rotation debt should treat
+    `rekeyed` like `removed`. "Can finish it" lists only current readers who
+    stay readers. After a rotation or creation is saved, apply records the
+    caller's pin for the new key (`RecordPin`); a scope the pin check
+    refuses is a refused scope (exit 1).
 25. **`request`** refuses the root package (its `[access]` is the default
     for every package). It proposes the caller's person, or
     `machine:<name>` for a machine identity, and reports "already reads"
@@ -186,7 +195,13 @@ Each entry says what differs from `docs/implementation.md` and why.
     (refusing if trunk has none: run `apply` first), keeps values under the
     key they were sealed with, and does not commit. It prepares every file
     in memory and writes them all or none (a failed write restores the
-    files already written). Until it merges:
+    files already written). Slots are written with their `to` hash and
+    every reader's pin moves to the new scope name (`RenamePins`). If any
+    slot records a different key than trunk lists for its device, rename
+    stops and names each such device with the new key's fingerprint:
+    re-wrapping would record the new key and hide that the old one still
+    holds the scope key, so no rotation would ever follow. Run `apply`
+    first. Until it merges:
     - readers verify the branch's keys against trunk's file in the same
       directory, which still names the old package. `VerifyTrunk` accepts a
       different package name only when the opened keys unseal trunk's

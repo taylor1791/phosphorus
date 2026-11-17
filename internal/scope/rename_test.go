@@ -122,6 +122,9 @@ func TestVerifyTrunkAfterRename(t *testing.T) {
 	if err := o.VerifyTrunk(trunk); err != nil {
 		t.Fatalf("renamed scope vs trunk under the old name: %v", err)
 	}
+	if got := o.Keys.CurrentKey().SlotTo["lin/laptop"]; got != lin.dev.RecipientHash() {
+		t.Fatalf("re-wrapped slot records %q", got)
+	}
 	if err := o.VerifyTrunk(foreign); !errors.Is(err, ErrNotFromTrunk) {
 		t.Fatalf("foreign key accepted: %v", err)
 	}

@@ -288,7 +288,9 @@ func TestApplyOffboardingDrill(t *testing.T) {
 	// after the rotation: a value under a retired key, set after it retired.
 	w.Checkout("old-dev")
 	time.Sleep(1100 * time.Millisecond)
-	w.Sam.In(co).Stdin("sess_from_sam").Must("set", "session_key", "--env", "dev")
+	// `set` refuses him now, so seal through the library, as a modified
+	// client would.
+	umSealAs(t, w, w.Sam, co, "dev", "session_key", "sess_from_sam")
 	w.Commit("sam sets session_key after his removal")
 	w.Checkout("main")
 
