@@ -287,11 +287,11 @@ A device reaches a secret only through a slot that wraps the scope key to it. Li
 | Layer | Construction | Where it lives |
 | --- | --- | --- |
 | Identity key | An age key pair, X25519 or hybrid post-quantum, or any age plugin recipient such as a YubiKey, Secure Enclave, or TPM | Private half under `~/.config/carbon/`, optionally passphrase-encrypted. Public half in `.carbon/people/` |
-| Scope key | 32 random bytes from the OS generator, with a random 6-character id | Never stored in the clear |
+| Scope key | 32 random bytes from the OS generator, with a random id of k and 5 characters | Never stored in the clear |
 | Slot | A standard age file encrypted to exactly one device. Its payload is the scope name, key id, and key | One line in the scope's `keys.toml` |
 | Sealed value | XChaCha20-Poly1305 with a random 24-byte nonce. Associated data: format version, package, environment, secret name, key id, set time | One line in the scope's `secrets.toml` |
 | Inbox key | An age key pair made with each scope key | Public half in `keys.toml`. Private half sealed under the scope key |
-| Drop | A standard age file encrypted to the inbox key. Its payload is the package, environment, secret name, and value | One line in `secrets.toml` until promoted |
+| Drop | A standard age file encrypted to the inbox key. Its payload is the package, environment, secret name, set time, and value | One line in `secrets.toml` until promoted |
 | Retired key | The previous scope key, sealed under its successor | The scope's `keys.toml` |
 
 The construction gives six properties:
@@ -358,7 +358,7 @@ A contributor who cannot read a scope can still set a secret in it. `carbon set`
 1. The inbox public key is read from the trunk ref, like policy, so a key swapped on a branch is never used.
 2. Readers can use a drop at once. `run` and `get` open it with the inbox private key, which only readers can unseal.
 3. The pull request shows the drop as a changed line, and `carbon check` names it. The package's code owners decide whether to accept it.
-4. The next `carbon apply` by a reader promotes the drop to a sealed value.
+4. The next `carbon apply` by a reader promotes the drop to a sealed value, once the drop is on trunk.
 
 A workspace or package can turn drops off per environment with `drops = false` under `[access]`.
 
@@ -432,7 +432,7 @@ A deploy job holds one machine identity and runs `carbon run --env prod -- ./dep
 
 ### Scale
 
-Slots grow as scopes times reader devices. A repo with 40 packages, 3 environments, and 60 devices where everyone reads everything holds 7,200 slot lines, roughly 3 MB with X25519 keys or 17 MB with hybrid keys. Slot files are marked generated in `.gitattributes` so review tools collapse them. Team keys, which remove this growth, are on the backlog.
+Slots grow as scopes times reader devices. A repo with 40 packages, 3 environments, and 60 devices where everyone reads everything holds 7,200 slot lines, roughly 3 MB with X25519 keys or 17 MB with hybrid keys. Key files are not marked generated, because reviewers need to see which slot lines a change touches. Team keys, which remove this growth, are on the backlog.
 
 ## Threat model
 
