@@ -128,26 +128,38 @@ func (s *Scope) SlotIDs() []string {
 
 // SlotDiff compares the current key's slots with the devices policy names.
 type SlotDiff struct {
-	Missing []policy.Device // named, no slot: pending grants
-	Extra   []string        // slot, not named: pending revocations
+	Missing []policy.Device // named, no slot for its current key: pending grants
+	Extra   []string        // slot for a key policy does not name: pending revocations
+	// Rekeyed are named devices whose slot was wrapped to a different public
+	// key than the one policy now lists (its `to` differs from
+	// Device.RecipientHash). Each is also in Missing and in Extra: the old
+	// key must be revoked by rotation and the new one granted.
+	Rekeyed []policy.Device
 }
 
-// DiffSlots compares the current key's slots with devices.
+// DiffSlots compares the current key's slots with devices, by device id and
+// by the recipient hash each slot records.
 func (s *Scope) DiffSlots(devices []policy.Device) SlotDiff {
 	var d SlotDiff
-	slots := map[string]string{}
+	slots, to := map[string]string{}, map[string]string{}
 	if s.Keys != nil {
-		slots = s.Keys.CurrentKey().Slots
+		slots, to = s.Keys.CurrentKey().Slots, s.Keys.CurrentKey().SlotTo
 	}
-	named := map[string]bool{}
+	valid := map[string]bool{}
 	for _, dev := range devices {
-		named[dev.ID] = true
-		if _, ok := slots[dev.ID]; !ok {
+		_, has := slots[dev.ID]
+		switch {
+		case !has:
 			d.Missing = append(d.Missing, dev)
+		case to[dev.ID] != dev.RecipientHash():
+			d.Missing = append(d.Missing, dev)
+			d.Rekeyed = append(d.Rekeyed, dev)
+		default:
+			valid[dev.ID] = true
 		}
 	}
 	for _, id := range sortedKeys(slots) {
-		if !named[id] {
+		if !valid[id] {
 			d.Extra = append(d.Extra, id)
 		}
 	}
@@ -168,7 +180,13 @@ type Opened struct {
 	// inboxErrs records retired inbox_sealed fields that failed to open:
 	// drops under them report tampering.
 	inboxErrs map[string]error
+	// ids are the identities Open was called with (nil after Create).
+	ids []agewrap.Identity
 }
+
+// Identities returns the identities the scope was opened with (nil for a
+// scope just created). pins.ReaderID keys pins by them.
+func (o *Opened) Identities() []agewrap.Identity { return o.ids }
 
 // Close zeroes the keys held in memory.
 func (o *Opened) Close() {
@@ -232,13 +250,13 @@ func (o *Opened) newKeyRecord(devices []policy.Device, now time.Time, existing m
 	if err != nil {
 		return fail(err)
 	}
-	rec := &store.Key{Created: now, Inbox: recipient, InboxSealed: inboxSealed, Slots: map[string]string{}}
+	rec := &store.Key{Created: now, Inbox: recipient, InboxSealed: inboxSealed, Slots: map[string]string{}, SlotTo: map[string]string{}}
 	for _, d := range devices {
 		slot, err := wrapTo(d, o.Name(), id, key)
 		if err != nil {
 			return fail(err)
 		}
-		rec.Slots[d.ID] = slot
+		rec.SetSlot(d.ID, d.RecipientHash(), slot)
 	}
 	return id, rec, key, inboxIDs[0], nil
 }
@@ -266,6 +284,7 @@ func (s *Scope) Open(ids []agewrap.Identity, prefer ...string) (*Opened, error) 
 	}
 	cur := s.Keys.CurrentKey()
 	o := &Opened{Scope: s, keys: map[string]*seal.Key{}, inboxes: map[string]agewrap.Identity{}, keyErrs: map[string]error{}}
+	o.ids = ids
 
 	var soft []agewrap.Identity
 	for _, id := range ids {
@@ -649,7 +668,9 @@ func (o *Opened) move(name string) error {
 }
 
 // AddSlots wraps the current key to each device that has no slot yet and
-// returns the ids added.
+// returns the ids added. A device whose slot exists but records another
+// recipient (SlotDiff.Rekeyed) is left alone: its old key can still read, so
+// it needs a rotation, which writes fresh slots.
 func (o *Opened) AddSlots(devices []policy.Device) ([]string, error) {
 	cur := o.Keys.CurrentKey()
 	k, err := o.key(o.Keys.Current)
@@ -665,7 +686,7 @@ func (o *Opened) AddSlots(devices []policy.Device) ([]string, error) {
 		if err != nil {
 			return added, err
 		}
-		cur.Slots[d.ID] = slot
+		cur.SetSlot(d.ID, d.RecipientHash(), slot)
 		added = append(added, d.ID)
 	}
 	return added, nil
@@ -759,7 +780,7 @@ func (o *Opened) RotateSkippingBadDrops(devices []policy.Device, reason string, 
 
 	old := o.Keys.Keys[oldID]
 	old.Retired, old.Reason, old.Successor, old.Sealed = now, reason, newID, sealedOld
-	old.Inbox, old.Slots = "", nil
+	old.Inbox, old.Slots, old.SlotTo = "", nil, nil
 	o.Keys.Keys[newID] = rec
 	o.Keys.Current = newID
 	o.Secrets.Entries = entries

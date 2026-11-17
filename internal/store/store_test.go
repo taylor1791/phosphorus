@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -33,8 +34,8 @@ inbox = "age1pq1x7c4"
 inbox_sealed = "carbon1:Rb1v"
 
 [keys.k3f9q2.slots]
-"lin/laptop" = "age1:YWdl1"
-"machine:deploy-checkout" = "age1:YWdl2"
+"lin/laptop" = { to = "sha256:ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb", slot = "age1:YWdl1" }
+"machine:deploy-checkout" = { to = "sha256:3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d", slot = "age1:YWdl2" }
 `
 
 func TestSecretsRoundTripIsByteIdentical(t *testing.T) {
@@ -105,6 +106,9 @@ func TestKeysErrors(t *testing.T) {
 		"retired with slots":  {"inbox_sealed = \"carbon1:Old1\"\n", "inbox_sealed = \"carbon1:Old1\"\ninbox = \"age1pq1x\"\n"},
 		"no successor":        {`successor = "k3f9q2"`, `successor = "kzzzzz"`},
 		"bad slot id":         {`"lin/laptop"`, `"lin"`},
+		"slot without to":     {`to = "sha256:ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb", `, ""},
+		"to not sha256":       {`to = "sha256:ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"`, `to = "age1pq1x"`},
+		"slot without blob":   {`, slot = "age1:YWdl1"`, ""},
 		"bad slot blob":       {`"age1:YWdl1"`, `"carbon1:x"`},
 		"unknown field":       {`reason = "removed sam"`, "reason = \"removed sam\"\nwho = \"x\""},
 		"no inbox":            {"inbox = \"age1pq1x7c4\"\n", ""},
@@ -179,5 +183,27 @@ func TestLocalDateTimesRejected(t *testing.T) {
 	}
 	if _, err := ParseSecrets("x", []byte("a = { key = \"kaaaaa\", set = 2026-01-01T00:00:00+00:00, value = \"carbon1:x\" }\n")); err != nil {
 		t.Errorf("+00:00 offset rejected: %v", err)
+	}
+}
+
+// Slots record the recipient they were wrapped to; the old bare-string form
+// gets a clear error.
+func TestSlotRecipientHash(t *testing.T) {
+	k, err := ParseKeys("x", []byte(keysSample))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if to := k.CurrentKey().SlotTo["lin/laptop"]; !strings.HasPrefix(to, "sha256:") || len(to) != 71 {
+		t.Fatalf("SlotTo = %q", to)
+	}
+	old := regexp.MustCompile(`"lin/laptop" = \{[^}]*\}`).ReplaceAllString(keysSample, `"lin/laptop" = "age1:YWdl1"`)
+	_, err = ParseKeys("x", []byte(old))
+	if err == nil || !strings.Contains(err.Error(), "old slot format") {
+		t.Fatalf("old form: %v", err)
+	}
+	var nk Key
+	nk.SetSlot("a/b", "sha256:"+strings.Repeat("0", 64), "age1:x")
+	if nk.Slots["a/b"] != "age1:x" || nk.SlotTo["a/b"] == "" {
+		t.Fatal("SetSlot")
 	}
 }

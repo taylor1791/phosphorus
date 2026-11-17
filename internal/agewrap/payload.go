@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -181,4 +182,12 @@ func Fingerprint(recipient string) string {
 		words[i] = Words[idx]
 	}
 	return strings.Join(words, "-")
+}
+
+// RecipientHash is "sha256:" and the hex SHA-256 of a recipient string,
+// exactly as written in the people or machine file. A keys file records it
+// as each slot's `to`. This is the only place it is computed.
+func RecipientHash(recipient string) string {
+	sum := sha256.Sum256([]byte(recipient))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }

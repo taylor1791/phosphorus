@@ -219,6 +219,7 @@ func TestSlotCopiedFromAnotherScopeFails(t *testing.T) {
 	b := mustCreate(t, filepath.Join(root, "b"), "checkout", "prod", lin)
 	// ada copies her checkout/dev slot into checkout/prod.
 	b.Keys.CurrentKey().Slots["ada/laptop"] = a.Keys.CurrentKey().Slots["ada/laptop"]
+	b.Keys.CurrentKey().SlotTo["ada/laptop"] = a.Keys.CurrentKey().SlotTo["ada/laptop"]
 	bs := reload(t, b.Scope)
 	if _, err := bs.Open(ada.ids, "ada/laptop"); !errors.Is(err, ErrTampered) {
 		t.Fatalf("copied slot: %v", err)
@@ -229,6 +230,7 @@ func TestSlotCopiedFromAnotherScopeFails(t *testing.T) {
 	}
 	// A slot with the right scope but another key id also fails.
 	b.Keys.CurrentKey().Slots["ada/laptop"] = a.Keys.CurrentKey().Slots["ada/laptop"]
+	b.Keys.CurrentKey().SlotTo["ada/laptop"] = a.Keys.CurrentKey().SlotTo["ada/laptop"]
 	b.Keys.Scope = "checkout/dev"
 	if _, err := b.Scope.Open(ada.ids); !errors.Is(err, ErrTampered) {
 		t.Fatalf("other key id: %v", err)

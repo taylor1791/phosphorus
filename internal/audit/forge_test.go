@@ -42,15 +42,17 @@ func forge(t *testing.T, s *scope.Scope, id string, devices []policy.Device, now
 		t.Fatal(err)
 	}
 	now = now.UTC().Truncate(time.Second)
-	rec := &store.Key{Created: now, Inbox: recipient, InboxSealed: inboxSealed, Slots: map[string]string{}}
+	rec := &store.Key{Created: now, Inbox: recipient, InboxSealed: inboxSealed, Slots: map[string]string{}, SlotTo: map[string]string{}}
 	for _, d := range devices {
 		r, err := agewrap.ParseRecipient(d.Recipient)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if rec.Slots[d.ID], err = agewrap.WrapSlot(r, s.Name(), id, key); err != nil {
+		blob, err := agewrap.WrapSlot(r, s.Name(), id, key)
+		if err != nil {
 			t.Fatal(err)
 		}
+		rec.SetSlot(d.ID, d.RecipientHash(), blob)
 	}
 	s.Keys = &store.Keys{Scope: s.Name(), Current: id, Keys: map[string]*store.Key{id: rec}}
 	s.Secrets = store.NewSecrets()

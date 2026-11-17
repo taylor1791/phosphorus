@@ -21,17 +21,18 @@ themselves. To build carbon by hand: `CGO_ENABLED=0 go build ./cmd/carbon`.
 | `internal/scope` | Everything about a scope's keys and values: `Load`, `Create`, `Open`, `Reveal`/`RevealAll`, `Seal`, `Drop`, `AddSlots`, `DiffSlots`, `Rotate`/`RotateSkippingBadDrops`, `Promote(At)`/`PromoteDrops(At)`, `Refresh`/`RefreshDetailed`, `StaleEntries`, `VerifyTrunk`, `TrunkInbox`, `ReadKeysAt`, `List` |
 | `internal/policy` | Who reads a scope: `LoadTrunk`/`LoadTrunkWith` (apply, drops, scope creation, check's slot rules; `Policy.Trunk` says which ref and from where, see `ResolveTrunk`), `LoadWorktree` (who, access, status, run), `Policy.Scope` (devices, `Why`, `Unresolved`, `RequirePQ`, `Drops`, `Eligible`), `Scopes`, `ScopesOf`, `Identify`, `TeamsOf` |
 | `internal/config` | Parsing people-written files, names, `ParseTemplate`, `ParseDuration`, `ParseGenerate`, `Quote`, writers for people/machines/teams |
-| `internal/audit` | Keyless analysis of the whole repo (`check`, `status`): `Load(repo, getenv)` (trunk resolved with `policy.ResolveTrunk`; an unresolvable one is `State.TrunkErr`) → `State.Check` (findings with stable rule ids, listed in `audit.Rules`), `State.Debts`, `BuildGraph`, `Refs` |
-| `internal/store` | Parsing and writing secrets/keys files (rarely needed directly; `scope` wraps it) |
+| `internal/audit` | Keyless analysis of the whole repo (`check`, `status`): `Load(repo, getenv)` (trunk resolved with `policy.ResolveTrunk`; an unresolvable one is `State.TrunkErr`) → `State.Check` (findings with stable rule ids, listed in `audit.Rules`, banner items flagged), `State.Debts`, `BuildGraph`, `Refs` |
+| `internal/store` | Parsing and writing secrets/keys files (rarely needed directly; `scope` wraps it). A slot is `Key.Slots[id]` (the age blob) plus `Key.SlotTo[id]` (`sha256:` hash of the recipient); write both with `Key.SetSlot` |
 | `internal/agewrap` | age: recipients, identities, slots, drops, `StanzaTypes` (for `check`), `Fingerprint` |
 | `internal/seal` | Sealed blobs and associated data (only `scope` should call it) |
 | `internal/gitx` | git plumbing: `Repo.Source(ref)`, `RefExists`, `IsIgnored`, `Commit`, `GitDir`, `ConfigGet`; `ScrubbedEnviron` for any subprocess (the child of `run`) |
 
 `apply` is orchestration over these: for each scope, `policy.LoadTrunk` →
 `Policy.Scope` → `Scope.Open` → `Opened.VerifyTrunk(trunk keys)` →
-`Scope.DiffSlots`; if `Extra` is non-empty, `Opened.RotateSkippingBadDrops`
-with `reason = "removed <who>"`; else `Opened.AddSlots(Missing)`; then
-`PromoteDropsAt(now)`; show `Scope.StaleEntries()` in the plan (values under
+`Scope.DiffSlots`; if `Extra` is non-empty (including `Rekeyed` devices,
+whose slot records an old public key), `Opened.RotateSkippingBadDrops` with
+`reason = "removed <who>"` (say "<device>'s key changed" for `Rekeyed`); else `Opened.AddSlots(Missing)`; then
+then `ctx.RecordPin` after saving a rotation; `PromoteDropsAt(now)`; show `Scope.StaleEntries()` in the plan (values under
 retired keys have an unproven author) before `RefreshDetailed`; report skipped
 drops; `Scope.Save`; `Repo.Commit` with exactly the written paths.
 
@@ -86,8 +87,10 @@ was (for `run`).
 | `TrunkKeys(w, pol, pkg, env)` | A scope's keys file at trunk (or the working tree under the exceptions) |
 | `Identities(required)` | The caller's identities (`CARBON_IDENTITY`, `CARBON_IDENTITY_FILE`, XDG path; exit 6) |
 | `LoadScope(w, pkg, env)` / `OpenScope(w, pkg, s)` | Load a scope; open it, turning "not a reader" into the design's exit-3 error, then `VerifyTrunk` |
-| `VerifyTrunk(w, pkg, opened)` | Check an opened scope against trunk's keys file; call it on every path that opens a scope without `OpenScope` |
+| `VerifyTrunk(w, pkg, opened)` | Check an opened scope against trunk's keys file, then the reader's pin (`CheckPin`; refusal points at `carbon trust`); call it on every path that opens a scope without `OpenScope` |
 | `NoAccessErr(pol, pkg, env, me, slots)` | The "you cannot read X in Y" error with readers and the next command |
+| `RecordPin(w, opened, ids)` | Pin the current key for the caller; call after `Scope.Save` when you created or rotated the key (`apply`) |
+| `RenamePins(w, oldScope, newScope)` / `LoadPins(w)` | Move pins for `rename`; load the pins file (corrupt file → error with the fix) |
 | `Me(pol, ids)`, `DeviceIDs(ds)` | Which devices the caller's identities are |
 | `Confirm(question)` | y/N on the terminal; `--yes` skips; no terminal → exit 7. Print the plan first |
 | `ReadSecret(prompt)` | Hidden prompt on a terminal, else stdin minus one trailing newline |
