@@ -1,0 +1,935 @@
+#!/usr/bin/env nu
+
+use std/log
+
+let name = "carbon"
+let version = "0.0.3"
+let git_root = git rev-parse --show-toplevel
+let config_dir_name = $".($name)"
+let config_dir = ($git_root | path join $config_dir_name)
+let service_config_name = $"($name).toml"
+let relative_private_key = ($config_dir_name | path join "private-key.age")
+let private_key_file = ($git_root | path join $relative_private_key)
+
+# Encrypted local configuration for monorepo-based service-oriented architectures.
+#
+# Services in a monorepo expose configuration to other services and consume
+# configuration from other services. When using carbon a service code-ifys this in a
+# carbon.toml file. All of the published configuration is encrypted and stored in a
+# registry. Registries are stored in the monorepo and use envelope encrypted to allow
+# specific users to decrypt a registry. Registries are named and isolated to facilitate
+# different environment.
+#
+# Note: This is a work in progress and should not be used in production. E.g., a
+# production ready system would have service-level access controls. This is not
+# implemented yet.
+def main []: nothing -> nothing {
+  help main
+}
+
+# Bootstraps the user's key and initializes services.
+#
+# Performs the following actions:
+#  1. Creates a private key for the user if one does not exist.
+#  2. Ensures that private key are ignored by git.
+#  3. Ensures the default registry exists and the user has requested access to it.
+#  4. Creates a carbon.toml file for each provided service if one does not exist.
+#
+# Named registries are created with `carbon request`.
+def "main init" [
+  ...services: string # The paths of the services to initialize relative to the git root.
+]: nothing -> nothing {
+  let ignore = ($git_root | path join .gitignore)
+  if not ($ignore | path exists) {
+    touch $ignore
+  }
+
+  let ignore_content = $"/($relative_private_key)"
+  if (not (open $ignore | lines | any {|line| $line == $ignore_content})) {
+    log debug $"Appending ($ignore_content) to .gitignore..."
+    $"\n($ignore_content)" | save $ignore --append
+  }
+
+  main request --only-if-created
+
+  if ($services | is-empty) {
+    log debug "No services provided. Skipping service initialization."
+  }
+
+  for $service in $services {
+    let service_path = ($git_root | path join $service)
+    if not ($service_path | path exists) {
+      log debug "Creating service directory..."
+      mkdir $service_path
+    }
+
+    let service_config_name = $service_path | path join $service_config_name
+    let service_config_path = $git_root | path join $service_config_name
+    if not ($service_config_path | path exists) {
+      log debug $"Creating ($service_config_name)"
+      {
+        name: $service
+        pull: {
+          password: {
+            service: $service
+            default: {
+              command: "cat /dev/random | tr -dc 'A-Za-z0-9' | head -c 20"
+            }
+          }
+        }
+        push: {
+          password: {
+            command: "cat .environment.json | jq -r '.password'"
+          }
+        }
+      } | save $service_config_path
+    }
+  }
+}
+
+# Pushes a service's exposed configuration to the registry.
+#
+# Reads the service's `push` attribute, encrypts the configuration, and writes it to the
+# current registry. Only available to users who have access to the registry.
+#
+# If no service is provided, the closest ancestor service will be used. Provided
+# services are relative to the git root.
+def "main push" [
+  service?: string # Path to the service that will push its configuration to the registry.
+]: nothing -> nothing {
+  let working_dir = read_working_dir $service
+  let service_config = open ($working_dir | path join $service_config_name)
+  let registry = read_registry $service_config $working_dir
+  let sops = read_sops_config $registry
+
+  let service_name = $service_config | get name | to json --raw
+  let publish = $service_config | get push? | default {}
+  for secret_name in ($publish | columns) {
+    let expression = find_expression $registry ($publish | get $secret_name) $secret_name
+    let secret = resolve $expression $working_dir { "carbon.registry": $registry } | to json --raw
+    log debug $"Publishing secret ($secret_name) with value: ($secret)"
+
+    with-env {
+      SOPS_AGE_KEY_FILE: $private_key_file
+    } {
+      let set_value = $'[($service_name)][($secret_name | to json --raw)] ($secret)'
+      sops --config $sops.config_path --set $set_value -i $sops.registry_path
+    }
+  }
+}
+
+# Pulls a service's configuration from the registry.
+#
+# Read the service's `pull` attribute, decrypts the configuration from the current
+# registry, and writes it to the service's `file` attribute. The `file` attribute
+# defaults to `.environment.json` if not specified. Only available to users who have
+# access to the registry.
+#
+# If no service is provided, the closest ancestor service will be used. Provided
+# services are relative to the git root.
+def "main pull" [
+  service?: string # Path to the service that will pull its configuration from the registry.
+]: nothing -> nothing {
+  let working_dir = read_working_dir $service
+  let service_config = open ($working_dir | path join $service_config_name)
+  let contents = resolve_contents $service_config $working_dir
+
+  let file_name = $service_config | get file? | default ".environment.json"
+  let file_path = $working_dir | path join $file_name
+  log debug $"Saving pulled secrets to ($file_name)"
+  $contents | save -f $file_path
+}
+
+# Runs a command with pulled secrets and derives as environment variables.
+#
+# Resolves the service's configuration (pulls + derives), sets them as
+# environment variables, runs the given command, and propagates its exit code.
+#
+# If no service is provided, the closest ancestor service will be used. Provided
+# services are relative to the git root.
+def "main run" [
+  --service (-s): string # Path to the service.
+  --command (-c): string # The command to run.
+]: nothing -> nothing {
+  let working_dir = read_working_dir $service
+  let service_config = open ($working_dir | path join $service_config_name)
+  let contents = resolve_contents $service_config $working_dir
+
+  with-env $contents {
+    # Requirements: 1) stream stdout and stderr, 2) print errors readably,
+    # 3) propagate non-zero exit codes, and 4) set $env.LAST_EXIT_CODE for the
+    # `exit` below. `do -i` suppresses errors silently. `try/catch` with only
+    # `print -e` is readable but swallows the exit code.
+    #
+    # $nu.current-exe rather than a bare `nu`: carbon is already running under
+    # the right nushell, and callers who installed the packaged wrapper have no
+    # nushell on PATH at all.
+    try { ^$nu.current-exe -c $command } catch {|e|
+      print -e ($e | get rendered? | default $e.msg)
+      exit ($e | get exit_code? | default 1)
+    }
+  }
+  exit $env.LAST_EXIT_CODE
+}
+
+# Changes the registry used by a service.
+#
+# Calls the commands specified in the service's `registry.use` attribute.
+#
+# If no service is provided, the closest ancestor service will be used. Provided
+# services are relative to the git root.
+def "main use" [
+  registry: string
+  service?: string # Path to the service that should use the provided registry.
+]: nothing -> nothing {
+  let working_dir = read_working_dir $service
+  let service_config = open ($working_dir | path join $service_config_name)
+
+  if not ('use' in ($service_config | get registry? | default {})) {
+    error make -u {
+      msg: $"The service ($service_config.name) does not support changing registry."
+    }
+  }
+
+  let variables = {
+    "carbon.registry": $registry
+  }
+
+  execute ($service_config | get registry.use) $working_dir $variables
+}
+
+# Request access to registries.
+#
+# Creates each registry if necessary and adds the user's public key to it, but does not
+# allow the user to decrypt the registry. The user must be granted access by another
+# user who has access to the registry by running the `rekey` command. Requesting is
+# idempotent: a key that is already a recipient is not added again.
+def "main request" [
+  ...registries: string # The registries of which to request access. Defaults to the default registry.
+  --only-if-created # Only add the user's key if the config file was created.
+]: nothing -> nothing {
+  let registries = if ($registries | is-empty) { [""] } else { $registries }
+  if not ($config_dir | path exists) {
+    log debug "Creating config directory..."
+    mkdir $config_dir
+  }
+
+  if not ($private_key_file | path exists) {
+    log debug "Creating private key..."
+    rage-keygen --output $private_key_file
+  }
+
+  let public_key = rage-keygen -y $private_key_file
+  let name = if 'USER' in $env { $env.USER } else { "Enter your name" }
+  for $r in $registries {
+    let sops_config_file = ($git_root | config_path "sops.yaml" --registry $r)
+    let create_config = not ($sops_config_file | path exists)
+
+    if $create_config {
+      log debug $"Creating SOPS config ($sops_config_file)"
+      {
+        creation_rules: [
+          { age: "" }
+        ]
+        users: []
+      } | save $sops_config_file
+      true
+    }
+
+    if not $only_if_created or $create_config and $only_if_created {
+      let sops_config = open $sops_config_file
+      let rule_index = $sops_config.creation_rules | enumerate
+        | where {|row| 'age' in $row.item } | get 0.index
+      let recipients = $sops_config.creation_rules | get $rule_index | get age
+        | split row -r ",\\s*" | where {|line| $line != "" }
+
+      if $public_key not-in $recipients {
+        let new_recipients = $recipients | append $public_key | str join ",\n"
+        let updated_creation_rules = $sops_config.creation_rules
+          | update $rule_index {|it| $it | update age $new_recipients }
+        let updated_config = $sops_config
+          | upsert creation_rules $updated_creation_rules
+          | upsert users ($sops_config.users | append { name: $name, key: $public_key })
+
+        $updated_config | save -f $sops_config_file
+      }
+    }
+
+    read_sops_config $r
+  }
+}
+
+# Applies pending access changes.
+#
+# Re-encrypts the registry's encryption key with any new user's public key thereby
+# allowing them to decrypt the registry. It also removes any users who no longer
+# have access to the registry and then rotates the registry key (only if any users
+# were removed). Registries can only be updated by another user who has already been
+# granted access.
+def "main rekey" [
+  ...registries: string # The registries which to rekey. Defaults to the default registry.
+]: nothing -> nothing {
+  let registries = if ($registries | is-empty) { [""] } else { $registries }
+  for r in $registries {
+    let sops = read_sops_config $r
+
+    with-env {
+      SOPS_AGE_KEY_FILE: $private_key_file
+    } {
+      let diff = echo n | sops --config $sops.config_path updatekeys $sops.registry_path
+      let additions = $diff | lines | where {|line| $line =~ "^\\+" } | length
+      let removals = $diff | lines | where {|line| $line =~ "^\\-" } | length
+
+      log debug $"Adding ($additions) and removing ($removals) users to registry ($sops.registry_path)"
+      sops --config $sops.config_path updatekeys --yes $sops.registry_path
+
+      if $removals > 0 {
+        log debug $"Rotating registry since ($removals) users were removed."
+        sops --config $sops.config_path --rotate -i $sops.registry_path
+      }
+    }
+  }
+}
+
+# Views the registry.
+#
+# Decrypts and prints the registry. Only available to users who have access
+# to the registry. Defaults to the registry of the closest ancestor service.
+def "main view" [
+  --registry (-r): string
+]: nothing -> nothing {
+  let registry = if $registry == null {
+    let working_dir = read_working_dir
+    let service_config = open ($working_dir | path join $service_config_name)
+    read_registry $service_config $working_dir
+  } else {
+    $registry
+  }
+
+  let sops = read_sops_config $registry
+  with-env {
+    SOPS_AGE_KEY_FILE: $private_key_file
+  } {
+
+    sops --config $sops.config_path --decrypt $sops.registry_path
+  }
+}
+
+# Read a single value from the registry.
+#
+# Decrypts and prints a single secret from the registry. Only available to users who
+# have access to the registry.
+def "main read" [
+  service: string
+  name: string
+  --registry (-r): string
+]: nothing -> nothing {
+  let registry = $registry | default "";
+  let sops = read_sops_config $registry
+  let service_name = $service  | to json
+  let remote_name = $name | to json
+  let secret = $'[($service_name)][($remote_name)]'
+  with-env {
+    SOPS_AGE_KEY_FILE: $private_key_file
+  } {
+    sops --config $sops.config_path --decrypt --extract $secret $sops.registry_path
+  }
+}
+
+# Checks the dependency graph for errors and warnings.
+#
+# Scans for all carbon.toml files and validates the dependency graph.
+def "main check" []: nothing -> nothing {
+  let services = discover_services
+
+  let results = [
+    (check_duplicate_names $services)
+    (check_missing_service $services)
+    (check_missing_push_key $services)
+    (check_circular_dependency $services)
+    (check_unused_push_key $services)
+    (check_derive_pull_collision $services)
+    (check_name_case_collision $services)
+    (check_derive_references $services)
+    (check_push_env_references $services)
+  ]
+  let errors = $results | each {|r| $r.errors } | math sum
+  let warnings = $results | each {|r| $r.warnings } | math sum
+
+  if $errors > 0 {
+    let summary = $"($errors) errors, ($warnings) warnings"
+    print $"(ansi red_bold)check failed(ansi reset): ($summary)"
+    exit 1
+  } else if $warnings > 0 {
+    let summary = $"($warnings) warnings"
+    print $"(ansi yellow_bold)check failed(ansi reset): ($summary)"
+    exit 1
+  } else {
+    print $"(ansi green_bold)check passed(ansi reset)"
+  }
+}
+
+# Outputs the service dependency graph in DOT (Graphviz) format.
+#
+# Pipe to dot to render: ./carbon graph | dot -Tpng -o deps.png
+def "main graph" []: nothing -> nothing {
+  let services = discover_services
+
+  mut lines = ["digraph {", "  rankdir=LR", "  node [shape=record]", ""]
+
+  for svc in $services {
+    let fields = $svc.secrets | str join "|"
+    let label = if ($fields | is-empty) { $svc.name } else { $"($svc.name)|($fields)" }
+    $lines = ($lines | append $'  "($svc.name)" [label="($label)"]')
+  }
+
+  $lines = ($lines | append "")
+
+  for svc in $services {
+    let grouped = $svc.pulls | group-by service
+    for target in ($grouped | columns) {
+      if $target == $svc.name { continue }
+      let names = $grouped | get $target | each {|p| $p.name } | str join ", "
+      $lines = ($lines | append $'  "($svc.name)" -> "($target)" [label="($names)"]')
+    }
+  }
+
+  $lines = ($lines | append "}")
+  print ($lines | str join "\n")
+}
+
+def read_working_dir [
+  service?: string
+] {
+  let start = if $service == null { pwd } else { $git_root | path join $service }
+  let config_path = find $service_config_name $start $git_root
+  if $config_path == null {
+    error make -u {
+      msg: $"service ($service_config_name) file not found in ($service)"
+    }
+  }
+
+  $config_path | path dirname
+}
+
+def resolve_contents [
+  service_config: record
+  working_dir: path
+] {
+  let registry = read_registry $service_config $working_dir
+  let sops = read_sops_config $registry
+
+  mut contents = {}
+  for local_name in ($service_config | get pull? | default {} | columns) {
+    let $definition = $service_config | get pull | get $local_name
+    let service_name = $definition | get service? | to json
+    let remote_name = $definition | get name? | default $local_name | to json
+    let secret = $'[($service_name)][($remote_name)]'
+
+    let value = with-env {
+      SOPS_AGE_KEY_FILE: $private_key_file
+    } {
+      let result = sops --config $sops.config_path --decrypt --extract $secret $sops.registry_path | complete
+
+      match [$result.exit_code, $result.stderr] {
+        [0, _] => $result.stdout,
+        [_, $err] if $err =~ "component \\[.*\\] not found" and 'default' in $definition => {
+          let variables = {
+            "carbon.registry": $registry
+          };
+
+          resolve ($definition | get default) $working_dir $variables
+        },
+        [_, _] => (error make -u {
+          msg: $"The ($service_name) service has not published ($remote_name)"
+        }),
+      }
+    }
+
+    log debug $"Pulled secret ($local_name) with value ($value)"
+    $contents = ($contents | upsert $local_name $value)
+  }
+
+  let derives = $service_config | get derive? | default {}
+  let pull_contents = $contents
+  for derive_name in ($derives | columns) {
+    let expression = find_expression $registry ($derives | get $derive_name) $derive_name
+    let pull_vars = $pull_contents | columns | reduce -f { "carbon.registry": $registry } {|key, acc|
+      $acc | upsert $"pull.($key)" ($pull_contents | get $key)
+    }
+    let variables = $env | columns | reduce -f $pull_vars {|key, acc|
+      if (($env | get $key | describe) == "string") {
+        $acc | upsert $"env.($key)" ($env | get $key)
+      } else {
+        $acc
+      }
+    }
+    let value = template ($expression | get value) $variables
+    let unresolved = $value | parse --regex '\{\{env\.(?P<name>[^}]+)\}\}' | get name | uniq
+    if ($unresolved | is-not-empty) {
+      error make -u {
+        msg: $"Derive \"($derive_name)\" references unset environment variable\(s\): ($unresolved | str join ', ')"
+      }
+    }
+    $contents = ($contents | upsert $derive_name $value)
+  }
+
+  $contents
+}
+
+def read_registry [
+  service_config: record
+  working_dir: path
+] {
+  let service_registry = $service_config | get registry? | default {}
+
+  if not ('current' in $service_registry) {
+    log debug "Using default registry since service has no registry.current."
+    return ""
+  }
+
+  let value = resolve $service_registry.current $working_dir {}
+  log debug $"Using value from registry.current: ($value)"
+
+  return $value
+}
+
+def read_sops_config [
+  registry: string
+] {
+  let registry_path = config_path "registry.yaml" --registry $registry
+  let sops_config_path = ($git_root | config_path "sops.yaml" --registry $registry)
+  if not ($registry_path | path exists) {
+    log debug $"Creating registry file ($registry_path)"
+    { $"_($name)": { version: $version } } | save $registry_path
+    sops --config $sops_config_path --encrypt -i $registry_path
+  }
+
+  { registry_path: $registry_path config_path: $sops_config_path }
+}
+
+def find_expression [
+  registry: string
+  expressions
+  name: string
+] {
+  let is_array = ($expressions | describe | str starts-with "table") or ($expressions | describe | str starts-with "list")
+  let expressions = if $is_array { $expressions } else { [$expressions] }
+
+  let matched = $expressions
+    | where {|expression| 'registry_pattern' in $expression }
+    | where {|expression| $registry =~ ($expression | get registry_pattern) }
+  let defaults = $expressions | where {|expression| not ('registry_pattern' in $expression) }
+
+  match ($matched | length) {
+    0 => (match ($defaults | length) {
+      0 => (error make -u {
+        msg: $"No matching registry patterns for attribute ($name) in registry ($registry)."
+      }),
+      1 => ($defaults | first),
+      _ => (error make -u {
+        msg: $"Multiple default patterns for attribute ($name) in registry ($registry)."
+      })
+    }),
+    1 => ($matched | first),
+    _ => (error make -u {
+      msg: $"Multiple matching registry patterns for attribute ($name) in registry ($registry)."
+    })
+  }
+}
+
+def resolve [
+  record: record
+  working_dir: path
+  variables: record
+] {
+  if 'value' in $record {
+    return (template $record.value $variables)
+  }
+
+  if 'command' in $record {
+    return (run_command $record $working_dir $variables)
+  }
+
+  error make -u {
+    msg: $"The record must contain either a value or a command."
+    node: $record
+  }
+}
+
+def run_command [
+  exec: record<
+    command: string
+  >
+  working_dir: path
+  variables: record
+] {
+  let output = execute $exec $working_dir $variables
+
+  if $output == "" or $output == null {
+    error make -u {
+      msg: $"Command ($exec.command) returned no output."
+    }
+  }
+
+  return $output
+}
+
+def execute [
+  exec: record<
+    command: string
+  >
+  working_dir: path
+  variables: record
+] {
+  let shell = $exec | get shell? | default "sh -c"
+  let command = template $exec.command $variables
+
+  log debug $"Executing command `($command)` with shell ($shell) from ($working_dir)..."
+  let shell_parts = $shell | split row " "
+  let output = do -i {
+    cd $working_dir
+    ^$shell_parts.0 ...($shell_parts | skip 1) $"($command)" | str trim
+  }
+
+  return $output
+}
+
+def config_path [
+  filename: string
+  --registry: string = ""
+] {
+  let file = $filename | path parse
+
+  let suffix = if $registry != "" {
+    $".($registry)"
+  } else {
+    ""
+  }
+
+  $config_dir | path join $"($file.stem)($suffix).($file.extension)"
+}
+
+def template [
+  template: string
+  variables: record
+] {
+  $variables | columns | reduce -f $template {|key, template|
+    $template | str replace --all $"{{($key)}}" ($variables | get $key | into string)
+  }
+}
+
+def find [
+  name: string
+  start: path
+  ceiling: path
+] {
+  log debug $"Searching for ($name) in ($start) with ceiling ($ceiling)..."
+  mut start = $start
+  while $start != $ceiling and $start != "" {
+    let path = ($start | path join $name)
+    if ($path | path exists) {
+      log debug $"Found ($name) at ($path)"
+      return $path
+    }
+
+    $start = ($start | path dirname)
+  }
+
+  # Reached the ceiling without finding the file
+  log debug $"Reached ceiling ($ceiling) without finding ($name)"
+  null
+}
+
+# Discovers all services in the monorepo by scanning for carbon.toml files.
+def discover_services [] {
+  glob $"($git_root)/**/($service_config_name)" | each { |config_path|
+    let config = open $config_path
+    let service_name = $config | get name
+    let rel_path = $config_path | str replace $"($git_root)/" ""
+    let pulls = $config | get pull? | default {}
+      | columns
+      | each { |col|
+        let pull = $config | get pull | get $col
+        {
+          local_name: $col
+          service: ($pull | get service? | default null)
+          name: ($pull | get name? | default $col)
+        }
+      }
+      | where {|p| $p.service != null }
+    let push = $config | get push? | default {}
+    let expect_unused = $push | columns | where { |col|
+      let val = $push | get $col
+      if ($val | describe | str starts-with "record") {
+        ($val | get expect_unused? | default false) == true
+      } else {
+        false
+      }
+    }
+    let derive_definitions = $config | get derive? | default {}
+    {
+      name: $service_name
+      path: $rel_path
+      secrets: ($push | columns)
+      pulls: $pulls
+      expect_unused: $expect_unused
+      derives: ($derive_definitions | columns)
+      derive_definitions: $derive_definitions
+      push_definitions: $push
+      dependencies: (
+        $pulls
+          | each {|p| $p.service }
+          | where {|s| $s != $service_name }
+          | uniq
+      )
+    }
+  }
+}
+
+# Checks for duplicate service names across all carbon.toml files.
+def check_duplicate_names [services: list] {
+  mut errors = 0
+  let names = $services | group-by name
+  for name in ($names | columns) {
+    let group = $names | get $name
+    if ($group | length) > 1 {
+      $errors = $errors + 1
+      print $"(ansi red_bold)error(ansi reset): duplicate service name \"($name)\""
+      for svc in $group {
+        print $"  ($svc.path)"
+      }
+    }
+  }
+  { errors: $errors, warnings: 0 }
+}
+
+# Checks that every pull references a service that exists.
+def check_missing_service [services: list] {
+  mut errors = 0
+  let known = $services | each {|s| $s.name }
+  for svc in $services {
+    for pull in $svc.pulls {
+      if $pull.service not-in $known {
+        $errors = $errors + 1
+        print $"(ansi red_bold)error(ansi reset): missing service"
+        print $"  ($svc.path) pulls from \"($pull.service)\" which has no carbon.toml"
+      }
+    }
+  }
+  { errors: $errors, warnings: 0 }
+}
+
+# Checks that every pull references a key the target service pushes.
+def check_missing_push_key [services: list] {
+  mut errors = 0
+  let by_name = $services | reduce -f {} {|s, acc| $acc | upsert $s.name $s }
+  for svc in $services {
+    for pull in $svc.pulls {
+      if $pull.service in $by_name {
+        let target = $by_name | get $pull.service
+        if $pull.name not-in $target.secrets {
+          $errors = $errors + 1
+          print $"(ansi red_bold)error(ansi reset): missing push key"
+          print $"  ($svc.path) pulls \"($pull.name)\" from \"($pull.service)\" but ($target.path) does not push \"($pull.name)\""
+        }
+      }
+    }
+  }
+  { errors: $errors, warnings: 0 }
+}
+
+# Checks for push keys that no other service pulls. Self-pulls excluded.
+def check_unused_push_key [services: list] {
+  mut warnings = 0
+
+  let all_pulls = $services | each {|svc|
+    $svc.pulls | where {|p| $p.service != $svc.name }
+      | each {|p| { service: $p.service, name: $p.name } }
+  } | flatten
+
+  for svc in $services {
+    for key in $svc.secrets {
+      let pulled = $all_pulls | where {|p| $p.service == $svc.name and $p.name == $key }
+      let is_expect_unused = $key in $svc.expect_unused
+      if $is_expect_unused and ($pulled | is-not-empty) {
+        $warnings = $warnings + 1
+        print $"(ansi yellow_bold)warning(ansi reset): expected unused push key is pulled"
+        print $"  ($svc.path) marks \"($key)\" as expect_unused but it is pulled"
+      } else if (not $is_expect_unused) and ($pulled | is-empty) {
+        $warnings = $warnings + 1
+        print $"(ansi yellow_bold)warning(ansi reset): unused push key"
+        print $"  ($svc.path) pushes \"($key)\" but no service pulls it"
+      }
+    }
+  }
+  { errors: 0, warnings: $warnings }
+}
+
+# Checks for circular dependencies in the service graph.
+def check_circular_dependency [services: list] {
+  mut errors = 0
+  let by_name = $services | reduce -f {} {|s, acc| $acc | upsert $s.name $s }
+  let cycles = detect_cycles $services
+  for cycle in $cycles {
+    $errors = $errors + 1
+    let chain = $cycle | each {|name|
+      let path = if $name in $by_name { $by_name | get $name | get path } else { "?" }
+      $"($name) \(($path)\)"
+    } | str join " -> "
+    print $"(ansi red_bold)error(ansi reset): circular dependency"
+    print $"  ($chain)"
+  }
+  { errors: $errors, warnings: 0 }
+}
+
+# Checks that no derive key collides with a pull key in the same service.
+def check_derive_pull_collision [services: list] {
+  mut errors = 0
+  for svc in $services {
+    let pull_keys = $svc.pulls | each {|p| $p.local_name }
+    for derive_key in $svc.derives {
+      if $derive_key in $pull_keys {
+        $errors = $errors + 1
+        print $"(ansi red_bold)error(ansi reset): derive/pull name collision"
+        print $"  ($svc.path) has both a pull and derive named \"($derive_key)\""
+      }
+    }
+  }
+  { errors: $errors, warnings: 0 }
+}
+
+# Checks that no two resolved names for a service differ only by case.
+#
+# nushell's environment is case-insensitive, so `run` exports names that differ
+# only by case as a single variable, spelled the way the first one was. The last
+# value wins under a name the others never asked for, and an external command
+# looking for one of the losing spellings finds nothing. Bridging a lowercase
+# pull to an uppercase derive is the tempting mistake this catches.
+def check_name_case_collision [services: list] {
+  mut errors = 0
+  for svc in $services {
+    let names = $svc.pulls | each {|p| $p.local_name } | append $svc.derives
+    let grouped = $names | reduce -f {} {|name, acc|
+      let key = $name | str lowercase
+      let prior = if $key in $acc { $acc | get $key } else { [] }
+      $acc | upsert $key ($prior | append $name)
+    }
+
+    for key in ($grouped | columns) {
+      # An exact duplicate is a pull and a derive sharing one name, which
+      # check_derive_pull_collision already reports.
+      let spellings = $grouped | get $key | uniq
+      if ($spellings | length) > 1 {
+        $errors = $errors + 1
+        let quoted = $spellings | each {|n| $'"($n)"' } | str join " and "
+        print $"(ansi red_bold)error(ansi reset): name case collision"
+        print $"  ($svc.path) resolves ($quoted), which run exports as one variable named \"($spellings | first)\""
+      }
+    }
+  }
+  { errors: $errors, warnings: 0 }
+}
+
+# Checks that every {{pull.x}} reference in a derive's value has a matching pull key.
+def check_derive_references [services: list] {
+  mut errors = 0
+  for svc in $services {
+    let pull_keys = $svc.pulls | each {|p| $p.local_name }
+    for derive_key in $svc.derives {
+      let definition = $svc.derive_definitions | get $derive_key
+      let is_array = ($definition | describe | str starts-with "table") or ($definition | describe | str starts-with "list")
+      let values = if $is_array { $definition | get value } else { [($definition | get value)] }
+      for value in $values {
+        let refs = $value | parse --regex '\{\{pull\.(?P<name>[^}]+)\}\}' | get name
+        for ref in $refs {
+          if $ref not-in $pull_keys {
+            $errors = $errors + 1
+            print $"(ansi red_bold)error(ansi reset): invalid derive reference"
+            print $"  ($svc.path) derive \"($derive_key)\" references {{pull.($ref)}} but no pull named \"($ref)\" exists"
+          }
+        }
+      }
+    }
+  }
+  { errors: $errors, warnings: 0 }
+}
+
+# Checks that push values do not reference {{env.<key>}}. Push templates only
+# resolve {{carbon.registry}}, so env references would be pushed literally.
+def check_push_env_references [services: list] {
+  mut errors = 0
+  for svc in $services {
+    for push_key in ($svc.push_definitions | columns) {
+      let val = $svc.push_definitions | get $push_key
+      let is_array = ($val | describe | str starts-with "table") or ($val | describe | str starts-with "list")
+      let entries = if $is_array { $val } else { [$val] }
+      for entry in $entries {
+        let strs = ($entry | columns) | where {|c| $c in ["value", "command"] }
+          | each {|c| $entry | get $c }
+        for str in $strs {
+          let refs = $str | parse --regex '\{\{env\.(?P<name>[^}]+)\}\}' | get name | uniq
+          for ref in $refs {
+            $errors = $errors + 1
+            print $"(ansi red_bold)error(ansi reset): env reference in push"
+            print $"  ($svc.path) push \"($push_key)\" references {{env.($ref)}} but push templates do not resolve env vars"
+          }
+        }
+      }
+    }
+  }
+  { errors: $errors, warnings: 0 }
+}
+
+# Detects cycles in the dependency graph using DFS with three-color marking.
+def detect_cycles [services: list] {
+  let adj = $services | reduce -f {} {|svc, acc|
+    $acc | upsert $svc.name $svc.dependencies
+  }
+
+  let all_names = $adj | columns
+  mut color = $all_names | reduce -f {} {|name, acc| $acc | upsert $name 0 }
+  mut cycles = []
+
+  for $name in $all_names {
+    if ($color | get $name) == 0 {
+      let result = dfs_visit $name $adj $color []
+      $color = $result.color
+      $cycles = ($cycles | append $result.cycles)
+    }
+  }
+
+  $cycles
+}
+
+# Performs DFS from a given node, returning updated color map and any found cycles.
+def dfs_visit [
+  node: string
+  adj: record
+  color: record
+  path: list<string>
+] {
+  let color = ($color | upsert $node 1)
+  let path = ($path | append $node)
+  mut color = $color
+  mut cycles = []
+
+  let neighbors = if $node in $adj { $adj | get $node } else { [] }
+  for $neighbor in $neighbors {
+    let neighbor_color = if $neighbor in $color { $color | get $neighbor } else { 2 }
+
+    if $neighbor_color == 1 {
+      let cycle_start = $path | enumerate
+        | where {|e| $e.item == $neighbor } | first | get index
+      let cycle = $path | skip $cycle_start | append $neighbor
+      $cycles = ($cycles | append [$cycle])
+    } else if $neighbor_color == 0 {
+      let result = dfs_visit $neighbor $adj $color $path
+      $color = $result.color
+      $cycles = ($cycles | append $result.cycles)
+    }
+  }
+
+  $color = ($color | upsert $node 2)
+  { color: $color, cycles: $cycles }
+}
