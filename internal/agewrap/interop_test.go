@@ -37,6 +37,7 @@ func ageCLI(t *testing.T) string {
 		bin := filepath.Join(dir, "age")
 		gobin := filepath.Join(runtime.GOROOT(), "bin", "go")
 		cmd := exec.Command(gobin, "build", "-o", bin, "filippo.io/age/cmd/age")
+		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 		if out, err := cmd.CombinedOutput(); err != nil {
 			ageErr = "building filippo.io/age/cmd/age failed: " + err.Error() + "\n" + string(out)
 			return
