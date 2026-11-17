@@ -98,6 +98,21 @@ func (f *fixture) runUndo(text string) int {
 	return ran
 }
 
+// retryAfterUndo checks that a rolled-back migration, which left carbon's
+// scope-key pins behind in the git dir, migrates again with no manual pin
+// cleanup.
+func (f *fixture) retryAfterUndo() {
+	f.t.Helper()
+	pins := filepath.Join(f.root, ".git", "carbon", "pins.toml")
+	if _, err := os.Stat(pins); err != nil {
+		f.t.Fatalf("expected the failed run to have left pins at %s: %v", pins, err)
+	}
+	code, out, errOut := f.migrate(nil, func(o *Options) { o.Write = true })
+	if code != ExitOK || !strings.Contains(out, "17 of 17 value(s) read back identical") {
+		f.t.Fatalf("retry after undo: exit %d\n%s\n%s", code, out, errOut)
+	}
+}
+
 // Review 1: same $USER, two keys; the desktop key never read prd and must
 // not after migration.
 func TestReviewPersonMergeGainsAccess(t *testing.T) {
@@ -239,6 +254,7 @@ func TestReviewVerifyFailureUndo(t *testing.T) {
 	if _, err := os.Stat(f.identity()); err == nil {
 		t.Fatal("identity still installed after undo")
 	}
+	f.retryAfterUndo()
 }
 
 // Review 7: a failure while deleting the old files is recoverable too.
@@ -274,6 +290,7 @@ func TestReviewDeleteFailureUndo(t *testing.T) {
 	if _, err := os.Stat(f.identity()); err == nil {
 		t.Fatal("identity still installed after undo")
 	}
+	f.retryAfterUndo()
 }
 
 // Review 7: --env-name and --package-name.

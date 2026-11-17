@@ -407,7 +407,7 @@ func (r *runner) execute(plan *Plan, carbon, keyPath string) error {
 		clear(stdin)
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && ee.ExitCode() == 3 {
-			return fmt.Errorf("`carbon set %s --env %s --package %s` refused (exit 3): your key is not a reader of %s in the policy carbon is using, and carbon 1.0 only lets a reader create a scope's first key. Check that %s lists you, and that carbon reads the working tree's policy (its notice says so); if trunk already has a 1.0 carbon.toml it reads trunk's instead.\n%s", c.Name, c.Env, c.Package, c.Scope(), "carbon.toml [access]", indentLines(stderr))
+			return fmt.Errorf("`carbon set %s --env %s --package %s` refused (exit 3): the policy carbon is using does not name your key as a reader of %s. Carbon 1.0 lets only a device that policy names create a scope's key or seal into it. Check that %s lists you, and that carbon reads the working tree's policy (its notice says so); if trunk already has a 1.0 carbon.toml it reads trunk's instead.\n%s", c.Name, c.Env, c.Package, c.Scope(), "carbon.toml [access]", indentLines(stderr))
 		}
 		if err != nil {
 			return fmt.Errorf("`carbon set %s --env %s --package %s` failed (%d of %d): %v\n%s", c.Name, c.Env, c.Package, i+1, len(plan.Copies), err, indentLines(stderr))
@@ -566,6 +566,24 @@ func (r *runner) printUndo(w io.Writer, done bool) {
 	for _, u := range r.untrackedEdited {
 		fmt.Fprintf(w, "  # %s was not tracked by git (--force), so git cannot restore it\n", u)
 	}
+	if p := r.pinsFile(); p != "" {
+		fmt.Fprintf(w, "carbon also pinned the scope keys it created in %s (inside the git dir, never committed).\n", p)
+		fmt.Fprintln(w, "Re-running carbon-migrate needs no cleanup (it re-pins the keys it creates); to clear the pins anyway:")
+		fmt.Fprintf(w, "  # rm %s\n", shellQuote(p))
+	}
+}
+
+// pinsFile is carbon's per-clone pin file, if it exists.
+func (r *runner) pinsFile() string {
+	out, err := r.git("rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return ""
+	}
+	p := filepath.Join(strings.TrimSpace(string(out)), "carbon", "pins.toml")
+	if _, err := os.Stat(p); err != nil {
+		return ""
+	}
+	return p
 }
 
 func shellJoin(xs []string) string {

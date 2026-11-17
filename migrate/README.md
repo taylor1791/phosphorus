@@ -200,6 +200,11 @@ tests run those printed commands after a failure while setting values, while
 verifying and while deleting, and check that the tree is clean and the
 identity gone.
 
+Carbon also pins each scope key it creates in `<git dir>/carbon/pins.toml`
+(per clone, never committed). The undo output names that file; a re-run after
+a rollback needs no cleanup, which the tests check by migrating again after
+each rollback, and `rm`-ing the file only clears pins.
+
 After a successful run it prints the same kind of commands, plus moving the
 identity back to `.carbon/private-key.age`. That success path is not covered
 by a test; check the printed commands before running them.
