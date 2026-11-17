@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/taylor1791/phosphorus/internal/audit"
 	"github.com/taylor1791/phosphorus/internal/config"
+	"github.com/taylor1791/phosphorus/internal/policy"
 )
 
 func init() {
@@ -29,7 +31,14 @@ pending revocations and other warnings are reported too.
   --max-debt 14d   fail on rotation debt older than the limit (<n>d or <n>h)
   --unused         also list secrets that no [env] table references
 
-With --json, stdout is {"ok", "counts", "findings", "rules"}.`,
+Drops, new scope keys and values set after their key was retired are listed
+first: carbon cannot prove their author is a reader, so review accepts them.
+
+Trunk is CARBON_TRUNK, else git config carbon.trunk, else the remote default
+branch; check says which it compared against. In CI, set CARBON_TRUNK and
+fetch that ref: with remotes but no trunk, check fails.
+
+With --json, stdout is {"ok", "trunk", "counts", "findings", "rules"}.`,
 		Flags: func(fs *flag.FlagSet) {
 			fs.Bool("strict", false, "fail on warnings, pending grants and pending revocations too")
 			fs.String("max-debt", "", "fail on rotation debt older than this (`duration`, e.g. 14d)")
@@ -44,12 +53,77 @@ type checkCounts struct {
 	Warnings int `json:"warnings"`
 	Info     int `json:"info"`
 	Drops    int `json:"drops"`
+	// Review counts drops, new scope keys and values set after their key
+	// was retired: everything whose author carbon cannot prove.
+	Review int `json:"review"`
+}
+
+// checkTrunk says what check compared against.
+type checkTrunk struct {
+	// Ref is the trunk ref, "worktree", or "" when there is none yet.
+	Ref string `json:"ref"`
+	// From is CARBON_TRUNK, git config carbon.trunk, remote default
+	// branch, or none.
+	From string `json:"from"`
+	// Mode is trunk (a reviewed ref), bootstrap (carbon is not on trunk
+	// yet), worktree, or unreadable.
+	Mode     string `json:"mode"`
+	Describe string `json:"describe"`
+}
+
+// reviewRules are listed in the banner at the top of check's output.
+var reviewRules = map[string]bool{
+	audit.RuleDropPending: true, audit.RuleDropForbidden: true,
+	audit.RuleKeyNew: true, audit.RuleSecretStaleAfter: true,
+}
+
+func describeTrunk(st *audit.State) checkTrunk {
+	var ct checkTrunk
+	if t := st.TrunkRef; t != nil {
+		ct.Ref, ct.From = t.Ref, t.From
+	}
+	switch {
+	case st.Trunk == nil:
+		ct.Mode = "unreadable"
+		ct.Describe = fmt.Sprintf("%s (from %s), which cannot be read; slot and key rules were skipped", ct.Ref, ct.From)
+	case st.Trunk.Origin == policy.OriginTrunk:
+		ct.Mode = "trunk"
+		ct.Describe = fmt.Sprintf("%s (from %s)", ct.Ref, ct.From)
+	case st.Trunk.Origin == policy.OriginWorktreeTrunk:
+		ct.Mode = "worktree"
+		ct.Describe = fmt.Sprintf("none: the trunk is \"worktree\" (from %s), so policy comes from the working tree", ct.From)
+	case ct.From == policy.TrunkFromNone:
+		ct.Mode = "bootstrap"
+		ct.Describe = "none yet: no remote and no git config " + policy.TrunkConfigKey + " (bootstrap); policy comes from the working tree"
+	default:
+		ct.Mode = "bootstrap"
+		ct.Describe = fmt.Sprintf("%s (from %s), which has no carbon.toml yet (bootstrap); policy comes from the working tree", ct.Ref, ct.From)
+	}
+	return ct
+}
+
+// trunkErr explains, for check, why no trunk could be resolved. It is the
+// first thing a CI job without the default branch hits.
+func trunkErr(err error) *Error {
+	e := AsError(err)
+	ci := "In CI: set " + policy.TrunkEnv + " to the trunk ref (for example " + policy.TrunkEnv + "=origin/main), " +
+		"and fetch it: shallow or single-branch checkouts often have no origin/HEAD and no origin/main " +
+		"(e.g. git fetch --no-tags --depth=1 origin main:refs/remotes/origin/main)."
+	var missing *policy.TrunkMissingError
+	var none *policy.NoTrunkError
+	if errors.As(err, &missing) || errors.As(err, &none) {
+		e.Details = append(e.Details,
+			"check compares slots and keys with trunk, so it cannot pass without one: a branch's own files would be judged by themselves.",
+			ci)
+	}
+	return e
 }
 
 type checkResult struct {
 	OK       bool             `json:"ok"`
 	Strict   bool             `json:"strict"`
 	MaxDebt  string           `json:"max_debt,omitempty"`
+	Trunk    checkTrunk       `json:"trunk"`
 	Counts   checkCounts      `json:"counts"`
 	Findings []audit.Finding  `json:"findings"`
 	Rules    []audit.RuleInfo `json:"rules"`
@@ -69,18 +143,26 @@ func runCheck(c *Context) error {
 	if err != nil {
 		return err
 	}
-	st, err := audit.Load(w.Repo)
+	st, err := audit.Load(w.Repo, c.Getenv)
 	if err != nil {
 		return err
 	}
+	if st.TrunkErr != nil {
+		return trunkErr(st.TrunkErr)
+	}
 	rep := st.Check(audit.Options{Now: c.Now(), MaxDebt: maxDebt, Strict: c.Bool("strict"), Unused: c.Bool("unused")})
 	res := checkResult{OK: !rep.Failed(), Strict: c.Bool("strict"), MaxDebt: c.String("max-debt"),
-		Findings: rep.Findings, Rules: audit.Rules, report: rep}
+		Trunk: describeTrunk(st), Findings: rep.Findings, Rules: audit.Rules, report: rep}
 	if res.Findings == nil {
 		res.Findings = []audit.Finding{}
 	}
 	res.Counts = checkCounts{Errors: rep.Count(audit.Error), Warnings: rep.Count(audit.Warning), Info: rep.Count(audit.Info),
 		Drops: len(rep.ByRule(audit.RuleDropPending)) + len(rep.ByRule(audit.RuleDropForbidden))}
+	for _, f := range rep.Findings {
+		if reviewRules[f.Rule] {
+			res.Counts.Review++
+		}
+	}
 	if err := c.Output(res, func(out io.Writer) { printCheck(out, res) }); err != nil {
 		return err
 	}
@@ -100,29 +182,39 @@ func plural(n int, word string) string {
 // printCheck prints drops first, in a banner, then findings grouped by
 // severity and rule, then a one-line verdict.
 func printCheck(out io.Writer, res checkResult) {
-	var drops []audit.Finding
+	fmt.Fprintf(out, "Compared with trunk: %s\n\n", res.Trunk.Describe)
+
+	var review []audit.Finding
 	for _, f := range res.Findings {
-		if f.Rule == audit.RuleDropPending || f.Rule == audit.RuleDropForbidden {
-			drops = append(drops, f)
+		if reviewRules[f.Rule] {
+			review = append(review, f)
 		}
 	}
-	if len(drops) > 0 {
+	if len(review) > 0 {
 		bar := strings.Repeat("!", 72)
 		fmt.Fprintln(out, bar)
-		fmt.Fprintf(out, "!! %s TO REVIEW: values written to a scope's inbox, possibly by someone\n", strings.ToUpper(plural(len(drops), "drop")))
-		fmt.Fprintln(out, "!! who cannot read it. Accept each one deliberately, like code.")
+		fmt.Fprintf(out, "!! %s TO REVIEW: drops, new scope keys and values under retired keys\n", strings.ToUpper(plural(len(review), "item")))
+		fmt.Fprintln(out, "!! are written by someone carbon cannot prove is a reader. Accept each")
+		fmt.Fprintln(out, "!! one deliberately, like code.")
 		fmt.Fprintln(out, "!!")
 		rows := [][]string{}
-		for _, f := range drops {
-			set := ""
+		for _, f := range review {
+			item, set, state := f.Secret, "", ""
 			if f.Set != nil {
 				set = "set " + f.Set.Format("2006-01-02T15:04:05Z")
 			}
-			state := "DROP"
-			if f.Rule == audit.RuleDropForbidden {
+			switch f.Rule {
+			case audit.RuleDropPending:
+				state = "DROP"
+			case audit.RuleDropForbidden:
 				state = "DROP (drops are off here: error)"
+			case audit.RuleSecretStaleAfter:
+				state = "SUSPECT: set after its key was retired"
+			case audit.RuleKeyNew:
+				item = "(key)"
+				state = "NEW SCOPE KEY: confirm the author is a reader of " + f.Scope
 			}
-			rows = append(rows, []string{"!!   " + f.Scope, f.Secret, set, state})
+			rows = append(rows, []string{"!!   " + f.Scope, item, set, state})
 		}
 		Table(out, rows)
 		fmt.Fprintln(out, bar)
@@ -140,7 +232,7 @@ func printCheck(out io.Writer, res checkResult) {
 	for _, sec := range sections {
 		var fs []audit.Finding
 		for _, f := range res.Findings {
-			if f.Severity == sec.sev && f.Rule != audit.RuleDropPending {
+			if f.Severity == sec.sev && f.Rule != audit.RuleDropPending && f.Rule != audit.RuleKeyNew {
 				fs = append(fs, f)
 			}
 		}
@@ -175,8 +267,8 @@ func printCheck(out io.Writer, res checkResult) {
 	if g := len(res.report.ByRule(audit.RuleSlotPendingGrant)); g > 0 {
 		parts = append(parts, plural(g, "pending grant"))
 	}
-	if res.Counts.Drops > 0 {
-		parts = append(parts, plural(res.Counts.Drops, "drop")+" to review")
+	if res.Counts.Review > 0 {
+		parts = append(parts, plural(res.Counts.Review, "item")+" to review")
 	}
 	if res.Strict {
 		parts = append(parts, "--strict")

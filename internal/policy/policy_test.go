@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/taylor1791/phosphorus/internal/agewrap"
-	"github.com/taylor1791/phosphorus/internal/config"
 	"github.com/taylor1791/phosphorus/internal/gitx"
 )
 
@@ -36,7 +36,6 @@ func newFixture(t *testing.T) *fixture {
 format = 1
 environments = ["dev", "prod"]
 default_environment = "dev"
-trunk = "main"
 
 [access]
 dev  = ["@engineering"]
@@ -152,6 +151,9 @@ func git(t *testing.T, dir string, args ...string) {
 	}
 }
 
+// TestLoadTrunkRules exercises what the CLI does: ResolveTrunk from the
+// environment, git config and remotes, then LoadTrunkAt. Nothing in the
+// working tree takes part.
 func TestLoadTrunkRules(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not on PATH")
@@ -162,78 +164,102 @@ func TestLoadTrunkRules(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wsOf := func() *config.Workspace {
-		ws, err := config.LoadWorkspace(config.DirSource{Root: f.root})
+	env := map[string]string{}
+	getenv := func(k string) string { return env[k] }
+	load := func() (*Policy, error) { return LoadTrunkWith(repo, getenv) }
+	mustLoad := func() *Policy {
+		t.Helper()
+		p, err := load()
 		if err != nil {
 			t.Fatal(err)
 		}
-		return ws
+		return p
 	}
 
-	// 1. trunk ref does not exist: bootstrap from the working tree.
-	p, err := LoadTrunk(repo, wsOf())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p.Origin != OriginBootstrap || !strings.Contains(p.Notice, "does not exist") {
-		t.Fatalf("origin %s notice %q", p.Origin, p.Notice)
+	// 1. A new local repository: no override, no remote. Bootstrap.
+	p := mustLoad()
+	if p.Origin != OriginBootstrap || p.Trunk.From != TrunkFromNone || !strings.Contains(p.Notice, "no trunk yet") {
+		t.Fatalf("new repo: origin %s trunk %+v notice %q", p.Origin, p.Trunk, p.Notice)
 	}
 
-	// 2. trunk exists without carbon.toml: still bootstrap.
+	// 2. An override that does not resolve is always an error.
+	git(t, f.root, "config", "--local", TrunkConfigKey, "main")
+	var missing *TrunkMissingError
+	if _, err := load(); !errors.As(err, &missing) || missing.From != TrunkFromGitConfig {
+		t.Fatalf("unborn override: %v", err)
+	}
+
+	// 3. The ref exists without carbon.toml: bootstrap.
 	f.write("README", "x")
 	git(t, f.root, "add", "README")
 	git(t, f.root, "commit", "-qm", "readme")
-	p, _ = LoadTrunk(repo, wsOf())
-	if p.Origin != OriginBootstrap || !strings.Contains(p.Notice, "has no carbon.toml") {
+	if p = mustLoad(); p.Origin != OriginBootstrap || !strings.Contains(p.Notice, "has no carbon.toml") {
 		t.Fatalf("origin %s notice %q", p.Origin, p.Notice)
 	}
 
-	// 3. carbon on trunk: policy comes from the ref, not the working tree.
+	// 4. carbon on trunk: policy comes from the ref, not the working tree.
 	git(t, f.root, "add", "-A")
 	git(t, f.root, "commit", "-qm", "carbon")
 	git(t, f.root, "checkout", "-qb", "feature")
 	f.write(".carbon/teams.toml", "engineering = [\"ada\"]\npayments = [\"ada\"]\nsre = [\"ada\"]\n")
-	p, err = LoadTrunk(repo, wsOf())
-	if err != nil {
-		t.Fatal(err)
+	p = mustLoad()
+	if p.Origin != OriginTrunk || p.Notice != "" || p.Ref != "main" || p.Trunk.From != TrunkFromGitConfig {
+		t.Fatalf("origin %s trunk %+v", p.Origin, p.Trunk)
 	}
-	if p.Origin != OriginTrunk || p.Notice != "" || p.Ref != "main" {
-		t.Fatalf("origin %s", p.Origin)
-	}
-	sa, _ := p.Scope("checkout", "prod")
-	if sa.Names("ada/laptop") {
+	if sa, _ := p.Scope("checkout", "prod"); sa.Names("ada/laptop") {
 		t.Fatal("working-tree policy leaked into trunk policy")
 	}
 	wt, _ := LoadWorktree(f.root)
-	if sa2, _ := wt.Scope("checkout", "prod"); !sa2.Names("ada/laptop") {
+	if sa, _ := wt.Scope("checkout", "prod"); !sa.Names("ada/laptop") {
 		t.Fatal("working tree policy not read")
 	}
 
-	// 4. A branch that sets trunk = "worktree" does not escape trunk policy.
-	ws := wsOf()
-	ws.Trunk = "main"
-	f.write("carbon.toml", strings.Replace(mustRead(t, f.root, "carbon.toml"), `trunk = "main"`, `trunk = "worktree"`, 1))
-	p, _ = LoadTrunk(repo, ws)
-	if p.Origin != OriginTrunk {
-		t.Fatalf("branch opt-out honoured: %s", p.Origin)
+	// 5. CARBON_TRUNK beats git config; "worktree" only from these two.
+	env[TrunkEnv] = "worktree"
+	if p = mustLoad(); p.Origin != OriginWorktreeTrunk || p.Trunk.From != TrunkFromEnv {
+		t.Fatalf("CARBON_TRUNK=worktree: %s %+v", p.Origin, p.Trunk)
+	}
+	env[TrunkEnv] = "--all"
+	if _, err := load(); err == nil || !strings.Contains(err.Error(), TrunkEnv) {
+		t.Fatalf("CARBON_TRUNK=--all: %v", err)
+	}
+	delete(env, TrunkEnv)
+	git(t, f.root, "config", "--local", TrunkConfigKey, "HEAD")
+	if _, err := load(); err == nil {
+		t.Fatal("git config carbon.trunk HEAD accepted")
+	}
+	git(t, f.root, "config", "--local", TrunkConfigKey, "worktree")
+	if p = mustLoad(); p.Origin != OriginWorktreeTrunk {
+		t.Fatalf("git config worktree: %s", p.Origin)
 	}
 
-	// 5. trunk itself says "worktree": working tree, always.
-	git(t, f.root, "checkout", "-q", "main")
-	git(t, f.root, "add", "-A")
-	git(t, f.root, "commit", "-qm", "worktree trunk")
-	git(t, f.root, "checkout", "-q", "feature")
-	git(t, f.root, "merge", "-q", "main")
-	p, err = LoadTrunk(repo, ws)
-	if err != nil {
-		t.Fatal(err)
+	// 6. No override: the remote default branch.
+	git(t, f.root, "config", "--local", "--unset", TrunkConfigKey)
+	git(t, f.root, "update-ref", "refs/remotes/origin/feature-x", "main")
+	var none *NoTrunkError
+	if _, err := load(); !errors.As(err, &none) {
+		t.Fatalf("remotes without a default: %v", err)
 	}
-	if p.Origin != OriginWorktreeTrunk {
-		t.Fatalf("origin = %s", p.Origin)
+	git(t, f.root, "update-ref", "refs/remotes/origin/master", "main")
+	if p = mustLoad(); p.Ref != "origin/master" || p.Trunk.From != TrunkFromRemote || p.Origin != OriginTrunk {
+		t.Fatalf("origin/master: %+v %s", p.Trunk, p.Origin)
 	}
-	p, _ = LoadTrunk(repo, wsOf())
-	if p.Origin != OriginWorktreeTrunk {
-		t.Fatalf("origin = %s", p.Origin)
+	git(t, f.root, "update-ref", "refs/remotes/origin/main", "main")
+	if p = mustLoad(); p.Ref != "origin/main" {
+		t.Fatalf("origin/main preferred: %+v", p.Trunk)
+	}
+	git(t, f.root, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/feature-x")
+	if p = mustLoad(); p.Ref != "origin/feature-x" {
+		t.Fatalf("origin/HEAD target: %+v", p.Trunk)
+	}
+	// A remote HEAD pointing nowhere is an error, not a fallback.
+	git(t, f.root, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/gone")
+	if _, err := load(); !errors.As(err, &missing) || missing.From != TrunkFromRemote {
+		t.Fatalf("dangling origin/HEAD: %v", err)
+	}
+	// carbon never wrote git config.
+	if _, ok, _ := repo.ConfigGet(TrunkConfigKey); ok {
+		t.Fatal("carbon wrote git config")
 	}
 }
 

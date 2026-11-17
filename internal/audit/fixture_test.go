@@ -37,13 +37,14 @@ type fx struct {
 	// ids holds each device's identities, by device id.
 	ids  map[string][]agewrap.Identity
 	recs map[string]string
+	// env is the process environment Load sees (CARBON_TRUNK).
+	env map[string]string
 }
 
 const workspaceTOML = `[workspace]
 format = 1
 environments = ["dev", "prod"]
 default_environment = "dev"
-trunk = "main"
 
 [access]
 dev = ["@eng"]
@@ -75,7 +76,7 @@ func newFx(t *testing.T) *fx {
 	t.Setenv("GIT_AUTHOR_EMAIL", "t@example.com")
 	t.Setenv("GIT_COMMITTER_NAME", "t")
 	t.Setenv("GIT_COMMITTER_EMAIL", "t@example.com")
-	f := &fx{t: t, root: root, ids: map[string][]agewrap.Identity{}, recs: map[string]string{}}
+	f := &fx{t: t, root: root, ids: map[string][]agewrap.Identity{}, recs: map[string]string{}, env: map[string]string{}}
 	f.git("init", "-q", "-b", "main")
 	repo, err := gitx.Find(root)
 	if err != nil {
@@ -97,6 +98,7 @@ func newFx(t *testing.T) *fx {
 		f.save(o.Scope)
 	}
 	f.commit("workspace")
+	f.git("config", "--local", "carbon.trunk", "main")
 	return f
 }
 
@@ -231,7 +233,7 @@ func (f *fx) save(s *scope.Scope) {
 
 func (f *fx) check(opts Options) *Report {
 	f.t.Helper()
-	st, err := Load(f.repo)
+	st, err := f.state()
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -268,6 +270,11 @@ func dump(rep *Report) string {
 		b.WriteString(string(f.Severity) + " " + f.Rule + " " + f.Scope + " " + f.Device + ": " + f.Message + "\n")
 	}
 	return b.String()
+}
+
+// state loads the repository as check does, with f.env as the environment.
+func (f *fx) state() (*State, error) {
+	return Load(f.repo, func(k string) string { return f.env[k] })
 }
 
 // addPackage writes <dir>/carbon.toml.

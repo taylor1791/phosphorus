@@ -30,18 +30,23 @@ type State struct {
 	// left out and reported.
 	Worktree *policy.Policy
 	// Trunk is the policy the slot rules use: trunk's, or the working
-	// tree's under the bootstrap and trunk = "worktree" exceptions (see
+	// tree's under the bootstrap and "worktree"-trunk exceptions (see
 	// Origin). Nil when trunk could not be read.
 	Trunk *policy.Policy
 	// Scopes is every working-tree package in every workspace environment,
 	// ordered by package name, then environment in workspace order.
 	Scopes []*ScopeFiles
 
-	// trunkWorkspace is the workspace file at the ref the working tree
-	// names, when that ref has one.
-	trunkWorkspace *config.Workspace
-	trunkSrc       *gitx.RefSource
-	loadFindings   []Finding
+	// TrunkRef is how this clone chose its trunk (CARBON_TRUNK, git config,
+	// remote default); nil when it could not choose one (TrunkErr).
+	TrunkRef *policy.Trunk
+	// TrunkErr is set when no trunk can be resolved: a *policy.NoTrunkError,
+	// a *policy.TrunkMissingError, or an invalid override. Slot and key
+	// rules are then skipped; `check` fails on it.
+	TrunkErr error
+
+	trunkSrc     *gitx.RefSource
+	loadFindings []Finding
 }
 
 // ScopeFiles is one scope's keys and secrets files.
@@ -77,16 +82,17 @@ func (s *State) Scope(pkg, env string) *ScopeFiles {
 }
 
 // TrunkIsReviewed reports whether slot rules compare with a reviewed trunk
-// ref (false under bootstrap and trunk = "worktree", or when trunk could not
+// ref (false under bootstrap and "worktree"-trunk, or when trunk could not
 // be read).
 func (s *State) TrunkIsReviewed() bool {
 	return s.Trunk != nil && s.Trunk.Origin == policy.OriginTrunk
 }
 
-// Load reads the workspace at repo's root. Only an unreadable root
-// carbon.toml (or a failing git) is an error; every other problem becomes a
-// finding returned by [State.Check].
-func Load(repo *gitx.Repo) (*State, error) {
+// Load reads the workspace at repo's root, choosing trunk with getenv (for
+// CARBON_TRUNK; usually os.Getenv). Only an unreadable root carbon.toml (or
+// a failing git) is an error; a trunk that cannot be resolved is TrunkErr,
+// and every other problem becomes a finding returned by [State.Check].
+func Load(repo *gitx.Repo, getenv func(string) string) (*State, error) {
 	src := config.DirSource{Root: repo.Root}
 	ws, err := config.LoadWorkspace(src)
 	if err != nil {
@@ -103,7 +109,7 @@ func Load(repo *gitx.Repo) (*State, error) {
 	}
 	st.Worktree = &policy.Policy{Origin: policy.OriginWorktree, Workspace: ws,
 		Packages: pkgs, People: people, Machines: machines, Teams: teams}
-	if err := st.loadTrunk(); err != nil {
+	if err := st.loadTrunk(getenv); err != nil {
 		return nil, err
 	}
 	st.loadScopes()
@@ -286,60 +292,60 @@ func (s *State) loadPrincipals(src config.DirSource) (map[string]*config.Person,
 	return people, machines, teams, nil
 }
 
-// loadTrunk applies the trunk rules of docs/implementation.md, the same way
-// policy.LoadTrunk does, but keeps the tolerant working-tree policy for the
-// exceptions and reports an unreadable trunk as a finding.
-func (s *State) loadTrunk() error {
-	ws := s.Workspace
+// loadTrunk applies the trunk rules of docs/implementation.md the way
+// policy.LoadTrunkAt does, but keeps the tolerant working-tree policy for the
+// exceptions and reports an unreadable trunk as a finding. A trunk that
+// cannot be chosen or does not resolve is recorded in TrunkErr: check fails
+// on it, status carries on without trunk.
+func (s *State) loadTrunk(getenv func(string) string) error {
 	fromWorktree := func(origin policy.Origin, ref, notice string) {
 		c := *s.Worktree
-		c.Origin, c.Ref, c.Notice = origin, ref, notice
+		c.Origin, c.Ref, c.Notice, c.Trunk = origin, ref, notice, s.TrunkRef
 		s.Trunk = &c
 	}
-	if ws.TrunkIsWorktree() {
-		fromWorktree(policy.OriginWorktreeTrunk, "", "")
-		return nil
-	}
-	ref := ws.Trunk
-	if !safeRef(ref) {
-		s.add(Finding{Severity: Error, Rule: RuleTrunkUnreadable, File: config.FileName,
-			Message: fmt.Sprintf("trunk = %q is not a git ref carbon will pass to git. Slot and key rules were skipped.", ref),
-			Hint:    `Set trunk = "<ref>" in carbon.toml, for example "origin/main".`})
-		return nil
-	}
-	ok, err := s.Repo.RefExists(ref)
+	t, err := policy.ResolveTrunk(s.Repo, getenv)
 	if err != nil {
-		return err
+		s.TrunkErr = err
+		return nil
+	}
+	s.TrunkRef = t
+	if t.IsWorktree() {
+		fromWorktree(policy.OriginWorktreeTrunk, "", "")
+		s.add(Finding{Severity: Warning, Rule: RuleTrunkWorktree,
+			Message: fmt.Sprintf("The trunk is \"worktree\" (from %s): policy is read from whatever is checked out, never from a reviewed ref, so any branch can grant itself access when a reader runs carbon apply.", t.From),
+			Hint:    "Protect a trunk branch and point this clone at it: unset " + policy.TrunkEnv + " or run `git config " + policy.TrunkConfigKey + " <ref>`."})
+		return nil
 	}
 	bootstrap := func(why string) {
 		notice := why + "; policy is read from the working tree until carbon is on trunk."
-		fromWorktree(policy.OriginBootstrap, ref, notice)
+		fromWorktree(policy.OriginBootstrap, t.Ref, notice)
+		hint := "Merge the carbon workspace to trunk."
+		if t.Ref != "" {
+			hint = "Merge the carbon workspace to " + t.Ref + "."
+		}
 		s.add(Finding{Severity: Info, Rule: RuleTrunkBootstrap, File: config.FileName,
 			Message: "Carbon is not on trunk yet: " + notice + " Slots are compared with the working tree's policy.",
-			Hint:    "Merge the carbon workspace to " + ref + "."})
+			Hint:    hint})
 	}
-	if !ok {
-		bootstrap(fmt.Sprintf("trunk %s does not exist", ref))
+	if t.From == policy.TrunkFromNone {
+		bootstrap(fmt.Sprintf("this repository has no trunk yet (no remote and no %s)", policy.TrunkConfigKey))
 		return nil
 	}
+	ok, err := s.Repo.RefExists(t.Ref)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		s.TrunkErr = &policy.TrunkMissingError{Ref: t.Ref, From: t.From}
+		return nil
+	}
+	ref := t.Ref
 	s.trunkSrc = s.Repo.Source(ref)
 	if _, err := s.trunkSrc.ReadFile(config.FileName); errors.Is(err, fs.ErrNotExist) {
 		bootstrap(fmt.Sprintf("trunk %s has no %s", ref, config.FileName))
 		return nil
 	} else if err != nil {
 		return err
-	}
-	tws, err := config.LoadWorkspace(s.trunkSrc)
-	if err != nil {
-		s.add(Finding{Severity: Error, Rule: RuleTrunkUnreadable, File: ref + ":" + config.FileName,
-			Message: fmt.Sprintf("Policy on trunk %s cannot be read: %v. Slot and key rules were skipped.", ref, err),
-			Hint:    "Fix the workspace file on trunk."})
-		return nil
-	}
-	s.trunkWorkspace = tws
-	if tws.TrunkIsWorktree() {
-		fromWorktree(policy.OriginWorktreeTrunk, "", "")
-		return nil
 	}
 	p, err := policy.Load(s.trunkSrc)
 	if err != nil {
@@ -348,7 +354,7 @@ func (s *State) loadTrunk() error {
 			Hint:    "Fix the policy files on trunk; until then nobody can run `carbon apply`."})
 		return nil
 	}
-	p.Origin, p.Ref = policy.OriginTrunk, ref
+	p.Origin, p.Ref, p.Trunk = policy.OriginTrunk, ref, t
 	s.Trunk = p
 	return nil
 }
@@ -414,21 +420,6 @@ func (s *State) storeError(sf *ScopeFiles, file string, err error) {
 		f.Hint = "Restore " + file + " from git history; carbon writes it and it is not edited by hand."
 	}
 	s.add(f)
-}
-
-// safeRef reports whether a ref read from a file is safe to put on a git
-// command line: not empty, not an option, no whitespace, colon or control
-// characters.
-func safeRef(ref string) bool {
-	if ref == "" || strings.HasPrefix(ref, "-") {
-		return false
-	}
-	for _, r := range ref {
-		if r <= ' ' || r == 0x7f || r == ':' {
-			return false
-		}
-	}
-	return true
 }
 
 func sortedKeys[V any](m map[string]V) []string {

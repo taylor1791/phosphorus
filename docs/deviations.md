@@ -4,14 +4,11 @@ Each entry says what differs from `docs/implementation.md` and why.
 
 ## Deviations
 
-1. **Retired keys keep `inbox_sealed`.** The contract says a retired key keeps
-   no inbox fields. A drop written on a branch cut before a rotation names the
-   old key's inbox; without the old inbox identity no reader could open it
-   after the merge, which breaks the design's promise that such branches still
-   merge and decrypt. Rotation therefore keeps `inbox_sealed` (sealed under
-   the old key, authenticated with the old key id) and drops `inbox` and the
-   slots. It reveals nothing new: anyone who could unseal it already held the
-   old key. `store` accepts retired records with or without it.
+1. **Retired keys keep `inbox_sealed`** (now written into the contract). A
+   drop written on a branch cut before a rotation names the old key's inbox;
+   without the old inbox identity no reader could open it after the merge.
+   It reveals nothing new: anyone who could unseal it already held the old
+   key. `store` accepts retired records with or without it.
 2. **No `github.com/spf13/pflag`.** pflag imports `net`, and nixpkgs' Go
    defaults to `CGO_ENABLED=1` without a C compiler, so `go test ./...` failed
    to build `internal/cli`. Flags use the standard `flag` package behind a
@@ -42,27 +39,32 @@ Each entry says what differs from `docs/implementation.md` and why.
 2. **The workspace root is the git repository root.** Trunk reads use
    repository-relative paths, so a workspace in a subdirectory would not line
    up.
-3. **The trunk ref name is read from the working tree's `carbon.toml`**, but
-   `trunk = "worktree"` only takes effect when trunk's own workspace file says
-   so (or carbon is not on trunk yet). A branch cannot opt out of trunk policy
-   by editing its copy; it could name another ref, which `check` should flag.
+3. **Trunk is chosen per clone** (see the contract's Trunk section):
+   `CARBON_TRUNK`, then git config `carbon.trunk`, then the remote default
+   branch. `[workspace] trunk` was removed and is now an error; this replaces
+   the design's `trunk = "origin/main"` line. `carbon init --trunk <ref>` runs
+   `git config carbon.trunk <ref>` for that clone and says so.
 4. **A package that is not on trunk yet** uses the workspace's trunk access
    for its environments (`policy.ScopeAccess.PackageKnown` is false). Package
    access entries count only once reviewed and merged.
-5. **Bootstrap and `trunk = "worktree"` drops** use the working tree's keys
+5. **Bootstrap and `worktree`-trunk drops** use the working tree's keys
    file for the inbox, since there is no trunk to read.
 6. **Branch and trunk out of step.** `set` refuses to create a key when trunk
    already has one for the scope ("merge trunk first"), and a non-reader
-   cannot drop into a scope whose key exists only on the branch.
-7. **Scope creation** wraps to the devices trunk policy names, skipping
+   cannot drop into a scope whose key exists only on the branch, or when the
+   branch has already retired trunk's current key (local trunk is stale).
+7. **Scope creation** is refused unless the caller's identity is one of the
+   devices policy names (finding from review: a non-reader could otherwise
+   make a key and seal values no reader wrote). It wraps to those devices, skipping
    non-hybrid devices under `require_pq` and access entries that name no team,
    person or machine, each with a warning. With no device left it refuses.
 8. **`set` needs a declaration** in `[secrets]` (exit 5) and refuses an empty
    value; a name that is a var is a usage error.
 9. **`init`** writes every environment as readable by `@engineering` and an
    empty `engineering` team. The first person to `join` a workspace with no
-   people joins every empty team, so one developer can `init`, `join`, `set`.
-   `--trunk` defaults to origin's HEAD, else `origin/main`.
+   people joins every empty team, so one developer can `init`, `join`, `set`,
+   but only while carbon is not adopted on trunk (bootstrap); afterwards team
+   membership is a reviewed change.
 10. **`join`** reuses an existing identity (one per device) and is idempotent.
     `--passphrase` reads the passphrase from stdin when there is no terminal.
     A passphrase-protected identity cannot be used without a terminal (exit 6;
@@ -74,26 +76,45 @@ Each entry says what differs from `docs/implementation.md` and why.
 13. **`DirSource.Find` skips** directories whose name starts with `.` and
     `node_modules` when looking for package files, in the working tree and at
     a ref alike.
-14. **`check`: which environments count.** A declared secret with no value
+14. **Promotion clamps `set`.** A drop's set time is chosen by its writer; at
+    promotion a set time later than now becomes now (`PromoteAt`).
+15. **Strict base64 and offset date-times.** Blobs and payload fields use
+    canonical, line-break-free base64. `set`, `created` and `retired` must be
+    offset date-times (`...Z`); TOML local date-times are rejected rather than
+    read in the machine's time zone.
+16. **`check`: which environments count.** A declared secret with no value
     in any workspace environment is an error (`secret.unset`): `run`
     resolves the same `[env]` table in every environment. A referenced var
     with no value and no `default` for an environment is an error too.
-15. **`check`: slot rules without a reviewed trunk.** Under bootstrap and
-    `trunk = "worktree"` the working tree is the baseline: an unnamed slot
-    is a pending revocation, never an unbacked grant, and key changes are not
+17. **`check`: slot rules without a reviewed trunk.** Under bootstrap and
+    `worktree` trunk the working tree is the baseline: an unnamed slot is a
+    pending revocation, never an unbacked grant, and key changes are not
     compared. A slot is "on trunk" only if trunk has the identical line (same
     current key id, device and age file). A branch whose current key trunk
-    has retired is behind trunk (`key.behind-trunk`, info).
-16. **`check`: an inbox replaced under the same key id is always an
+    has retired is behind trunk (`key.behind-trunk`, info). New scope keys
+    (`key.new`, info, never raised by `--strict`) are listed only against a
+    reviewed trunk; under bootstrap every key is new. Values under retired
+    keys are `secret.stale-key` (author unproven) or, when their set time is
+    after the key's retirement, `secret.stale-after-retirement`; both are
+    warnings, and the latter is listed with drops and new keys at the top of
+    `check`. With remotes but no resolvable trunk, `check` fails (exit 1)
+    with the foundation's error plus what CI must set; `status` carries on.
+18. **`check`: an inbox replaced under the same key id is always an
     error.** The contract excuses a changed `current` or `inbox` when trunk's
     key had a pending revocation; carbon reads that as excusing a rotation
     (a new key id), which always changes both. Drops are forbidden when
     either trunk's or the working tree's policy turns them off.
-17. **`check`: a repointed trunk** (`policy.trunk-changed`) is detected by
-    asking every ref that could be trunk what it says: the named ref, the
-    remote's default branch, and any other `trunk` value in HEAD's history
-    whose ref still names itself. This also catches a branch naming itself
-    or a missing ref (to force bootstrap); a shallow clone has less history.
-18. **Rotation debt** reads retired keys from the working tree and trunk
+19. **Rotation debt** reads retired keys from the working tree and trunk
     together, so deleting a retired key on a branch does not hide debt; debt
     from a removal counts from the earliest removal after the value was set.
+
+## Limits
+
+- **carbon cannot prove who generated a scope's first key.** A keys file is
+  only as trustworthy as the review that merged it. A new keys file in a pull
+  request is a trusted act to review, like a drop; `check` lists new scope
+  keys.
+- **A value under a retired key** proves only that its writer held that key,
+  which a removed reader still may. Readers can still open it (old branches
+  must merge), `ls` marks it "author unproven", and `apply` should list such
+  values for confirmation before re-sealing them.

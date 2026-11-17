@@ -69,7 +69,12 @@ type statusResult struct {
 	Waiting     []statusWait    `json:"waiting"`
 	Grants      []statusGrant   `json:"grants"`
 	Drops       []statusDrop    `json:"drops"`
-	Debt        []audit.Debt    `json:"debt"`
+	// NewKeys are scopes with a key here and none on trunk: carbon cannot
+	// prove a reader created them.
+	NewKeys []string `json:"new_keys"`
+	// Trunk is the trunk ref and where it came from, or why there is none.
+	Trunk string       `json:"trunk"`
+	Debt  []audit.Debt `json:"debt"`
 }
 
 func runStatus(c *Context) error {
@@ -81,13 +86,18 @@ func runStatus(c *Context) error {
 	if err != nil {
 		return err
 	}
-	st, err := audit.Load(w.Repo)
+	st, err := audit.Load(w.Repo, c.Getenv)
 	if err != nil {
 		return err
 	}
 	all := c.Bool("all")
 	res := statusResult{Environment: env, All: all, Readable: []string{}, Waiting: []statusWait{},
-		Grants: []statusGrant{}, Drops: []statusDrop{}, Debt: []audit.Debt{}}
+		Grants: []statusGrant{}, Drops: []statusDrop{}, Debt: []audit.Debt{}, NewKeys: []string{}}
+	if st.TrunkErr != nil {
+		res.Trunk = "unresolved: " + st.TrunkErr.Error()
+	} else {
+		res.Trunk = describeTrunk(st).Describe
+	}
 
 	// Who you are. A missing identity is not an error here; one that
 	// cannot be loaded is reported and status carries on without it.
@@ -190,6 +200,13 @@ func runStatus(c *Context) error {
 			}
 		}
 	}
+	if st.TrunkIsReviewed() {
+		for _, sf := range st.Scopes {
+			if sf.Keys != nil && sf.TrunkKeys == nil && (all || readable[sf.Name()]) {
+				res.NewKeys = append(res.NewKeys, sf.Name())
+			}
+		}
+	}
 	for _, d := range st.Debts(c.Now()) {
 		if all || readable[d.Scope] {
 			res.Debt = append(res.Debt, d)
@@ -270,6 +287,11 @@ func printStatus(out io.Writer, res statusResult, envs []string) {
 		drops = append(drops, []string{d.Scope, d.Secret, "set " + d.Set + "; " + next})
 	}
 	section("Drops", drops)
+	var keys [][]string
+	for _, s := range res.NewKeys {
+		keys = append(keys, []string{s, "new scope key, not on trunk", "confirm its author is a reader of " + s})
+	}
+	section("New keys", keys)
 	var debt [][]string
 	for _, d := range res.Debt {
 		debt = append(debt, []string{d.Scope, d.Secret, d.Describe()})
@@ -281,6 +303,9 @@ func printStatus(out io.Writer, res statusResult, envs []string) {
 	Table(out, rows)
 	if !res.All && (res.Identity == nil || !res.Identity.Known) {
 		footer = append(footer, "Run `carbon status --all` for drops and rotation debt in every scope.")
+	}
+	if strings.HasPrefix(res.Trunk, "unresolved: ") {
+		footer = append(footer, "Trunk is "+res.Trunk+"; grants and new scope keys are not shown. Fix: git fetch, or git config "+policy.TrunkConfigKey+" <ref>")
 	}
 	if len(footer) > 0 {
 		fmt.Fprintln(out)

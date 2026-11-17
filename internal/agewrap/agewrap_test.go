@@ -213,3 +213,23 @@ func TestFingerprintBitLayout(t *testing.T) {
 		}
 	}
 }
+
+// Finding 9: age blobs and payload fields use strict base64 too.
+func TestBlobsAreStrictBase64(t *testing.T) {
+	id := newIdentity(t, KindX25519)
+	r, _ := ParseRecipient(id.Recipient)
+	key, _ := seal.NewKey()
+	blob, _ := WrapSlot(r, "a/b", "k00000", key)
+	if _, err := OpenSlot(blob[:30]+"\n"+blob[30:], []Identity{id}, "a/b", "k00000"); err == nil {
+		t.Fatal("slot with a line break opened")
+	}
+	p := SlotPayload{Scope: "a/b", KeyID: "k00000", Key: key}.Marshal()
+	lines := strings.Split(string(p), "\n")
+	const alpha = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	k64 := lines[3] // 32 bytes: 43 characters, 2 spare bits in the last
+	i := strings.IndexByte(alpha, k64[len(k64)-1])
+	lines[3] = k64[:len(k64)-1] + string(alpha[i^1])
+	if _, err := ParseSlotPayload([]byte(strings.Join(lines, "\n"))); err == nil {
+		t.Fatal("slot payload with non-canonical key encoding accepted")
+	}
+}

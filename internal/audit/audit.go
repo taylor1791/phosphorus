@@ -51,6 +51,7 @@ const (
 	RuleStoreInvalid      = "store.invalid"
 	RuleTrunkUnreadable   = "trunk.unreadable"
 	RuleTrunkBootstrap    = "trunk.bootstrap"
+	RuleTrunkWorktree     = "trunk.worktree"
 	RuleGraphMissingPkg   = "graph.missing-package"
 	RuleGraphMissingName  = "graph.missing-name"
 	RuleGraphPrivate      = "graph.private"
@@ -63,6 +64,7 @@ const (
 	RuleSecretUndeclared = "secret.undeclared"
 	RuleSecretUnknownKey = "secret.unknown-key"
 	RuleSecretStaleKey   = "secret.stale-key"
+	RuleSecretStaleAfter = "secret.stale-after-retirement"
 	RuleSecretUnused     = "secret.unused"
 
 	// Slots and keys, compared with trunk.
@@ -74,6 +76,7 @@ const (
 	RuleDeviceNotPQ           = "device.not-pq"
 	RuleKeyChanged            = "key.changed"
 	RuleKeyBehindTrunk        = "key.behind-trunk"
+	RuleKeyNew                = "key.new"
 	RuleDropForbidden         = "drop.forbidden"
 	RuleDropPending           = "drop.pending"
 
@@ -88,8 +91,6 @@ const (
 	RulePolicyUnknownReader = "policy.unknown-reader"
 	RulePolicyUnknownMember = "policy.unknown-member"
 	RulePolicyNoDevices     = "policy.no-devices"
-	RulePolicyTrunkWorktree = "policy.trunk-worktree"
-	RulePolicyTrunkChanged  = "policy.trunk-changed"
 )
 
 // RuleInfo describes a rule for documentation and `carbon check --json`.
@@ -109,6 +110,7 @@ var Rules = []RuleInfo{
 	{RuleStoreInvalid, Error, "a keys or secrets file does not parse or names the wrong scope"},
 	{RuleTrunkUnreadable, Error, "policy or keys on the trunk ref cannot be read"},
 	{RuleTrunkBootstrap, Info, "carbon is not on trunk yet; policy comes from the working tree"},
+	{RuleTrunkWorktree, Warning, "the trunk is \"worktree\" (CARBON_TRUNK or git config): policy is never read from a reviewed ref"},
 	{RuleGraphMissingPkg, Error, "an [env] reference names a package that does not exist"},
 	{RuleGraphMissingName, Error, "an [env] reference names a secret or var that is not declared"},
 	{RuleGraphPrivate, Error, "an [env] reference reads another package's private secret"},
@@ -118,7 +120,8 @@ var Rules = []RuleInfo{
 	{RuleSecretUnset, Error, "a declared secret has no value in an environment (every workspace environment counts)"},
 	{RuleSecretUndeclared, Error, "a stored value has no declaration"},
 	{RuleSecretUnknownKey, Error, "a stored value names a key id the scope's keys file does not have"},
-	{RuleSecretStaleKey, Warning, "a stored value is under a retired key; `carbon apply` re-seals it"},
+	{RuleSecretStaleKey, Warning, "a stored value is under a retired key: its author is unproven; `carbon apply` asks before re-sealing it"},
+	{RuleSecretStaleAfter, Warning, "a value under a retired key claims a set time after that key was retired: suspect, review it like a drop"},
 	{RuleSecretUnused, Info, "a secret no [env] table references (only with --unused)"},
 	{RuleSlotUnbacked, Error, "a slot for a device trunk policy does not name, not on trunk: a grant merged policy does not back"},
 	{RuleSlotPendingRevocation, Warning, "a slot for a device trunk policy no longer names; `carbon apply` rotates the key"},
@@ -128,6 +131,7 @@ var Rules = []RuleInfo{
 	{RuleDeviceNotPQ, Error, "under require_pq, a device policy names has a key that is not hybrid"},
 	{RuleKeyChanged, Error, "a scope key or inbox key differs from trunk's with no pending revocation to justify it"},
 	{RuleKeyBehindTrunk, Info, "this branch still uses a key that trunk has retired; merge trunk"},
+	{RuleKeyNew, Info, "a scope has a key in the working tree and none on trunk: confirm its author is a reader (never an error, even under --strict)"},
 	{RuleDropForbidden, Error, "a drop in an environment where drops are off"},
 	{RuleDropPending, Info, "a drop awaiting review and promotion by a reader"},
 	{RuleAccessCoverage, Error, "a device reads a consumer scope but not a provider scope the consumer references"},
@@ -136,8 +140,6 @@ var Rules = []RuleInfo{
 	{RulePolicyUnknownReader, Error, "an access entry names no team, person or machine"},
 	{RulePolicyUnknownMember, Warning, "a team lists a person with no person file"},
 	{RulePolicyNoDevices, Warning, "a person file lists no devices"},
-	{RulePolicyTrunkWorktree, Warning, "trunk = \"worktree\": policy is never read from a reviewed ref"},
-	{RulePolicyTrunkChanged, Error, "the working tree's trunk setting differs from trunk's own"},
 }
 
 // Finding is one result. Fields that do not apply are empty.

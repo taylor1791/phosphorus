@@ -27,7 +27,8 @@ func setAll(t *testing.T, w *clitest.World) {
 
 type checkJSON struct {
 	OK       bool
-	Counts   struct{ Errors, Warnings, Info, Drops int }
+	Trunk    struct{ Ref, From, Mode string }
+	Counts   struct{ Errors, Warnings, Info, Drops, Review int }
 	Findings []struct {
 		Severity, Rule, Scope, Secret, Device, Message, Hint string
 		Strict                                               bool
@@ -98,9 +99,9 @@ func TestCheckListsDrops(t *testing.T) {
 	w.Branch("ada-drop")
 	w.Ada.In(w.PkgDir).Stdin("whsec_new").Must("set", "webhook_secret", "--env", "prod")
 	res := w.Anyone().Must("check")
-	contains(t, "check", res.Stdout, "!! 1 DROP TO REVIEW", "checkout/prod   webhook_secret", "1 drop to review")
-	if !strings.HasPrefix(res.Stdout, "!!!!") {
-		t.Fatalf("the drop banner is not the first thing printed:\n%s", res.Stdout)
+	contains(t, "check", res.Stdout, "!! 1 ITEM TO REVIEW", "checkout/prod   webhook_secret", "DROP", "1 item to review")
+	if !strings.HasPrefix(res.Stdout, "Compared with trunk: main (from git config carbon.trunk)\n\n!!!!") {
+		t.Fatalf("the trunk line and the review banner do not come first:\n%s", res.Stdout)
 	}
 	cj := checkAsJSON(t, w.Anyone().Must("check", "--json"))
 	if cj.Counts.Drops != 1 || !hasRule(cj, "drop.pending", "info") {
@@ -112,6 +113,49 @@ func TestCheckListsDrops(t *testing.T) {
 		`prod = { readers = ["@payments", "machine:deploy-checkout"], drops = false }`)
 	res = w.Anyone().Fails(4, "check")
 	contains(t, "check", res.Stdout, "DROP (drops are off here: error)", "error[drop.forbidden] checkout/prod:")
+}
+
+func TestCheckListsNewScopeKeys(t *testing.T) {
+	w := clitest.Standard(t)
+	setAll(t, w)
+	w.Branch("new-scope")
+	w.AddPackage("services/search", "search", "[secrets]\nkey = {}\n")
+	w.Lin.In("services/search").Stdin("k").Must("set", "key", "--env", "dev")
+	res := w.Anyone().Fails(4, "check") // staging and prod are unset
+	contains(t, "check", res.Stdout, "!!   search/dev", "NEW SCOPE KEY: confirm the author is a reader of search/dev")
+	// Never a failure, even under --strict.
+	cj := checkAsJSON(t, w.Anyone().Fails(4, "check", "--json", "--strict"))
+	for _, f := range cj.Findings {
+		if f.Rule == "key.new" && f.Severity != "info" {
+			t.Fatalf("key.new is %s under --strict", f.Severity)
+		}
+	}
+	if !hasRule(cj, "key.new", "info") || cj.Counts.Review != 1 {
+		t.Fatalf("%+v", cj)
+	}
+	contains(t, "status", w.Lin.Must("status").Stdout, "New keys", "search/dev", "confirm its author is a reader of search/dev")
+}
+
+func TestCheckTrunk(t *testing.T) {
+	w := clitest.Standard(t)
+	setAll(t, w)
+	cj := checkAsJSON(t, w.Anyone().Must("check", "--json"))
+	if cj.Trunk.Ref != "main" || cj.Trunk.From != "git config carbon.trunk" || cj.Trunk.Mode != "trunk" {
+		t.Fatalf("%+v", cj.Trunk)
+	}
+	// worktree mode, chosen per process: a warning.
+	res := w.Anyone().With("CARBON_TRUNK=worktree").Must("check")
+	contains(t, "check", res.Stdout, `Compared with trunk: none: the trunk is "worktree" (from CARBON_TRUNK)`, "warning[trunk.worktree]")
+	// Remotes but no trunk: check cannot pass, and says what CI must do.
+	w.Git("config", "--unset", "carbon.trunk")
+	w.Git("update-ref", "refs/remotes/upstream/feature", "HEAD")
+	res = w.Anyone().Fails(1, "check")
+	contains(t, "stderr", res.Stderr, "cannot tell which branch is trunk", "In CI: set CARBON_TRUNK", "git config carbon.trunk <ref>")
+	// An override naming a missing ref.
+	res = w.Anyone().With("CARBON_TRUNK=origin/nope").Fails(1, "check")
+	contains(t, "stderr", res.Stderr, "trunk origin/nope (from CARBON_TRUNK) does not exist", "In CI")
+	// status carries on.
+	contains(t, "status", w.Lin.Must("status").Stdout, "Trunk is unresolved")
 }
 
 func TestCheckCoverageAndUnused(t *testing.T) {
@@ -141,7 +185,7 @@ func TestCheckRotationDebt(t *testing.T) {
 	setOld(t, w, "checkout", "dev", "stripe_api_key", 30)
 	w.SetTeams(map[string][]string{"engineering": {"ada", "lin"}, "payments": {"lin"}})
 	w.Commit("remove sam from engineering")
-	rotate(t, w, "checkout", "dev", "removed sam", 20)
+	rotateDaysAgo(t, w, "checkout", "dev", "removed sam", 20)
 	w.Commit("apply")
 
 	res := w.Anyone().Run("check")
@@ -385,9 +429,9 @@ func setOld(t *testing.T, w *clitest.World, pkg, env, name string, days int) {
 	}
 }
 
-// rotate rotates a scope's key days ago, as lin, as `apply` would after a
+// rotateDaysAgo rotates a scope's key days ago, as lin, as `apply` would after a
 // removal.
-func rotate(t *testing.T, w *clitest.World, pkg, env, reason string, days int) {
+func rotateDaysAgo(t *testing.T, w *clitest.World, pkg, env, reason string, days int) {
 	t.Helper()
 	o := openScope(t, w, pkg, env, w.Lin, "lin/laptop")
 	defer o.Close()

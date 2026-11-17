@@ -17,7 +17,8 @@ binary: you need the stock `age` CLI (1.3 or later for hybrid keys) and
 | Drop | An age file to the inbox, carrying one value | `secrets.toml`, `drop` |
 | Retired key | An old scope key sealed under its successor | `keys.toml`, `[keys.<old id>]` with `sealed` |
 
-Base64 is always the standard alphabet **without padding**. Times are RFC 3339
+Base64 is always the standard alphabet **without padding**, canonical (unused
+trailing bits are zero) and without line breaks; carbon rejects anything else. Times are RFC 3339
 UTC with whole seconds, e.g. `2026-11-02T17:04:11Z`.
 
 ## Files

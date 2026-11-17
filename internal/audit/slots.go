@@ -96,6 +96,14 @@ func (s *State) slotFindings() []Finding {
 			}
 			continue
 		}
+		if reviewed && tk == nil {
+			f := base
+			f.Severity, f.Rule, f.File = Info, RuleKeyNew, sf.KeysFile
+			f.Message = fmt.Sprintf("NEW SCOPE KEY: %s has a key here (%s) and none on trunk. Only a reader may create one, but carbon cannot prove who did: confirm the author is a reader of %s.",
+				sf.Name(), sf.Keys.Current, sf.Name())
+			f.Hint = fmt.Sprintf("Check who committed %s against `carbon who %s --env %s` before merging.", sf.KeysFile, sf.Package.Name, sf.Env)
+			out = append(out, f)
+		}
 		cur := sf.Keys.CurrentKey()
 		var trunkCur *store.Key
 		if tk != nil {
@@ -206,5 +214,5 @@ func policyName(p *policy.Policy) string {
 	case policy.OriginBootstrap:
 		return "policy (working tree; carbon is not on trunk yet)"
 	}
-	return "policy (working tree, trunk = \"worktree\")"
+	return "policy (working tree; the trunk is \"worktree\")"
 }

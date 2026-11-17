@@ -18,20 +18,22 @@ themselves. To build carbon by hand: `CGO_ENABLED=0 go build ./cmd/carbon`.
 
 | Package | Use it for |
 |---|---|
-| `internal/scope` | Everything about a scope's keys and values: `Load`, `Create`, `Open`, `Reveal`/`RevealAll`, `Seal`, `Drop`, `AddSlots`, `DiffSlots`, `Rotate`, `Promote`/`PromoteDrops`, `Refresh`, `TrunkInbox`, `ReadKeysAt`, `List` |
-| `internal/policy` | Who reads a scope: `LoadTrunk` (apply, drops, scope creation, check's slot rules), `LoadWorktree` (who, access, status, run), `Policy.Scope` (devices, `Why`, `Unresolved`, `RequirePQ`, `Drops`, `Eligible`), `Scopes`, `ScopesOf`, `Identify`, `TeamsOf` |
+| `internal/scope` | Everything about a scope's keys and values: `Load`, `Create`, `Open`, `Reveal`/`RevealAll`, `Seal`, `Drop`, `AddSlots`, `DiffSlots`, `Rotate`/`RotateSkippingBadDrops`, `Promote(At)`/`PromoteDrops(At)`, `Refresh`/`RefreshDetailed`, `StaleEntries`, `VerifyTrunk`, `TrunkInbox`, `ReadKeysAt`, `List` |
+| `internal/policy` | Who reads a scope: `LoadTrunk`/`LoadTrunkWith` (apply, drops, scope creation, check's slot rules; `Policy.Trunk` says which ref and from where, see `ResolveTrunk`), `LoadWorktree` (who, access, status, run), `Policy.Scope` (devices, `Why`, `Unresolved`, `RequirePQ`, `Drops`, `Eligible`), `Scopes`, `ScopesOf`, `Identify`, `TeamsOf` |
 | `internal/config` | Parsing people-written files, names, `ParseTemplate`, `ParseDuration`, `ParseGenerate`, `Quote`, writers for people/machines/teams |
-| `internal/audit` | Keyless analysis of the whole repo (`check`, `status`): `Load` → `State.Check` (findings with stable rule ids, listed in `audit.Rules`), `State.Debts`, `BuildGraph`, `Refs` |
+| `internal/audit` | Keyless analysis of the whole repo (`check`, `status`): `Load(repo, getenv)` (trunk resolved with `policy.ResolveTrunk`; an unresolvable one is `State.TrunkErr`) → `State.Check` (findings with stable rule ids, listed in `audit.Rules`), `State.Debts`, `BuildGraph`, `Refs` |
 | `internal/store` | Parsing and writing secrets/keys files (rarely needed directly; `scope` wraps it) |
 | `internal/agewrap` | age: recipients, identities, slots, drops, `StanzaTypes` (for `check`), `Fingerprint` |
 | `internal/seal` | Sealed blobs and associated data (only `scope` should call it) |
-| `internal/gitx` | git plumbing: `Repo.Source(ref)`, `RefExists`, `IsIgnored`, `Commit`, `GitDir` |
+| `internal/gitx` | git plumbing: `Repo.Source(ref)`, `RefExists`, `IsIgnored`, `Commit`, `GitDir`, `ConfigGet`; `ScrubbedEnviron` for any subprocess (the child of `run`) |
 
 `apply` is orchestration over these: for each scope, `policy.LoadTrunk` →
-`Policy.Scope` → `Scope.DiffSlots`; if `Extra` is non-empty, `Opened.Rotate`
+`Policy.Scope` → `Scope.Open` → `Opened.VerifyTrunk(trunk keys)` →
+`Scope.DiffSlots`; if `Extra` is non-empty, `Opened.RotateSkippingBadDrops`
 with `reason = "removed <who>"`; else `Opened.AddSlots(Missing)`; then
-`PromoteDrops` and `Refresh`; `Scope.Save`; `Repo.Commit` with exactly the
-written paths.
+`PromoteDropsAt(now)`; show `Scope.StaleEntries()` in the plan (values under
+retired keys have an unproven author) before `RefreshDetailed`; report skipped
+drops; `Scope.Save`; `Repo.Commit` with exactly the written paths.
 
 ## Adding a command
 
@@ -83,7 +85,8 @@ was (for `run`).
 | `TrunkPolicy(w)` / `WorktreePolicy(w)` | Policy per the trunk rules; prints the bootstrap notice |
 | `TrunkKeys(w, pol, pkg, env)` | A scope's keys file at trunk (or the working tree under the exceptions) |
 | `Identities(required)` | The caller's identities (`CARBON_IDENTITY`, `CARBON_IDENTITY_FILE`, XDG path; exit 6) |
-| `LoadScope(w, pkg, env)` / `OpenScope(w, pkg, s)` | Load a scope; open it, turning "not a reader" into the design's exit-3 error |
+| `LoadScope(w, pkg, env)` / `OpenScope(w, pkg, s)` | Load a scope; open it, turning "not a reader" into the design's exit-3 error, then `VerifyTrunk` |
+| `VerifyTrunk(w, pkg, opened)` | Check an opened scope against trunk's keys file; call it on every path that opens a scope without `OpenScope` |
 | `NoAccessErr(pol, pkg, env, me, slots)` | The "you cannot read X in Y" error with readers and the next command |
 | `Me(pol, ids)`, `DeviceIDs(ds)` | Which devices the caller's identities are |
 | `Confirm(question)` | y/N on the terminal; `--yes` skips; no terminal → exit 7. Print the plan first |
@@ -121,7 +124,7 @@ func TestWho(t *testing.T) {
 	co := w.PkgDir           // "services/checkout"
 
 	w.Lin.In(co).Stdin("sk_1").Must("set", "stripe_api_key", "--env", "prod")
-	w.Commit("key")                      // trunk is "main"; Branch, Checkout, Merge, Git also exist
+	w.Commit("key")                      // trunk is "main" (git config carbon.trunk); Branch, Checkout, Merge, Git also exist
 
 	res := w.Ada.In(co).Fails(3, "get", "stripe_api_key", "--env", "prod")
 	if !strings.Contains(res.Stderr, "carbon request checkout --env prod") { t.Fatal(res) }
@@ -131,8 +134,11 @@ func TestWho(t *testing.T) {
 }
 ```
 
-- `clitest.NewRepo(t)` is an empty repo (trunk missing: the bootstrap case);
-  `clitest.NewWorkspace(t)` adds `carbon init --trunk main`, uncommitted.
+- `clitest.NewRepo(t)` is an empty repo with no remote and no `carbon.trunk`:
+  the bootstrap case. `clitest.NewWorkspace(t)` adds `carbon init`,
+  uncommitted. `clitest.Standard(t)` commits to `main` and runs
+  `git config carbon.trunk main` (trunk mode). `r.SetTrunk(ref)` sets it;
+  `p.With("CARBON_TRUNK=...")` overrides it for one run.
 - `r.Person("ada").Join()` joins as `ada/laptop`; `r.Machine("name")` returns a
   runner carrying the private key in `CARBON_IDENTITY`; `r.Anyone()` has no
   identity.

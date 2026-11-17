@@ -2,6 +2,7 @@ package audit
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"filippo.io/age"
 
 	"github.com/taylor1791/phosphorus/internal/agewrap"
+	"github.com/taylor1791/phosphorus/internal/config"
 	"github.com/taylor1791/phosphorus/internal/policy"
 	"github.com/taylor1791/phosphorus/internal/scope"
 )
@@ -29,7 +31,7 @@ func TestRulesListEveryRuleOnce(t *testing.T) {
 		}
 		seen[r.ID] = true
 	}
-	if len(seen) != 37 {
+	if len(seen) != 38 {
 		t.Fatalf("%d rules; update this test when adding one", len(seen))
 	}
 }
@@ -100,9 +102,56 @@ func TestTrunkUnreadable(t *testing.T) {
 
 func TestTrunkBootstrap(t *testing.T) {
 	f := newFx(t)
-	f.git("branch", "-m", "main", "work") // trunk "main" no longer exists
+	f.git("config", "--local", "--unset", "carbon.trunk") // no remote, no override
 	rep := f.check(Options{})
 	want(t, rep, RuleTrunkBootstrap, Info)
+	none(t, rep, RuleKeyNew)
+}
+
+func TestTrunkWorktree(t *testing.T) {
+	f := newFx(t)
+	f.env["CARBON_TRUNK"] = "worktree"
+	got := want(t, f.check(Options{}), RuleTrunkWorktree, Warning)
+	if !strings.Contains(got.Message, "CARBON_TRUNK") {
+		t.Fatal(got.Message)
+	}
+	f.env = map[string]string{}
+	f.git("config", "--local", "carbon.trunk", "worktree")
+	got = want(t, f.check(Options{}), RuleTrunkWorktree, Warning)
+	if !strings.Contains(got.Message, "git config carbon.trunk") {
+		t.Fatal(got.Message)
+	}
+}
+
+func TestTrunkUnresolved(t *testing.T) {
+	f := newFx(t)
+	f.git("config", "--local", "carbon.trunk", "nowhere")
+	st, err := f.state()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var missing *policy.TrunkMissingError
+	if !errors.As(st.TrunkErr, &missing) || st.Trunk != nil {
+		t.Fatalf("TrunkErr = %v", st.TrunkErr)
+	}
+	// Remotes, but no default branch and no override.
+	f.git("config", "--local", "--unset", "carbon.trunk")
+	f.git("update-ref", "refs/remotes/upstream/feature", "HEAD")
+	if st, err = f.state(); err != nil {
+		t.Fatal(err)
+	}
+	var noTrunk *policy.NoTrunkError
+	if !errors.As(st.TrunkErr, &noTrunk) {
+		t.Fatalf("TrunkErr = %v", st.TrunkErr)
+	}
+}
+
+func TestLeftoverTrunkSettingIsAnError(t *testing.T) {
+	f := newFx(t)
+	f.replace("carbon.toml", "[workspace]\n", "[workspace]\ntrunk = \"main\"\n")
+	if _, err := f.state(); !errors.Is(err, config.ErrTrunkSettingRemoved) {
+		t.Fatalf("err = %v", err)
+	}
 }
 
 // The reference graph.
@@ -202,8 +251,73 @@ func TestSecretStaleKey(t *testing.T) {
 	f.save(o.Scope)
 	f.write("svc/app/.carbon/dev.secrets.toml", secrets) // the old line, under the now retired key
 	rep := f.check(Options{})
-	want(t, rep, RuleSecretStaleKey, Warning)
+	got := want(t, rep, RuleSecretStaleKey, Warning)
+	if !strings.Contains(got.Message, "unproven") || !strings.Contains(got.Hint, "asks before re-sealing") {
+		t.Fatalf("%+v", got)
+	}
 	none(t, rep, RuleSecretUnknownKey)
+	none(t, rep, RuleSecretStaleAfter)
+}
+
+func TestSecretStaleAfterRetirement(t *testing.T) {
+	f := newFx(t)
+	// A value under the old key claims to be set after that key retired:
+	// someone who kept the old key wrote it.
+	retired := t0.Add(time.Hour)
+	o := f.open("app", "dev", "ada/laptop")
+	f.seal(o, "token", retired.Add(24*time.Hour))
+	f.save(o.Scope)
+	forged := f.read("svc/app/.carbon/dev.secrets.toml")
+	o = f.open("app", "dev", "ada/laptop")
+	if _, err := o.Rotate(f.devices("app", "dev"), "scheduled", retired); err != nil {
+		t.Fatal(err)
+	}
+	f.save(o.Scope)
+	f.write("svc/app/.carbon/dev.secrets.toml", forged)
+	rep := f.check(Options{})
+	got := want(t, rep, RuleSecretStaleAfter, Warning)
+	if got.Secret != "token" || got.Set == nil || !strings.Contains(got.Message, "SUSPECT") {
+		t.Fatalf("%+v", got)
+	}
+	none(t, rep, RuleSecretStaleKey)
+}
+
+func TestKeyNew(t *testing.T) {
+	f := newFx(t)
+	f.addPackage("svc/lib", "name = \"lib\"\n[secrets]\nk = {}\n")
+	f.commit("lib on trunk, no key yet")
+	o := f.create("lib", "dev")
+	f.seal(o, "k", now)
+	f.save(o.Scope)
+	rep := f.check(Options{Strict: true})
+	got := want(t, rep, RuleKeyNew, Info)
+	if got.Scope != "lib/dev" || got.Strict {
+		t.Fatalf("%+v", got)
+	}
+	if len(rep.ByRule(RuleKeyNew)) != 1 {
+		t.Fatalf("only lib/dev is new:\n%s", dump(rep))
+	}
+}
+
+func TestRetiredKeyKeepingInboxSealedIsFine(t *testing.T) {
+	f := newFx(t)
+	f.write(".carbon/teams.toml", "eng = [\"ada\", \"lin\"]\nops = [\"lin\"]\n")
+	f.commit("remove sam")
+	o := f.open("app", "dev", "ada/laptop")
+	if _, err := o.Rotate(f.devices("app", "dev"), "removed sam", now); err != nil {
+		t.Fatal(err)
+	}
+	f.save(o.Scope)
+	f.commit("apply")
+	if !strings.Contains(f.read("svc/app/.carbon/dev.keys.toml"), "retired = ") {
+		t.Fatal("no retired key")
+	}
+	rep := f.check(Options{})
+	for _, fd := range rep.Findings {
+		if fd.Rule != RuleDebtRemoval {
+			t.Fatalf("a retired key with inbox_sealed was flagged:\n%s", dump(rep))
+		}
+	}
 }
 
 func TestSecretUnused(t *testing.T) {
@@ -512,41 +626,6 @@ func TestPolicyNoDevices(t *testing.T) {
 	f := newFx(t)
 	f.write(".carbon/people/zoe.toml", "name = \"Zoe\"\n[devices]\n")
 	want(t, f.check(Options{}), RulePolicyNoDevices, Warning)
-}
-
-func TestPolicyTrunkWorktree(t *testing.T) {
-	f := newFx(t)
-	f.replace("carbon.toml", `trunk = "main"`, `trunk = "worktree"`)
-	f.commit("no protected trunk")
-	rep := f.check(Options{})
-	want(t, rep, RulePolicyTrunkWorktree, Warning)
-	none(t, rep, RulePolicyTrunkChanged)
-}
-
-func TestPolicyTrunkChanged(t *testing.T) {
-	f := newFx(t)
-	// A branch points trunk at itself.
-	f.git("checkout", "-q", "-b", "mine")
-	f.replace("carbon.toml", `trunk = "main"`, `trunk = "mine"`)
-	f.commit("I am trunk now")
-	got := want(t, f.check(Options{}), RulePolicyTrunkChanged, Error)
-	if !strings.Contains(got.Message, `"main"`) {
-		t.Fatal(got.Message)
-	}
-	// Or at a ref that does not exist, to force the bootstrap exception.
-	f.replace("carbon.toml", `trunk = "mine"`, `trunk = "nowhere"`)
-	want(t, f.check(Options{}), RulePolicyTrunkChanged, Error)
-	// Or at another branch whose own file still names main.
-	f.git("branch", "other", "main")
-	f.replace("carbon.toml", `trunk = "nowhere"`, `trunk = "other"`)
-	want(t, f.check(Options{}), RulePolicyTrunkChanged, Error)
-
-	// A change made on trunk itself is fine.
-	f.git("checkout", "-q", "-f", "main")
-	f.git("branch", "-m", "main", "trunk")
-	f.replace("carbon.toml", `trunk = "main"`, `trunk = "trunk"`)
-	f.commit("rename trunk")
-	none(t, f.check(Options{}), RulePolicyTrunkChanged)
 }
 
 // helpers for the tests above
