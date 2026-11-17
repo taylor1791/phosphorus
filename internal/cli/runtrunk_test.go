@@ -44,6 +44,7 @@ func TestRunAndEditScrubIdentityVariables(t *testing.T) {
 	w := runWorld(t)
 	helper := childHelper(t)
 	w.Lin.In(w.PkgDir).Stdin(stripeValue).Must("set", "stripe_api_key", "--env", "prod")
+	w.Commit("prod key")
 
 	// The machine reads with CARBON_IDENTITY; a bogus CARBON_IDENTITY_FILE too.
 	res := w.Deploy.With("CARBON_IDENTITY_FILE=/nonexistent").In("services/empty").Must("run", "--", helper, "env")

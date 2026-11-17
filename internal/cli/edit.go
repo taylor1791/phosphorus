@@ -61,6 +61,7 @@ type editResult struct {
 }
 
 func runEdit(c *Context) error {
+	c.sealing = true
 	editor := c.Getenv("VISUAL")
 	if strings.TrimSpace(editor) == "" {
 		editor = c.Getenv("EDITOR")

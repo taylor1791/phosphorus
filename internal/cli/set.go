@@ -51,6 +51,7 @@ type setResult struct {
 }
 
 func runSet(c *Context) error {
+	c.sealing = true
 	name := c.Args[0]
 	if err := config.CheckSecretName(name); err != nil {
 		return c.UsageErr("%v", err)

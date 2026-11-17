@@ -221,6 +221,7 @@ func TestApplyOffboardingDrill(t *testing.T) {
 	w := clitest.Standard(t)
 	co := w.PkgDir
 	w.Lin.In(co).Stdin("sk_dev").Must("set", "stripe_api_key", "--env", "dev")
+	w.Commit("dev key")
 	w.Ada.In(co).Stdin("wh_dev").Must("set", "webhook_secret", "--env", "dev")
 	w.Lin.In(co).Stdin("sk_prod").Must("set", "stripe_api_key", "--env", "prod")
 	w.Commit("secrets")

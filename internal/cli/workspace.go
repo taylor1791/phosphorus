@@ -357,6 +357,22 @@ func (c *Context) VerifyTrunk(w *Workspace, p *config.Package, o *scope.Opened) 
 	if err != nil {
 		return err
 	}
+	if c.sealing && trunk != nil {
+		if r, ok := trunk.Keys[o.Keys.Current]; ok && r.IsRetired() {
+			// The branch is behind trunk. Reading is fine, but a value
+			// sealed now under the retired key is readable by whoever it
+			// was retired from.
+			pol, _ := c.TrunkPolicy(w)
+			ref := "<trunk>"
+			if pol != nil {
+				ref = pol.Ref
+			}
+			return &Error{Code: ExitError,
+				Message: fmt.Sprintf("%s on this branch uses key %s, which trunk retired (%s)", o.Name(), o.Keys.Current, r.Reason),
+				Details: []string{"A value sealed under a retired key is readable by anyone who still holds it, so carbon will not seal under it."},
+				Hint:    fmt.Sprintf("Bring this branch up to date first:   git merge %s", ref)}
+		}
+	}
 	return c.checkPin(w, p, o, trunk)
 }
 
@@ -416,6 +432,27 @@ func (c *Context) checkPin(w *Workspace, p *config.Package, o *scope.Opened, tru
 	}
 	reader := pins.ReaderID(ids)
 	pin, _ := f.Get(reader, o.Name())
+	if pin == nil && trunk == nil {
+		// The key exists only on this branch while trunk is a reviewed ref:
+		// carbon cannot tell whether a reader created it. Reading is
+		// allowed (like a drop, its values are only as good as its
+		// review) but is not trusted on first use, and nothing is sealed
+		// under it, since its author may hold it. Its creator pinned it.
+		if tp, err := c.TrunkPolicy(w); err == nil && tp.Origin == policy.OriginTrunk {
+			if c.sealing {
+				rel := w.Rel(o.KeysPath())
+				return &Error{Code: ExitError,
+					Message: fmt.Sprintf("the key for %s exists only on this branch, and you did not create or verify it", o.Name()),
+					Details: []string{
+						"Trunk (" + tp.Ref + ") has no key for " + o.Name() + ". carbon cannot prove a reader created this one, so it will not seal under it:",
+						"whoever created it could read what you set.",
+					},
+					Hint: fmt.Sprintf("Check who committed it:   git log -p -- %s\nThen merge it to trunk after review, or, if you know its author is a reader:   carbon trust %s --env %s",
+						rel, p.Name, o.Env)}
+			}
+			return nil
+		}
+	}
 	next, err := o.CheckPin(pin, trunk)
 	var pe *scope.PinError
 	if errors.As(err, &pe) {

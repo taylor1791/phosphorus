@@ -31,6 +31,9 @@ type Context struct {
 	trunkErr error
 	wtPol    *policy.Policy
 	ids      []agewrap.Identity
+	// sealing is set by commands that seal under an opened key (set,
+	// edit): see checkPin.
+	sealing bool
 }
 
 // JSON reports whether --json was given.

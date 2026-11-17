@@ -294,7 +294,13 @@ func TestBranchWithoutTrunkKey(t *testing.T) {
 	w.Checkout("main")
 	w.Branch("new-scope")
 	w.Lin.In(co).Stdin("d").Must("set", "stripe_api_key", "--env", "staging")
-	w.Sam.In(co).Stdin("d").Must("set", "webhook_secret", "--env", "staging") // sam reads staging: sealed
+	// sam reads staging, but did not create this key and trunk does not
+	// have it: carbon will not seal under a key whose author it cannot
+	// prove is a reader, until sam trusts it (or it merges).
+	res = w.Sam.In(co).Stdin("d").Fails(1, "set", "webhook_secret", "--env", "staging")
+	contains(t, "stderr", res.Stderr, "exists only on this branch", "carbon trust checkout --env staging")
+	w.Sam.In(co).Must("trust", "--env", "staging", "--yes")
+	w.Sam.In(co).Stdin("d").Must("set", "webhook_secret", "--env", "staging") // now sealed
 	// The deploy machine does not read staging, so its set would be a drop.
 	res = w.Deploy.In(co).Stdin("x").Fails(1, "set", "session_key", "--env", "staging")
 	contains(t, "stderr", res.Stderr, "has a key on this branch but not on trunk")

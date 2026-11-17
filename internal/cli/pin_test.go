@@ -164,6 +164,7 @@ func TestFirstOpenPins(t *testing.T) {
 	if strings.Count(pinsFile(w), `"checkout/prod"`) != 1 {
 		t.Fatalf("creation did not pin:\n%s", pinsFile(w))
 	}
+	w.Commit("key") // a key only on a branch is never trusted on first use
 	w.Deploy.In(w.PkgDir).Must("get", "stripe_api_key", "--env", "prod")
 	if strings.Count(pinsFile(w), `"checkout/prod"`) != 2 || strings.Count(pinsFile(w), "[readers.") != 2 {
 		t.Fatalf("first open did not pin per identity:\n%s", pinsFile(w))
