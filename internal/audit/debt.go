@@ -176,6 +176,9 @@ func (s *State) debtFindings(now time.Time, max time.Duration) []Finding {
 			f.Message += fmt.Sprintf(" That is past --max-debt %s.", formatDuration(max))
 		}
 		f.Hint = fmt.Sprintf("Change the credential at its source, then: carbon set %s --package %s --env %s", d.Secret, d.Package, d.Env)
+		if p := s.Worktree.Packages[d.Package]; p != nil && p.Secrets[d.Secret].Generate != "" {
+			f.Hint = fmt.Sprintf("Generate a new value: carbon set %s --generate --package %s --env %s", d.Secret, d.Package, d.Env)
+		}
 		out = append(out, f)
 	}
 	return out
