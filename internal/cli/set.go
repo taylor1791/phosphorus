@@ -204,8 +204,8 @@ func runSet(c *Context) error {
 
 	return c.Output(res, func(out io.Writer) {
 		if res.CreatedKey {
-			fmt.Fprintf(out, "Created the key for %s, wrapped to %d device(s) that trunk policy names.\n",
-				s.Name(), len(s.SlotIDs()))
+			fmt.Fprintf(out, "Created the key for %s, wrapped to the %s that policy names.\n",
+				s.Name(), plural(len(s.SlotIDs()), "device"))
 		}
 		commit := "Commit " + joinAnd(res.Files)
 		switch {

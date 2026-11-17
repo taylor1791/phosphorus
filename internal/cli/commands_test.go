@@ -165,7 +165,7 @@ func TestReadersAndNonReaders(t *testing.T) {
 
 	// lin reads checkout/prod via @payments: the first set creates the key.
 	res := w.Lin.In(co).Stdin("sk_live_1").Must("set", "stripe_api_key", "--env", "prod")
-	contains(t, "stdout", res.Stdout, "Created the key for checkout/prod, wrapped to 2 device(s)")
+	contains(t, "stdout", res.Stdout, "Created the key for checkout/prod, wrapped to the 2 devices that policy names")
 	keys := w.Read(co + "/.carbon/prod.keys.toml")
 	contains(t, "keys", keys, `"lin/laptop" = { to = "sha256:`, `"machine:deploy-checkout" = { to = "sha256:`)
 	if strings.Contains(keys, "ada/laptop") || strings.Contains(keys, "sam/laptop") {
