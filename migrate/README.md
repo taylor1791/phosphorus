@@ -64,7 +64,6 @@ was changed).
      Keys move over unchanged.
    - each service's `carbon.toml`, rewritten as a 1.0 package (table below),
      with a `# carbon-migrate:` comment for each item that needs a decision.
-   - the `.gitattributes` line `carbon init` adds for keys files.
 3. **Copies** every secret value with `carbon set <name> --env <env> --package
    <pkg>`, the value on stdin (`--allow-empty` for an empty value). The first
    set in each scope creates its key, wrapped to every reader's device. On the

@@ -15,9 +15,6 @@ import (
 	"github.com/taylor1791/phosphorus/migrate/internal/legacy"
 )
 
-// GitAttributesLine is the line `carbon init` adds to .gitattributes.
-const GitAttributesLine = "**/.carbon/*.keys.toml linguist-generated"
-
 // Input is everything the planner needs. It is pure data so the planner can
 // be tested without sops or git.
 type Input struct {
@@ -62,8 +59,6 @@ type Input struct {
 
 	// Existing reports whether a slash path exists in the working tree.
 	Existing func(string) bool
-	// GitAttributes is the current .gitattributes content (nil if absent).
-	GitAttributes []byte
 }
 
 // Env maps an old registry to a 1.0 environment.
@@ -1085,18 +1080,6 @@ func (pl *planner) planFiles() {
 			continue
 		}
 		p.Files = append(p.Files, FileChange{Path: pkg.File, Action: "rewrite", What: "package " + pkg.Name, Content: renderPackage(pkg, "")})
-	}
-	if !strings.Contains(string(in.GitAttributes), GitAttributesLine) {
-		content := string(in.GitAttributes)
-		if content != "" && !strings.HasSuffix(content, "\n") {
-			content += "\n"
-		}
-		content += GitAttributesLine + "\n"
-		action := "append"
-		if in.GitAttributes == nil {
-			action = "create"
-		}
-		p.Files = append(p.Files, FileChange{Path: ".gitattributes", Action: action, What: "mark keys files generated", Content: []byte(content)})
 	}
 	for _, f := range p.Files {
 		if strings.HasSuffix(f.Path, ".toml") {

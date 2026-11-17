@@ -228,12 +228,6 @@ func (r *runner) run() (int, error) {
 	in.IdentityInRepo = insideDir(in.IdentityPath, r.root)
 	in.KeepRecipients = r.o.KeepRecipients
 
-	if data, err := os.ReadFile(filepath.Join(r.root, ".gitattributes")); err == nil {
-		in.GitAttributes = data
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return ExitFailed, err
-	}
-
 	plan := Build(in)
 	plan.Blockers = append(blockers, plan.Blockers...)
 	if v := r.getenv("CARBON_IDENTITY"); v != "" {

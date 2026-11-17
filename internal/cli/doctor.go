@@ -179,7 +179,6 @@ func (d *doctor) run() {
 	if _, err := w.Packages(); err != nil {
 		d.addErr("packages", err)
 	}
-	d.attributes(w)
 	trunkPol := d.trunk(w)
 
 	wpol, err := c.WorktreePolicy(w)
@@ -192,14 +191,6 @@ func (d *doctor) run() {
 	env := d.environment(w)
 	if env != "" && wpol != nil {
 		d.scope(w, wpol, env, me)
-	}
-}
-
-func (d *doctor) attributes(w *Workspace) {
-	b, _ := os.ReadFile(filepath.Join(w.Root, ".gitattributes"))
-	if !strings.Contains(string(b), "linguist-generated") || !strings.Contains(string(b), ".keys.toml") {
-		d.add("gitattributes", checkWarn, "keys files are not marked generated, so reviews show every slot line",
-			"Add this line to .gitattributes:   **/.carbon/*.keys.toml linguist-generated")
 	}
 }
 

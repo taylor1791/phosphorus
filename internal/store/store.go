@@ -34,10 +34,6 @@ func KeysPath(pkgDir, env string) string {
 	return filepath.Join(pkgDir, config.CarbonDir, env+".keys.toml")
 }
 
-// GitAttributesLine marks keys files as generated; `init` adds it to
-// .gitattributes.
-const GitAttributesLine = "**/.carbon/*.keys.toml linguist-generated"
-
 // ParseError is a malformed secrets or keys file.
 type ParseError struct {
 	Path string

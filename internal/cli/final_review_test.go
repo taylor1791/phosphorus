@@ -230,3 +230,14 @@ func TestRotationReasonIsChecked(t *testing.T) {
 	cj := ci(t, w.Repo, 4)
 	cj.has(t, "key.changed", "error checkout/dev")
 }
+
+// Finding 12: keys files are not hidden from review: init does not mark
+// them generated, and doctor does not ask for it.
+func TestKeysFilesAreNotMarkedGenerated(t *testing.T) {
+	w := clitest.Standard(t)
+	if strings.Contains(w.Read(".gitattributes"), "linguist-generated") {
+		t.Fatal("init marked keys files generated")
+	}
+	res := w.Lin.In(w.PkgDir).Run("doctor")
+	mustNotContain(t, "doctor", res.Stdout+res.Stderr, "gitattributes", "generated")
+}

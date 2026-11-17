@@ -14,7 +14,6 @@ import (
 	"github.com/taylor1791/phosphorus/internal/config"
 	"github.com/taylor1791/phosphorus/internal/gitx"
 	"github.com/taylor1791/phosphorus/internal/policy"
-	"github.com/taylor1791/phosphorus/internal/store"
 )
 
 func init() {
@@ -24,10 +23,9 @@ func init() {
 		Usage:   "[--name <package>] [--trunk <ref>] [--environments dev,staging,prod]",
 		Summary: "Create a workspace, or a package in the current directory",
 		Help: `At the top of a repository with no carbon.toml, init creates the workspace:
-carbon.toml, .carbon/teams.toml, and a .gitattributes line that marks keys
-files as generated. Every environment is readable by @engineering, and,
-until carbon is on trunk, the first person to run "carbon join" joins every
-empty team.
+carbon.toml and .carbon/teams.toml. Every environment is readable by
+@engineering, and, until carbon is on trunk, the first person to run
+"carbon join" joins every empty team.
 
 Inside a workspace, init creates a package in the current directory. Its name
 is --name, or the directory's name.
@@ -144,13 +142,6 @@ default_environment = %s
 		}
 		res.Created = append(res.Created, config.TeamsFile)
 	}
-	added, err := ensureLine(filepath.Join(repo.Root, ".gitattributes"), store.GitAttributesLine)
-	if err != nil {
-		return err
-	}
-	if added {
-		res.Created = append(res.Created, ".gitattributes entry for keys files")
-	}
 	res.Workspace = true
 	return nil
 }
@@ -235,22 +226,4 @@ func writeNew(path, content string) error {
 		return err
 	}
 	return f.Close()
-}
-
-// ensureLine appends line to a text file unless it is already there.
-func ensureLine(path, line string) (bool, error) {
-	data, err := os.ReadFile(path)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return false, err
-	}
-	for _, l := range strings.Split(string(data), "\n") {
-		if strings.TrimSpace(l) == line {
-			return false, nil
-		}
-	}
-	if len(data) > 0 && !strings.HasSuffix(string(data), "\n") {
-		data = append(data, '\n')
-	}
-	data = append(data, line+"\n"...)
-	return true, os.WriteFile(path, data, 0o644)
 }

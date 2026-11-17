@@ -33,7 +33,9 @@ func TestInitWorkspaceThenPackage(t *testing.T) {
 	if got := r.Git("config", "--local", "carbon.trunk"); got != "main" {
 		t.Fatalf("carbon.trunk = %q", got)
 	}
-	contains(t, ".gitattributes", r.Read(".gitattributes"), "**/.carbon/*.keys.toml linguist-generated")
+	if strings.Contains(r.Read(".gitattributes"), "linguist-generated") {
+		t.Fatal("init marked keys files generated: reviewers must see which lines changed")
+	}
 
 	any.Fails(2, "init")
 
