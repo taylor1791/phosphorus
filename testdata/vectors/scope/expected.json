@@ -1,0 +1,15 @@
+{
+  "scope": "checkout/prod",
+  "values": {
+    "legacy_token": "from before the rotation",
+    "session_key": "bXlzZXNzaW9ua2V5",
+    "stripe_api_key": "sk_live_example",
+    "webhook_secret": "whsec_example"
+  },
+  "drops": [
+    "webhook_secret"
+  ],
+  "stale": [
+    "legacy_token"
+  ]
+}
