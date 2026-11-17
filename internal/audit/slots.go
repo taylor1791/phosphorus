@@ -8,6 +8,7 @@ import (
 	"github.com/taylor1791/phosphorus/internal/agewrap"
 	"github.com/taylor1791/phosphorus/internal/gitx"
 	"github.com/taylor1791/phosphorus/internal/policy"
+	"github.com/taylor1791/phosphorus/internal/scope"
 	"github.com/taylor1791/phosphorus/internal/store"
 )
 
@@ -343,6 +344,11 @@ func rotationProblems(sf *ScopeFiles, tk *store.Keys, sa *policy.ScopeAccess, el
 	case old.Successor == "" || old.Reason == "" || old.Sealed == "":
 		probs = append(probs, fmt.Sprintf("retired key %s lacks successor, reason or sealed", tk.Current))
 	default:
+		// The reason must be the one apply writes from trunk's key and
+		// trunk policy (shared code), so it cannot name the wrong person.
+		if want := scope.RotationReason((&scope.Scope{Keys: tk}).DiffSlots(sa.Devices), sa); old.Reason != want {
+			probs = append(probs, fmt.Sprintf("retired key %s gives the reason %q, but trunk's key and policy make it %q", tk.Current, old.Reason, want))
+		}
 		if !reaches(wt, tk.Current, wt.Current) {
 			probs = append(probs, fmt.Sprintf("retired key %s does not lead to the current key %s", tk.Current, wt.Current))
 		}

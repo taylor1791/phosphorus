@@ -213,3 +213,20 @@ func TestCheckNeverBootstrapsSilently(t *testing.T) {
 	r.Anyone().Fails(1, "check")
 	r.Anyone().Must("check", "--bootstrap")
 }
+
+// Finding 11: a rotation's reason must be the one apply writes, or debt
+// (which reads it) could be hidden or pinned on the wrong person.
+func TestRotationReasonIsChecked(t *testing.T) {
+	w := clitest.Standard(t)
+	co := w.PkgDir
+	setAll(t, w)
+	w.Ada.Must("remove", "sam", "--yes")
+	w.Commit("remove sam")
+	w.Branch("rotate")
+	w.Lin.Must("apply", "--yes")
+	ci(t, w.Repo, 0).lacks(t, "key.changed")
+	w.Replace(co+"/.carbon/dev.keys.toml", `reason = "removed sam"`, `reason = "routine rotation"`)
+	w.Commit("edit reason")
+	cj := ci(t, w.Repo, 4)
+	cj.has(t, "key.changed", "error checkout/dev")
+}

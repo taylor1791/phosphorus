@@ -526,22 +526,14 @@ func (c *Context) planApplyScope(w *Workspace, pol *policy.Policy, pkg *config.P
 		p.Rekeyed = append(p.Rekeyed, applyRekey{Device: d.ID, Fingerprint: agewrap.Fingerprint(d.Recipient), WasTo: shortHash(cur.SlotTo[d.ID])})
 	}
 	if len(diff.Extra) > 0 {
-		var removed, rekeyedIDs []string
+		var removed []string
 		for _, id := range diff.Extra {
-			if rekeyed[id] {
-				rekeyedIDs = append(rekeyedIDs, id)
-			} else {
+			if !rekeyed[id] {
 				removed = append(removed, id)
 			}
 		}
 		p.Revoke = removed
-		var reasons []string
-		if len(removed) > 0 {
-			reasons = append(reasons, "removed "+removedWho(removed, s.SlotIDs(), sa))
-		}
-		if len(rekeyedIDs) > 0 {
-			reasons = append(reasons, "rekeyed "+strings.Join(rekeyedIDs, ", "))
-		}
+		reason := scope.RotationReason(diff, sa)
 		for _, d := range skipped {
 			if s.Keys.CurrentKey().Slots[d.ID] != "" {
 				p.Revoke = append(p.Revoke, d.ID)
@@ -551,7 +543,7 @@ func (c *Context) planApplyScope(w *Workspace, pol *policy.Policy, pkg *config.P
 		if p.SkipUnproven {
 			values -= len(p.Unproven)
 		}
-		p.Rotate = &applyRotation{From: s.Keys.Current, Reason: strings.Join(reasons, ", "), Values: values}
+		p.Rotate = &applyRotation{From: s.Keys.Current, Reason: reason, Values: values}
 		if len(eligible) == 0 {
 			return block(fmt.Sprintf("%s must rotate (%s), but trunk policy names nobody who could hold the new key", p.Scope, p.Rotate.Reason),
 				"Name at least one reader for "+p.Scope+" in policy, merge it, and run `carbon apply` again.")
@@ -685,50 +677,6 @@ func applyGrants(sa *policy.ScopeAccess, ds []policy.Device) []applyGrant {
 		out = append(out, applyGrant{Device: d.ID, Fingerprint: agewrap.Fingerprint(d.Recipient), Via: sa.Why[d.ID]})
 	}
 	return out
-}
-
-// removedWho names what a rotation removes: a person when all of their
-// slots go and policy names none of their devices, else each device; and
-// machines.
-func removedWho(extra, slots []string, sa *policy.ScopeAccess) string {
-	byPerson := map[string][]string{}
-	var people, out []string
-	for _, id := range extra {
-		if strings.HasPrefix(id, config.MachinePrefix) {
-			continue
-		}
-		person, _, _ := strings.Cut(id, "/")
-		if _, ok := byPerson[person]; !ok {
-			people = append(people, person)
-		}
-		byPerson[person] = append(byPerson[person], id)
-	}
-	sort.Strings(people)
-	for _, person := range people {
-		all := 0
-		for _, id := range slots {
-			if strings.HasPrefix(id, person+"/") {
-				all++
-			}
-		}
-		named := false
-		for _, d := range sa.Devices {
-			if d.Person == person {
-				named = true
-			}
-		}
-		if all == len(byPerson[person]) && !named {
-			out = append(out, person)
-		} else {
-			out = append(out, byPerson[person]...)
-		}
-	}
-	for _, id := range extra {
-		if strings.HasPrefix(id, config.MachinePrefix) {
-			out = append(out, id)
-		}
-	}
-	return strings.Join(out, ", ")
 }
 
 // slotHolders groups slot ids by person: "lin (laptop, desk)",

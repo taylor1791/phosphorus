@@ -135,6 +135,8 @@ type SlotDiff struct {
 	// Device.RecipientHash). Each is also in Missing and in Extra: the old
 	// key must be revoked by rotation and the new one granted.
 	Rekeyed []policy.Device
+	// Slots are the device ids of every slot of the current key, sorted.
+	Slots []string
 }
 
 // DiffSlots compares the current key's slots with devices, by device id and
@@ -158,6 +160,7 @@ func (s *Scope) DiffSlots(devices []policy.Device) SlotDiff {
 			valid[dev.ID] = true
 		}
 	}
+	d.Slots = sortedKeys(slots)
 	for _, id := range sortedKeys(slots) {
 		if !valid[id] {
 			d.Extra = append(d.Extra, id)
@@ -944,3 +947,78 @@ func sortedKeys[V any](m map[string]V) []string {
 
 // PackageDir joins a workspace root and a package's slash Dir.
 func PackageDir(root, dir string) string { return filepath.Join(root, filepath.FromSlash(dir)) }
+
+// RotationReason is the reason `apply` records on the key it retires,
+// from the slot diff against trunk policy (sa): "removed <who>" for slots
+// whose device policy no longer names (a person when all of their slots go
+// and policy names none of their devices, else each device; machines as
+// machine:<name>), and "rekeyed <device>, ..." for slots wrapped to a key
+// the device no longer has; joined with ", ". `check` recomputes it from
+// trunk's key and trunk policy and requires the same text, so the two
+// cannot drift.
+func RotationReason(d SlotDiff, sa *policy.ScopeAccess) string {
+	rekeyed := map[string]bool{}
+	for _, dev := range d.Rekeyed {
+		rekeyed[dev.ID] = true
+	}
+	var removed, rekeyedIDs []string
+	for _, id := range d.Extra {
+		if rekeyed[id] {
+			rekeyedIDs = append(rekeyedIDs, id)
+		} else {
+			removed = append(removed, id)
+		}
+	}
+	var reasons []string
+	if len(removed) > 0 {
+		reasons = append(reasons, "removed "+removedWho(removed, d.Slots, sa))
+	}
+	if len(rekeyedIDs) > 0 {
+		reasons = append(reasons, "rekeyed "+strings.Join(rekeyedIDs, ", "))
+	}
+	return strings.Join(reasons, ", ")
+}
+
+// removedWho names what a rotation removes: a person when all of their
+// slots go and policy names none of their devices, else each device; and
+// machines.
+func removedWho(extra, slots []string, sa *policy.ScopeAccess) string {
+	byPerson := map[string][]string{}
+	var people, out []string
+	for _, id := range extra {
+		if strings.HasPrefix(id, config.MachinePrefix) {
+			continue
+		}
+		person, _, _ := strings.Cut(id, "/")
+		if _, ok := byPerson[person]; !ok {
+			people = append(people, person)
+		}
+		byPerson[person] = append(byPerson[person], id)
+	}
+	sort.Strings(people)
+	for _, person := range people {
+		all := 0
+		for _, id := range slots {
+			if strings.HasPrefix(id, person+"/") {
+				all++
+			}
+		}
+		named := false
+		for _, d := range sa.Devices {
+			if d.Person == person {
+				named = true
+			}
+		}
+		if all == len(byPerson[person]) && !named {
+			out = append(out, person)
+		} else {
+			out = append(out, byPerson[person]...)
+		}
+	}
+	for _, id := range extra {
+		if strings.HasPrefix(id, config.MachinePrefix) {
+			out = append(out, id)
+		}
+	}
+	return strings.Join(out, ", ")
+}
