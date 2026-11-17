@@ -14,6 +14,7 @@ package audit
 
 import (
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -105,11 +106,13 @@ const (
 	RuleDebtRotateAfter = "debt.rotate-after"
 
 	// Policy hygiene.
-	RulePolicyUnknownReader  = "policy.unknown-reader"
-	RulePolicyUnknownMember  = "policy.unknown-member"
-	RulePolicyNoDevices      = "policy.no-devices"
-	RulePolicyGrantProposed  = "policy.grant-proposed"
-	RulePolicyRevokeProposed = "policy.revoke-proposed"
+	RulePolicyUnknownReader    = "policy.unknown-reader"
+	RulePolicyUnknownMember    = "policy.unknown-member"
+	RulePolicyNoDevices        = "policy.no-devices"
+	RulePolicyDeviceAdded      = "policy.device-added"
+	RulePolicyDeviceKeyChanged = "policy.device-key-changed"
+	RulePolicyGrantProposed    = "policy.grant-proposed"
+	RulePolicyRevokeProposed   = "policy.revoke-proposed"
 )
 
 // RuleInfo describes a rule for documentation and `carbon check --json`.
@@ -179,6 +182,8 @@ var Rules = []RuleInfo{
 	{RulePolicyUnknownReader, Error, "an access entry names no team, person or machine", false},
 	{RulePolicyUnknownMember, Warning, "a team lists a person with no person file", false},
 	{RulePolicyNoDevices, Warning, "a person file lists no devices", false},
+	{RulePolicyDeviceAdded, Info, "this change adds a device to an existing person: confirm its fingerprint with its owner (never raised by --strict)", true},
+	{RulePolicyDeviceKeyChanged, Info, "this change replaces the public key of an existing device or machine: confirm its fingerprint with its owner (never raised by --strict)", true},
 	{RulePolicyGrantProposed, Info, "this change names a new reader of a scope; once it merges, a reader runs `carbon apply` (never raised by --strict)", false},
 	{RulePolicyRevokeProposed, Info, "this change removes a reader of a scope or changes its key; once it merges, a reader's `carbon apply` rotates (never raised by --strict)", false},
 }
@@ -279,6 +284,7 @@ func (s *State) Check(opts Options) *Report {
 	fs = append(fs, s.coverageFindings()...)
 	fs = append(fs, s.debtFindings(opts.Now, opts.MaxDebt)...)
 	fs = append(fs, s.hygieneFindings()...)
+	fs = append(fs, s.keyChangeFindings()...)
 	if opts.Strict {
 		for i := range fs {
 			f := &fs[i]
@@ -314,6 +320,8 @@ func bannerText(f Finding) string {
 		return "NEW SLOT for " + f.Device + ": confirm the author is a current reader of " + f.Scope
 	case RuleScopeRemoved:
 		return "SCOPE REMOVED with its keys"
+	case RulePolicyDeviceAdded, RulePolicyDeviceKeyChanged:
+		return strings.SplitN(f.Message, ". Once", 2)[0]
 	case RuleScopeRenamed:
 		return "RENAMED: confirm the author is a reader of " + f.Scope
 	case RuleKeyRotated:

@@ -3,6 +3,7 @@ package audit
 import (
 	"fmt"
 
+	"github.com/taylor1791/phosphorus/internal/agewrap"
 	"github.com/taylor1791/phosphorus/internal/config"
 )
 
@@ -79,4 +80,47 @@ func readerKindWord(k config.ReaderKind) string {
 		return "person"
 	}
 	return "team, person or machine"
+}
+
+// keyChangeFindings compares the working tree's people and machines with
+// trunk's. A changed public key for an existing device or machine, and a
+// new device of an existing person, are the most dangerous policy edits:
+// once merged, apply wraps keys to them. Both go in the review banner with
+// the new key's fingerprint, which the reviewer confirms with its owner.
+func (s *State) keyChangeFindings() []Finding {
+	if !s.TrunkIsReviewed() {
+		return nil
+	}
+	var out []Finding
+	tp, wp := s.Trunk, s.Worktree
+	add := func(rule, dev, file, rec, msg string) {
+		out = append(out, Finding{Severity: Info, Rule: rule, Device: dev, File: file,
+			Message: fmt.Sprintf(msg, dev, agewrap.Fingerprint(rec)),
+			Hint:    "Confirm the fingerprint with " + dev + "'s owner over a channel you trust before merging."})
+	}
+	for _, id := range sortedKeys(wp.People) {
+		before, ok := tp.People[id]
+		if !ok {
+			continue
+		}
+		for _, dev := range sortedKeys(wp.People[id].Devices) {
+			rec := wp.People[id].Devices[dev]
+			old, had := before.Devices[dev]
+			switch {
+			case !had:
+				add(RulePolicyDeviceAdded, id+"/"+dev, config.PersonFile(id), rec,
+					"NEW DEVICE %s for an existing person, fingerprint %s. Once merged, apply gives it every scope the person reads.")
+			case old != rec:
+				add(RulePolicyDeviceKeyChanged, id+"/"+dev, config.PersonFile(id), rec,
+					"KEY CHANGED for %s: new fingerprint %s. Once merged, apply rotates its scopes and gives the new key access.")
+			}
+		}
+	}
+	for _, id := range sortedKeys(wp.Machines) {
+		if before, ok := tp.Machines[id]; ok && before.Key != wp.Machines[id].Key {
+			add(RulePolicyDeviceKeyChanged, "machine:"+id, config.MachineFile(id), wp.Machines[id].Key,
+				"KEY CHANGED for %s: new fingerprint %s. Once merged, apply rotates its scopes and gives the new key access.")
+		}
+	}
+	return out
 }

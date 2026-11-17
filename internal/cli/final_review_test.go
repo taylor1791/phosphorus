@@ -3,6 +3,7 @@ package cli_test
 // Regression tests for the final review's findings.
 
 import (
+	"os"
 	"regexp"
 	"strings"
 	"testing"
@@ -163,4 +164,28 @@ func TestJourneyRename(t *testing.T) {
 	if got := w.Deploy.Must("get", "stripe_api_key", "--package", "shop", "--env", "prod").Stdout; got != "sk_prod" {
 		t.Fatalf("deploy get after rename = %q", got)
 	}
+}
+
+// Finding 8: a changed public key or a new device of an existing person
+// is the most dangerous policy edit; it is in the banner, with the new
+// key's fingerprint.
+func TestKeyChangesInPolicyAreInTheBanner(t *testing.T) {
+	w := clitest.Standard(t)
+	setAll(t, w)
+	w.Branch("swap")
+	mal := w.Person("mallory")
+	res := mal.Must("join", "--person", "malx", "--device", "laptop")
+	fp := regexp.MustCompile(`Fingerprint\s+(\S+)`).FindStringSubmatch(res.Stdout)[1]
+	newKey := regexp.MustCompile(`laptop = "([^"]+)"`).FindStringSubmatch(w.Read(".carbon/people/malx.toml"))[1]
+	os.Remove(w.Path(".carbon/people/malx.toml"))
+	lin := w.Read(".carbon/people/lin.toml")
+	w.Write(".carbon/people/lin.toml", regexp.MustCompile(`laptop = "[^"]+"`).ReplaceAllString(lin, `laptop = "`+newKey+`"`))
+	w.Write(".carbon/people/ada.toml", w.Read(".carbon/people/ada.toml")+"desk = \""+newKey+"\"\n")
+	w.Commit("innocent-looking policy edit")
+	cj := ci(t, w.Repo, 0)
+	cj.has(t, "policy.device-key-changed", "lin/laptop")
+	cj.has(t, "policy.device-added", "ada/desk")
+	res = w.Anyone().Must("check")
+	mustContain(t, "banner", res.Stdout, "TO REVIEW", "KEY CHANGED for lin/laptop: new fingerprint "+fp, "NEW DEVICE ada/desk")
+	ci(t, w.Repo, 0, "--strict") // review items, not failures
 }
