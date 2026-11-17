@@ -87,6 +87,14 @@ func LoadWorktree(root string) (*Policy, error) {
 // a branch cannot opt itself out by editing its copy, except by naming a
 // different ref, which `check` should flag.
 func LoadTrunk(repo *gitx.Repo, worktree *config.Workspace) (*Policy, error) {
+	// The trunk name in the working tree is the branch's to edit, so a
+	// branch could say "worktree" (or name a ref it controls). When a
+	// well-known trunk ref exists, its own workspace file decides.
+	if name, ok := anchorTrunk(repo); ok && name != worktree.Trunk {
+		ws := *worktree
+		ws.Trunk = name
+		worktree = &ws
+	}
 	if worktree.TrunkIsWorktree() {
 		p, err := LoadWorktree(repo.Root)
 		if err != nil {
@@ -132,6 +140,27 @@ func LoadTrunk(repo *gitx.Repo, worktree *config.Workspace) (*Policy, error) {
 	}
 	p.Origin, p.Ref = OriginTrunk, ref
 	return p, nil
+}
+
+// anchorRefs are the refs whose workspace file names the trunk, tried in
+// order. None of them is the current branch's own upstream, which a branch
+// author controls.
+var anchorRefs = []string{"origin/HEAD", "origin/main", "origin/master", "main", "master"}
+
+// anchorTrunk returns the trunk named by the first anchor ref that has a
+// workspace file.
+func anchorTrunk(repo *gitx.Repo) (string, bool) {
+	for _, ref := range anchorRefs {
+		if ok, err := repo.RefExists(ref); err != nil || !ok {
+			continue
+		}
+		ws, err := config.LoadWorkspace(repo.Source(ref))
+		if err != nil {
+			continue
+		}
+		return ws.Trunk, true
+	}
+	return "", false
 }
 
 // Device is one public key that can hold a slot.
