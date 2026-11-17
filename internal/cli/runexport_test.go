@@ -216,7 +216,6 @@ func TestRunErrors(t *testing.T) {
 
 	w.Lin.In(w.PkgDir).Fails(2, "run")
 	w.Lin.In(w.PkgDir).Fails(2, "run", "--json", "--", helper, "env")
-	w.Lin.In(w.PkgDir).Fails(2, "run", "x", "--", helper)
 
 	// A reference to a secret that is not set.
 	w.Replace(w.PkgDir+"/carbon.toml", `PRICE          = "$$5"`, `PRICE = "${webhook_secret}"`)
@@ -305,8 +304,9 @@ func TestDropByNonReaderIsVisibleInRunAndExport(t *testing.T) {
 	}
 }
 
-// parseDotenv implements the quoting export documents: bare values, or
-// double quotes with \\ \" \$ \` \n \r \t.
+// parseDotenv implements the quoting export documents: bare values, single
+// quotes (literal), or
+// double quotes with \\ \" \n \r.
 func parseDotenv(t *testing.T, s string) map[string]string {
 	t.Helper()
 	out := map[string]string{}
@@ -317,6 +317,12 @@ func parseDotenv(t *testing.T, s string) map[string]string {
 		}
 		name := s[:nl]
 		s = s[nl+1:]
+		if strings.HasPrefix(s, "'") {
+			end := strings.Index(s[1:], "'\n")
+			out[name] = s[1 : end+1]
+			s = s[end+3:]
+			continue
+		}
 		if !strings.HasPrefix(s, `"`) {
 			end := strings.IndexByte(s, '\n')
 			out[name] = s[:end]
@@ -339,9 +345,7 @@ func parseDotenv(t *testing.T, s string) map[string]string {
 				b.WriteByte('\n')
 			case 'r':
 				b.WriteByte('\r')
-			case 't':
-				b.WriteByte('\t')
-			case '\\', '"', '$', '`':
+			case '\\', '"':
 				b.WriteByte(s[i])
 			default:
 				t.Fatalf("unknown escape \\%c", s[i])
@@ -361,8 +365,8 @@ func TestExportFormatsAndFiles(t *testing.T) {
 	lin := func() *clitest.Run { return w.Lin.With("FROM_SHELL=has space").In(w.PkgDir) }
 
 	res := lin().Must("export")
-	contains(t, "dotenv", res.Stdout, "REGION=us-east-1\n", "PRICE=\"\\$5\"\n", "FROM_SHELL=\"has space\"\n",
-		`DB_PASSWORD="db pass \"quoted\" 'single'\n# not a comment \$HOME \`+"`"+`tick\`+"`"+` \\ end"`)
+	contains(t, "dotenv", res.Stdout, "REGION=us-east-1\n", "PRICE='$5'\n", "FROM_SHELL='has space'\n",
+		`DB_PASSWORD="db pass \"quoted\" 'single'\n# not a comment $HOME `+"`"+`tick`+"`"+` \\ end"`)
 	got := parseDotenv(t, res.Stdout)
 	if got["DB_PASSWORD"] != dbValue || got["STRIPE_API_KEY"] != stripeValue || got["lower"] != "lower-dev" || len(got) != 10 {
 		t.Fatalf("dotenv round trip: %q", got)

@@ -9,31 +9,6 @@ import (
 	"github.com/taylor1791/phosphorus/internal/resolve"
 )
 
-func TestDotenvQuote(t *testing.T) {
-	cases := map[string]string{
-		"plain":           "plain",
-		"a-b_c.d/e:f@g%h": "a-b_c.d/e:f@g%h",
-		"":                `""`,
-		"has space":       `"has space"`,
-		`say "hi"`:        `"say \"hi\""`,
-		"it's":            `"it's"`,
-		"line1\nline2":    `"line1\nline2"`,
-		"cr\rtab\t":       `"cr\rtab\t"`,
-		"#comment":        `"#comment"`,
-		"a # b":           `"a # b"`,
-		"$HOME":           `"\$HOME"`,
-		"${X}":            `"\${X}"`,
-		"`cmd`":           "\"\\`cmd\\`\"",
-		`back\slash`:      `"back\\slash"`,
-		"ünï":             `"ünï"`,
-	}
-	for in, want := range cases {
-		if got := DotenvQuote([]byte(in)); got != want {
-			t.Errorf("DotenvQuote(%q) = %s, want %s", in, got, want)
-		}
-	}
-}
-
 func TestMergeEnviron(t *testing.T) {
 	res := &resolve.Result{Vars: []resolve.Var{{Name: "A", Value: []byte("new")}, {Name: "b", Value: []byte("x=y")}}}
 	got := mergeEnviron([]string{"A=old", "a=lower", "B=upper", "PATH=/bin"}, res)

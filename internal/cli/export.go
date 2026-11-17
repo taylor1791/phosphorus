@@ -3,12 +3,15 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"unicode/utf8"
 
 	"github.com/taylor1791/phosphorus/internal/resolve"
 )
@@ -23,12 +26,22 @@ for tools that need a file. -o writes mode 0600 and refuses a path inside
 the repository that git does not ignore; without -o, or with -o -, it
 writes to stdout.
 
-dotenv output is one NAME=value line per variable. A value made only of
-letters, digits and _ . / : @ % + , = - is written bare; any other value is
-double-quoted with backslash escapes for \ " $ and the backquote, and \n \r
-\t for newline, carriage return and tab, so spaces, quotes, newlines, # and
-$ survive.
+dotenv output is one NAME=value line per variable, written for the Node
+dotenv package (v16 and later) and python-dotenv:
 
+  - a value made only of letters, digits and _ . / : @ % + , = - is bare;
+  - any other value without a single quote, newline or carriage return,
+    and not ending in a backslash, is in single quotes, which both read
+    literally;
+  - the rest are in double quotes with \\ \" \n \r escaped.
+
+Known limits: python-dotenv reads \\ inside single quotes as one
+backslash; Node dotenv keeps \" and \\ inside double quotes as written; and
+python-dotenv expands ${NAME} inside values unless loaded with
+interpolate=False. Use --format json when a value has both a quote or
+newline and a backslash or double quote.
+
+json output is one object of strings; a value that is not UTF-8 is refused.
 With --json and -o, stdout gets a summary. With --json to stdout, the
 output is the json format.`,
 		Flags: func(fs *flag.FlagSet) {
@@ -78,12 +91,13 @@ func runExport(c *Context) error {
 	}
 
 	var abs string
+	inRepo := false
 	if !toStdout {
 		abs = out
 		if !filepath.IsAbs(abs) {
 			abs = filepath.Join(c.Cwd, abs)
 		}
-		if err := c.checkExportPath(w, out, abs); err != nil {
+		if inRepo, err = c.checkExportPath(w, out, abs); err != nil {
 			return err
 		}
 	}
@@ -108,7 +122,15 @@ func runExport(c *Context) error {
 		_, err := c.Stdout.Write(data)
 		return err
 	}
-	if err := writePrivate(abs, data); err != nil {
+	tmpDir := filepath.Dir(abs)
+	if inRepo {
+		// Never leave a temporary file in the work tree, where it would
+		// not be ignored: git never adds anything inside its own directory.
+		if tmpDir, err = w.Repo.GitDir(); err != nil {
+			return err
+		}
+	}
+	if err := writePrivate(abs, tmpDir, data); err != nil {
 		return err
 	}
 	r := exportResult{Scope: pkg.Name + "/" + env, Path: w.Rel(abs), Format: format, Variables: []string{}}
@@ -121,75 +143,104 @@ func runExport(c *Context) error {
 }
 
 // checkExportPath refuses a path inside the repository that git does not
-// ignore. A path outside the work tree cannot be committed and is allowed.
-func (c *Context) checkExportPath(w *Workspace, given, abs string) error {
+// ignore, and reports whether the path is inside the work tree. A path
+// outside the work tree cannot be committed and is allowed.
+func (c *Context) checkExportPath(w *Workspace, given, abs string) (bool, error) {
 	if fi, err := os.Stat(abs); err == nil && fi.IsDir() {
-		return c.UsageErr("%s is a directory", given)
+		return false, c.UsageErr("%s is a directory", given)
 	}
 	dir, err := filepath.EvalSymlinks(filepath.Dir(abs))
 	if err != nil {
-		return Errorf(ExitError, "cannot write %s: its directory does not exist", given).
+		return false, Errorf(ExitError, "cannot write %s: its directory does not exist", given).
 			WithHint("Create the directory first.")
 	}
 	root, err := filepath.EvalSymlinks(w.Root)
 	if err != nil {
-		return err
+		return false, err
 	}
 	full := filepath.Join(dir, filepath.Base(abs))
 	rel, err := filepath.Rel(root, full)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return nil
+		return false, nil
 	}
 	ignored, err := w.Repo.IsIgnored(rel)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !ignored {
-		return &Error{Code: ExitUsage, Message: fmt.Sprintf("refusing to write secrets to %s: git does not ignore it", filepath.ToSlash(rel)),
+		return false, &Error{Code: ExitUsage, Message: fmt.Sprintf("refusing to write secrets to %s: git does not ignore it", filepath.ToSlash(rel)),
 			Details: []string{"A file git does not ignore can be committed, and then every value in it is in the history for good."},
 			Hint:    fmt.Sprintf("Ignore it first, from the repository root:   echo %s >> .gitignore\nOr write to stdout:   carbon export > <file>", "/"+filepath.ToSlash(rel))}
 	}
-	return nil
+	return true, nil
 }
 
-// writePrivate writes data to path with mode 0600, atomically: a 0600
-// temporary file in the same directory, renamed over the target.
-func writePrivate(path string, data []byte) error {
-	f, err := os.CreateTemp(filepath.Dir(path), ".carbon-export-*")
+// writePrivate writes data to path with mode 0600: a 0600 temporary file in
+// tmpDir, renamed over the target (which replaces a symlink rather than
+// writing through it). When tmpDir is on another filesystem the rename
+// fails, and the target is written directly instead: created 0600, never
+// through a symlink, its mode forced to 0600 before any data is written.
+func writePrivate(path, tmpDir string, data []byte) error {
+	f, err := os.CreateTemp(tmpDir, "carbon-export-*")
 	if err != nil {
 		return err
 	}
 	tmp := f.Name()
-	ok := false
-	defer func() {
-		if !ok {
-			f.Close()
-			os.Remove(tmp)
-		}
-	}()
+	defer os.Remove(tmp) // a no-op after a successful rename
 	if err := f.Chmod(0o600); err != nil {
+		f.Close()
 		return err
 	}
 	if _, err := f.Write(data); err != nil {
+		f.Close()
 		return err
 	}
 	if err := f.Sync(); err != nil {
+		f.Close()
 		return err
 	}
 	if err := f.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	err = os.Rename(tmp, path)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, syscall.EXDEV) {
 		return err
 	}
-	ok = true
-	return nil
+	return writeDirect(path, data)
+}
+
+func writeDirect(path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Truncate(0); err != nil {
+		f.Close()
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 func exportJSON(res *resolve.Result) ([]byte, error) {
 	var b bytes.Buffer
 	b.WriteString("{")
 	for i, v := range res.Vars {
+		if !utf8.Valid(v.Value) {
+			clear(b.Bytes())
+			return nil, &Error{Code: ExitError, Message: fmt.Sprintf("%s is not UTF-8 text, so JSON cannot hold it unchanged", v.Name),
+				Hint: "Store such values base64-encoded, or use --format dotenv."}
+		}
 		if i > 0 {
 			b.WriteString(",")
 		}
@@ -219,18 +270,32 @@ func exportDotenv(res *resolve.Result) []byte {
 	return b.Bytes()
 }
 
-// DotenvQuote renders a dotenv value: bare when it is made only of safe
-// characters, else double-quoted with \\ \" \$ \` \n \r \t escaped.
+// DotenvQuote renders a dotenv value for Node dotenv (v16+) and
+// python-dotenv: bare when it is made only of safe characters; in single
+// quotes (read literally by both) when it has no single quote, newline or
+// carriage return and does not end in a backslash; else in double quotes with \\ \" \n \r escaped. See the
+// export help for the known limits.
 func DotenvQuote(v []byte) string {
 	safe := len(v) > 0
+	single := true
 	for _, c := range v {
 		if !dotenvSafe(c) {
 			safe = false
-			break
+		}
+		if c == '\'' || c == '\n' || c == '\r' {
+			single = false
 		}
 	}
-	if safe {
+	if len(v) > 0 && v[len(v)-1] == '\\' {
+		// python-dotenv would read \' as an escaped quote and run on into
+		// the next line.
+		single = false
+	}
+	switch {
+	case safe:
 		return string(v)
+	case single:
+		return "'" + string(v) + "'"
 	}
 	var b strings.Builder
 	b.WriteByte('"')
@@ -240,16 +305,10 @@ func DotenvQuote(v []byte) string {
 			b.WriteString(`\\`)
 		case '"':
 			b.WriteString(`\"`)
-		case '$':
-			b.WriteString(`\$`)
-		case '`':
-			b.WriteString("\\`")
 		case '\n':
 			b.WriteString(`\n`)
 		case '\r':
 			b.WriteString(`\r`)
-		case '\t':
-			b.WriteString(`\t`)
 		default:
 			b.WriteByte(c)
 		}
