@@ -4,6 +4,7 @@ package cli_test
 
 import (
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -240,4 +241,59 @@ func TestKeysFilesAreNotMarkedGenerated(t *testing.T) {
 	}
 	res := w.Lin.In(w.PkgDir).Run("doctor")
 	mustNotContain(t, "doctor", res.Stdout+res.Stderr, "gitattributes", "generated")
+}
+
+// Finding 10: symbolic links in carbon's files are refused by every
+// command (a symlinked .carbon directory made set write outside the
+// repository) and are errors in check.
+func TestSymlinksAreRefused(t *testing.T) {
+	w := clitest.Standard(t)
+	setAll(t, w)
+	outside := t.TempDir()
+	w.AddPackage("services/evil", "evil", "[secrets]\ntoken = {}\n")
+	if err := os.Symlink(outside, w.Path("services/evil/.carbon")); err != nil {
+		t.Fatal(err)
+	}
+	w.Commit("evil")
+	res := w.Lin.In("services/evil").Stdin("tok").Fails(1, "set", "token", "--env", "dev")
+	mustContain(t, "set", res.Stderr, "services/evil/.carbon is a symbolic link")
+	if ents, _ := os.ReadDir(outside); len(ents) != 0 {
+		t.Fatalf("set wrote outside the repository: %v", ents)
+	}
+	ci(t, w.Repo, 4).has(t, "file.symlink")
+
+	// A symlinked package carbon.toml, read by everything.
+	secret := filepath.Join(t.TempDir(), "secret.txt")
+	os.WriteFile(secret, []byte("TOKEN=ghp_leak\n"), 0o600)
+	os.RemoveAll(w.Path("services/evil"))
+	os.MkdirAll(w.Path("services/x"), 0o755)
+	os.Symlink(secret, w.Path("services/x/carbon.toml"))
+	w.Commit("x")
+	res = w.Lin.In(w.PkgDir).Fails(1, "get", "stripe_api_key")
+	mustContain(t, "get", res.Stderr, "services/x/carbon.toml is a symbolic link")
+	cj := ci(t, w.Repo, 4)
+	cj.has(t, "file.symlink")
+	mustNotContain(t, "check", cj.res.Stdout+cj.res.Stderr, "ghp_leak")
+
+	// A symlinked keys file.
+	os.Remove(w.Path("services/x/carbon.toml"))
+	keys := w.PkgDir + "/.carbon/dev.keys.toml"
+	os.Remove(w.Path(keys))
+	os.Symlink(secret, w.Path(keys))
+	res = w.Lin.In(w.PkgDir).Fails(1, "get", "stripe_api_key")
+	mustContain(t, "get keys", res.Stderr, "is a symbolic link")
+	mustNotContain(t, "get keys", res.Stdout+res.Stderr, "ghp_leak")
+	cj = ci(t, w.Repo, 4)
+	cj.has(t, "file.symlink")
+	mustNotContain(t, "check keys", cj.res.Stdout+cj.res.Stderr, "ghp_leak")
+
+	// The root .carbon policy files.
+	w.Git("checkout", "--", keys)
+	people := w.Read(".carbon/people/lin.toml")
+	linCopy := filepath.Join(t.TempDir(), "lin.toml")
+	os.WriteFile(linCopy, []byte(people), 0o644)
+	os.Remove(w.Path(".carbon/people/lin.toml"))
+	os.Symlink(linCopy, w.Path(".carbon/people/lin.toml"))
+	w.Lin.In(w.PkgDir).Fails(1, "get", "stripe_api_key")
+	ci(t, w.Repo, 4).has(t, "file.symlink")
 }

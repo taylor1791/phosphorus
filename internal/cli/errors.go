@@ -101,6 +101,12 @@ func AsError(err error) *Error {
 			Details: []string{"The trunk ref is chosen per clone, never by a commit: CARBON_TRUNK, then git config " + policy.TrunkConfigKey + ", then the remote default branch."},
 			Hint:    "Delete the trunk line from carbon.toml. If this clone needs a trunk other than the remote default:   git config " + policy.TrunkConfigKey + " <ref>"}
 	}
+	var link *config.SymlinkError
+	if errors.As(err, &link) {
+		return &Error{Code: ExitError, Err: err, Message: link.Path + " is a symbolic link",
+			Details: []string{"carbon does not read or write carbon.toml files, .carbon directories or the files in them through links: a link committed to the repository could point anywhere on your machine."},
+			Hint:    "Replace it with the file or directory itself, or remove it (git rm " + link.Path + "), then run the command again."}
+	}
 	var conflict *config.ConflictError
 	if errors.As(err, &conflict) {
 		return ConflictErr(conflict.Path)

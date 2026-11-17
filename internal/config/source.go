@@ -28,16 +28,28 @@ type Source interface {
 	String() string
 }
 
-// DirSource reads the working tree under Root.
-type DirSource struct{ Root string }
+// DirSource reads the working tree under Root. It refuses any path with a
+// symbolic link in it (store.SymlinkError), and Find refuses a symlinked
+// file of the name it looks for, unless SkipSymlinks is set (then such a
+// file is left out; `carbon check` reports it as a finding instead).
+type DirSource struct {
+	Root         string
+	SkipSymlinks bool
+}
 
 func (d DirSource) String() string { return "the working tree" }
 
 func (d DirSource) ReadFile(name string) ([]byte, error) {
+	if err := NoSymlinks(d.Root, name); err != nil {
+		return nil, err
+	}
 	return os.ReadFile(filepath.Join(d.Root, filepath.FromSlash(name)))
 }
 
 func (d DirSource) ReadDir(dir string) ([]string, error) {
+	if err := NoSymlinks(d.Root, dir); err != nil {
+		return nil, err
+	}
 	ents, err := os.ReadDir(filepath.Join(d.Root, filepath.FromSlash(dir)))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
@@ -69,6 +81,10 @@ func (d DirSource) Find(base string) ([]string, error) {
 				return filepath.SkipDir
 			}
 			return nil
+		}
+		if e.Name() == base && e.Type()&fs.ModeSymlink != 0 && !d.SkipSymlinks {
+			rel, _ := filepath.Rel(d.Root, p)
+			return &SymlinkError{Path: filepath.ToSlash(rel)}
 		}
 		if e.Name() == base && e.Type().IsRegular() {
 			rel, err := filepath.Rel(d.Root, p)

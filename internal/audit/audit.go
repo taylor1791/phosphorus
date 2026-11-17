@@ -51,6 +51,7 @@ const (
 	RuleNameReserved      = "name.reserved"
 	RuleStoreInvalid      = "store.invalid"
 	RuleStoreOrphan       = "store.orphan"
+	RuleFileSymlink       = "file.symlink"
 	RuleTrunkUnreadable   = "trunk.unreadable"
 	RuleTrunkBootstrap    = "trunk.bootstrap"
 	RuleTrunkWorktree     = "trunk.worktree"
@@ -133,6 +134,7 @@ var Rules = []RuleInfo{
 	{RuleNameInvalid, Error, "a package, secret, var, person, machine, team or [env] name is invalid", false},
 	{RuleNameReserved, Error, "a package uses a reserved name (carbon, env)", false},
 	{RuleStoreInvalid, Error, "a keys or secrets file does not parse or names the wrong scope", false},
+	{RuleFileSymlink, Error, "a carbon.toml, a .carbon directory, or a file in one is a symbolic link", false},
 	{RuleStoreOrphan, Error, "a keys or secrets file belongs to no scope of the working tree", false},
 	{RuleTrunkUnreadable, Error, "policy or keys on the trunk ref cannot be read", false},
 	{RuleTrunkBootstrap, Info, "carbon is not on trunk yet; policy comes from the working tree", false},

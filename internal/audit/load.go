@@ -108,17 +108,23 @@ func (s *State) TrunkIsReviewed() bool {
 // a failing git) is an error; a trunk that cannot be resolved is TrunkErr,
 // and every other problem becomes a finding returned by [State.Check].
 func Load(repo *gitx.Repo, getenv func(string) string) (*State, error) {
-	src := config.DirSource{Root: repo.Root}
+	src := config.DirSource{Root: repo.Root, SkipSymlinks: true}
 	ws, err := config.LoadWorkspace(src)
 	if err != nil {
 		return nil, err
 	}
 	st := &State{Root: repo.Root, Repo: repo, Workspace: ws, renamed: map[string]bool{}}
+	st.symlinks()
 	pkgs, err := st.loadPackages(src, ws)
 	if err != nil {
 		return nil, err
 	}
 	people, machines, teams, err := st.loadPrincipals(src)
+	var link *config.SymlinkError
+	if errors.As(err, &link) {
+		// Reported by symlinks(); judge the rest without these files.
+		people, machines, teams, err = map[string]*config.Person{}, map[string]*config.Machine{}, config.Teams{}, nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -556,4 +562,34 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// symlinks reports every symbolic link carbon refuses to read through: a
+// carbon.toml, a .carbon directory, or anything inside one. Commands
+// refuse them; check lists them as errors.
+func (s *State) symlinks() {
+	filepath.WalkDir(s.Root, func(p string, e fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		n := e.Name()
+		if e.IsDir() {
+			if p != s.Root && (n == ".git" || n == "node_modules" || (strings.HasPrefix(n, ".") && n != config.CarbonDir)) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if e.Type()&fs.ModeSymlink == 0 {
+			return nil
+		}
+		rel, _ := filepath.Rel(s.Root, p)
+		rel = filepath.ToSlash(rel)
+		if n != config.FileName && n != config.CarbonDir && !strings.Contains("/"+rel, "/"+config.CarbonDir+"/") {
+			return nil
+		}
+		s.add(Finding{Severity: Error, Rule: RuleFileSymlink, File: rel,
+			Message: rel + " is a symbolic link. carbon does not read or write its files through links, which could point outside the repository; every command refuses it.",
+			Hint:    "Replace it with the file or directory itself, or remove it: git rm " + rel})
+		return nil
+	})
 }

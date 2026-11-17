@@ -335,6 +335,9 @@ func (k *Keys) Marshal() []byte {
 
 // ReadSecrets reads a secrets file; a missing file is an empty one.
 func ReadSecrets(path string) (*Secrets, error) {
+	if err := config.NoSymlinkFile(path); err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return NewSecrets(), nil
@@ -348,6 +351,9 @@ func ReadSecrets(path string) (*Secrets, error) {
 // ReadKeys reads a keys file. It returns (nil, nil) when the scope has no
 // keys file yet.
 func ReadKeys(path string) (*Keys, error) {
+	if err := config.NoSymlinkFile(path); err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
@@ -364,6 +370,9 @@ func ReadKeys(path string) (*Keys, error) {
 func WriteFile(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	if err := config.NoSymlinkFile(path); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(dir, ".carbon-tmp-*")
