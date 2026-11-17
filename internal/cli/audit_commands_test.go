@@ -112,7 +112,7 @@ func TestCheckListsDrops(t *testing.T) {
 	w.Replace(w.PkgDir+"/carbon.toml", `prod = ["@payments", "machine:deploy-checkout"]`,
 		`prod = { readers = ["@payments", "machine:deploy-checkout"], drops = false }`)
 	res = w.Anyone().Fails(4, "check")
-	contains(t, "check", res.Stdout, "DROP (drops are off here: error)", "error[drop.forbidden] checkout/prod:")
+	contains(t, "check", res.Stdout, "DROP where drops are off (error)", "error[drop.forbidden] checkout/prod:")
 }
 
 func TestCheckListsNewScopeKeys(t *testing.T) {

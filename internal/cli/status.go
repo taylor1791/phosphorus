@@ -1,10 +1,10 @@
 package cli
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/taylor1791/phosphorus/internal/agewrap"
@@ -20,12 +20,14 @@ func init() {
 		Help: `status says who you are (from your identity's public key; nothing is
 decrypted), the current environment, the scopes you can read, the scopes you
 are waiting on, the grants and revocations you could apply, drops waiting to
-be promoted, and rotation debt.
+be promoted, and rotation debt. A passphrase-protected identity is not
+decrypted unless --unlock is given.
 
 Drops and debt cover the scopes you can read; --all covers every scope. With
 no identity on this device, status still works and shows less.`,
 		Flags: func(fs *flag.FlagSet) {
 			fs.Bool("all", false, "show drops and rotation debt in every scope")
+			fs.Bool("unlock", false, "ask for the passphrase of a passphrase-protected identity")
 		},
 		Run: runStatus,
 	})
@@ -101,13 +103,13 @@ func runStatus(c *Context) error {
 
 	// Who you are. A missing identity is not an error here; one that
 	// cannot be loaded is reported and status carries on without it.
-	ids, err := c.Identities(false)
-	if err != nil {
-		var e *Error
-		if !errors.As(err, &e) || e.Code != ExitNoIdentity {
-			return err
-		}
-		res.IdentityErr = e.Message
+	// A passphrase-protected identity is only decrypted with --unlock, and
+	// a wrong passphrase means "no usable identity", not an abort.
+	var ids []agewrap.Identity
+	if c.identityLocked() && !c.Bool("unlock") {
+		res.IdentityErr = "it is passphrase-protected; `carbon status --unlock` asks for the passphrase"
+	} else if ids, err = c.Identities(false); err != nil {
+		res.IdentityErr = AsError(err).Message
 		ids = nil
 	}
 	var me []policy.Device
@@ -214,6 +216,20 @@ func runStatus(c *Context) error {
 	}
 
 	return c.Output(res, func(out io.Writer) { printStatus(out, res, w.Config.Environments) })
+}
+
+// identityLocked reports whether the caller's identity (CARBON_IDENTITY or
+// the identity file) is passphrase-encrypted, without decrypting it.
+func (c *Context) identityLocked() bool {
+	data := []byte(c.Getenv("CARBON_IDENTITY"))
+	if len(data) == 0 {
+		b, err := os.ReadFile(c.IdentityPath())
+		if err != nil {
+			return false
+		}
+		data = b
+	}
+	return agewrap.IsEncryptedIdentityFile(data)
 }
 
 func anyHybrid(ds []policy.Device) bool {

@@ -60,15 +60,22 @@ const RemovalPrefix = "removed "
 func (s *State) Debts(now time.Time) []Debt {
 	var out []Debt
 	for _, sf := range s.Scopes {
-		retired := map[string]*store.Key{}
-		for _, ks := range []*store.Keys{sf.TrunkKeys, sf.Keys} {
+		// Trunk last, so its record wins over an edited one here.
+		records := map[string]*store.Key{}
+		for _, ks := range []*store.Keys{sf.Keys, sf.TrunkKeys} {
 			if ks == nil {
 				continue
 			}
 			for id, k := range ks.Keys {
-				if k.IsRetired() && strings.HasPrefix(k.Reason, RemovalPrefix) {
-					retired[id] = k
+				if k.IsRetired() {
+					records[id] = k
 				}
+			}
+		}
+		retired := map[string]*store.Key{}
+		for id, k := range records {
+			if strings.HasPrefix(k.Reason, RemovalPrefix) {
+				retired[id] = k
 			}
 		}
 		ids := sortedKeys(retired)

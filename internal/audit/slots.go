@@ -1,10 +1,12 @@
 package audit
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/taylor1791/phosphorus/internal/agewrap"
+	"github.com/taylor1791/phosphorus/internal/gitx"
 	"github.com/taylor1791/phosphorus/internal/policy"
 	"github.com/taylor1791/phosphorus/internal/store"
 )
@@ -13,21 +15,25 @@ import (
 // keys": the working tree's keys files against trunk policy and trunk's
 // keys files, plus drops.
 //
-// Where the contract leaves room, the choices are:
+// A keyless check cannot tell a rotation or a new key made by a reader from
+// one forged by someone else: it cannot open anything. So it enforces every
+// structural rule a legitimate `carbon apply` commit satisfies, and it puts
+// every key change (new key, rotation, new slot, removed scope) in the review
+// banner so none passes silently. The choices where the contract leaves room:
 //
-//   - With no reviewed trunk to compare with (bootstrap, trunk =
-//     "worktree"), the working tree is the baseline: a slot policy does not
-//     name is a pending revocation, never an unbacked grant, and key changes
-//     are not compared.
+//   - With no reviewed trunk to compare with (bootstrap, "worktree"-trunk),
+//     the working tree is the baseline: a slot policy does not name is a
+//     pending revocation, never an unbacked grant, and key changes are not
+//     compared.
 //   - A slot is "on trunk" when trunk's keys file has the same line: the
-//     same current key id, device and age file. A slot re-wrapped on a
-//     branch is a new grant.
-//   - A branch whose current key trunk has since retired is behind trunk
-//     (key.behind-trunk); its unnamed slots are pending revocations that
-//     merging trunk resolves.
-//   - A pending revocation on trunk backs a rotation (a new current key id).
-//     It does not back an inbox replaced under the same key id: carbon never
-//     writes that, so it is always key.changed.
+//     same current key id, device and age file.
+//   - A working tree whose current key trunk has retired is a rollback when
+//     trunk's tip is an ancestor of HEAD; otherwise the branch is behind, and
+//     its keys file must be unchanged since the merge base.
+//   - A change of current key is a rotation, accepted only in the shape
+//     `apply` writes after a merged removal (see rotationProblems).
+//   - Retired records are append-only: every one trunk has must be present
+//     and identical.
 //   - Drops are forbidden when either trunk's policy or the working tree's
 //     turns them off for the scope.
 func (s *State) slotFindings() []Finding {
@@ -37,8 +43,15 @@ func (s *State) slotFindings() []Finding {
 	for _, sf := range s.Scopes {
 		base := Finding{Scope: sf.Name(), Package: sf.Package.Name, Env: sf.Env}
 		var sa *policy.ScopeAccess
+		noEntry := false
 		if tp != nil {
-			sa, _ = tp.Scope(sf.Package.Name, sf.Env)
+			var err error
+			if sa, err = tp.Scope(sf.Package.Name, sf.Env); err != nil {
+				// The environment is not in trunk's workspace: trunk names
+				// nobody for this scope.
+				sa = &policy.ScopeAccess{Package: sf.Package.Name, Env: sf.Env, Drops: true, Why: map[string][]string{}}
+				noEntry = true
+			}
 		}
 		wsa, _ := s.Worktree.Scope(sf.Package.Name, sf.Env)
 
@@ -89,13 +102,14 @@ func (s *State) slotFindings() []Finding {
 		if sf.Keys == nil {
 			if reviewed && tk != nil {
 				f := base
-				f.Severity, f.Rule, f.File = Error, RuleKeyChanged, sf.KeysFile
-				f.Message = fmt.Sprintf("%s has a keys file on trunk (current key %s) but not in the working tree: it was deleted.", sf.Name(), tk.Current)
+				f.Severity, f.Rule, f.File = Error, RuleKeyRemoved, sf.KeysFile
+				f.Message = fmt.Sprintf("%s has a keys file on trunk (current key %s) but not in the working tree: it was deleted while the scope still exists.", sf.Name(), tk.Current)
 				f.Hint = fmt.Sprintf("Restore it: git checkout %s -- %s", tp.Ref, sf.KeysFile)
 				out = append(out, f)
 			}
 			continue
 		}
+		cur := sf.Keys.CurrentKey()
 		if reviewed && tk == nil {
 			f := base
 			f.Severity, f.Rule, f.File = Info, RuleKeyNew, sf.KeysFile
@@ -104,18 +118,54 @@ func (s *State) slotFindings() []Finding {
 			f.Hint = fmt.Sprintf("Check who committed %s against `carbon who %s --env %s` before merging.", sf.KeysFile, sf.Package.Name, sf.Env)
 			out = append(out, f)
 		}
-		cur := sf.Keys.CurrentKey()
+		if sa.RequirePQ && agewrap.RecipientKind(cur.Inbox) != agewrap.KindHybrid {
+			f := base
+			f.Severity, f.Rule, f.File = Error, RuleInboxNotPQ, sf.KeysFile
+			f.Message = fmt.Sprintf("%s requires post-quantum keys, but its inbox key (key %s) is not hybrid: drops to it are not post-quantum.", sf.Name(), sf.Keys.Current)
+			f.Hint = "Restore the keys file from trunk; carbon always makes hybrid inbox keys."
+			out = append(out, f)
+		}
 		var trunkCur *store.Key
 		if tk != nil {
 			trunkCur = tk.CurrentKey()
 		}
-		behind := false
+
+		// The working tree's current key is one trunk has retired: a
+		// rollback, or a branch that is behind trunk.
+		behind, rolledBack := false, false
 		if reviewed && tk != nil {
 			if k, ok := tk.Keys[sf.Keys.Current]; ok && k.IsRetired() {
-				behind = true
+				f := base
+				f.Severity, f.File = Error, sf.KeysFile
+				state, detail := s.behindState(sf.KeysFile)
+				rolledBack = state != behindOK // a retired key named as current, not accepted
+				switch state {
+				case behindRollback:
+					f.Rule = RuleKeyChanged
+					f.Message = fmt.Sprintf("The scope key of %s was rolled back to %s, which trunk retired (trunk's current key is %s). This branch already contains trunk, so it is not behind.", sf.Name(), sf.Keys.Current, tk.Current)
+					f.Hint = fmt.Sprintf("Restore it: git checkout %s -- %s", tp.Ref, sf.KeysFile)
+					out = append(out, f)
+				case behindChanged:
+					f.Rule = RuleKeyChanged
+					f.Message = fmt.Sprintf("%s uses key %s, which trunk has retired, and its keys file changed since this branch's merge base with trunk. A branch that is behind trunk may not change a key trunk has retired.", sf.Name(), sf.Keys.Current)
+					f.Hint = fmt.Sprintf("Merge trunk (git merge %s) and keep trunk's %s.", tp.Ref, sf.KeysFile)
+					out = append(out, f)
+				case behindUnknown:
+					f.Rule = RuleKeyUnverified
+					f.Message = fmt.Sprintf("%s uses key %s, which trunk has retired, and check cannot tell whether this branch changed it: %s.", sf.Name(), sf.Keys.Current, detail)
+					f.Hint = fmt.Sprintf("Fetch more history (git fetch --unshallow, or a deeper fetch of %s), or merge trunk: git merge %s", tp.Ref, tp.Ref)
+					out = append(out, f)
+				default:
+					behind = true
+					f.Severity, f.Rule = Info, RuleKeyBehindTrunk
+					f.Message = fmt.Sprintf("%s uses key %s here, which trunk has retired (trunk's current key is %s); its keys file is unchanged since the merge base.", sf.Name(), sf.Keys.Current, tk.Current)
+					f.Hint = "Merge trunk: git merge " + tp.Ref
+					out = append(out, f)
+				}
 			}
 		}
 
+		rotated := reviewed && tk != nil && !behind && !rolledBack && sf.Keys.Current != tk.Current
 		for _, dev := range sortedKeys(cur.Slots) {
 			blob := cur.Slots[dev]
 			f := base
@@ -139,21 +189,32 @@ func (s *State) slotFindings() []Finding {
 				f.Hint = "Give the device a hybrid key, then a reader runs `carbon apply`."
 				out = append(out, f)
 			}
+			onTrunk := tk != nil && tk.Current == sf.Keys.Current && trunkCur.Slots[dev] == blob
 			if sa.Names(dev) {
+				if reviewed && tk != nil && !onTrunk && !rotated && !behind {
+					g := base
+					g.Severity, g.Rule, g.Device, g.File = Info, RuleSlotGranted, dev, sf.KeysFile
+					g.Message = fmt.Sprintf("NEW SLOT: %s gets a slot in %s that trunk does not have. Only a reader can wrap the key, but carbon cannot prove who did: confirm the author is a current reader of %s.", dev, sf.Name(), sf.Name())
+					g.Hint = "This is what `carbon apply` writes for a pending grant; check who committed it."
+					out = append(out, g)
+				}
 				continue
 			}
-			onTrunk := !reviewed || behind ||
-				(tk != nil && tk.Current == sf.Keys.Current && trunkCur.Slots[dev] == blob)
 			g := base
 			g.Device, g.File = dev, sf.KeysFile
-			if onTrunk {
+			if !reviewed || behind || onTrunk {
 				g.Severity, g.Rule = Warning, RuleSlotPendingRevocation
 				g.Message = fmt.Sprintf("%s still has a slot in %s, but %s no longer names it: a pending revocation.", dev, sf.Name(), policyName(tp))
 				g.Hint = "A reader of " + sf.Name() + " runs `carbon apply` to rotate the key; then rotate what " + dev + " could read (see carbon status --all)."
 			} else {
 				g.Severity, g.Rule = Error, RuleSlotUnbacked
-				g.Message = fmt.Sprintf("%s has a slot for %s that %s does not name and trunk does not have: a grant that merged policy does not back.", sf.Name(), dev, policyName(tp))
-				g.Hint = fmt.Sprintf("Remove the slot line from %s; to grant access, merge the policy change first (carbon request %s --env %s), then run `carbon apply`.", sf.KeysFile, sf.Package.Name, sf.Env)
+				if noEntry {
+					g.Message = fmt.Sprintf("%s has a slot for %s, but trunk policy has no access entry for %s at all (its environment is not on trunk): a scope's keys cannot be created before its policy merges.", sf.Name(), dev, sf.Name())
+					g.Hint = fmt.Sprintf("Merge the policy change (the environment and its [access] entry) first, then a reader creates the key; remove %s from this change.", sf.KeysFile)
+				} else {
+					g.Message = fmt.Sprintf("%s has a slot for %s that %s does not name and trunk does not have: a grant that merged policy does not back.", sf.Name(), dev, policyName(tp))
+					g.Hint = fmt.Sprintf("Remove the slot line from %s; to grant access, merge the policy change first (carbon request %s --env %s), then run `carbon apply`.", sf.KeysFile, sf.Package.Name, sf.Env)
+				}
 			}
 			out = append(out, g)
 		}
@@ -168,30 +229,214 @@ func (s *State) slotFindings() []Finding {
 			out = append(out, f)
 		}
 
-		if !reviewed || tk == nil {
+		if !reviewed || tk == nil || behind || rolledBack {
 			continue
+		}
+		// Retired records are append-only.
+		for _, id := range tk.IDs() {
+			tr := tk.Keys[id]
+			if !tr.IsRetired() {
+				continue
+			}
+			if wr, ok := sf.Keys.Keys[id]; !ok || !sameRecord(tr, wr) {
+				what := "changed"
+				if !ok {
+					what = "deleted"
+				}
+				f := base
+				f.Severity, f.Rule, f.File = Error, RuleKeyRetiredChanged, sf.KeysFile
+				f.Message = fmt.Sprintf("Retired key %s of %s was %s here. Retired records are append-only: they keep old branches decrypting and date the removals that rotation debt is counted from.", id, sf.Name(), what)
+				f.Hint = fmt.Sprintf("Restore it from trunk: git checkout %s -- %s", tp.Ref, sf.KeysFile)
+				out = append(out, f)
+			}
 		}
 		f := base
 		f.Severity, f.File = Error, sf.KeysFile
 		switch {
 		case sf.Keys.Current == tk.Current:
-			if cur.Inbox != trunkCur.Inbox {
+			if cur.Inbox != trunkCur.Inbox || cur.InboxSealed != trunkCur.InboxSealed {
 				f.Rule = RuleKeyChanged
 				f.Message = fmt.Sprintf("The inbox key of %s (key %s) differs from trunk's. Drops would go to a key someone swapped on this branch.", sf.Name(), tk.Current)
 				f.Hint = fmt.Sprintf("Restore it: git checkout %s -- %s", tp.Ref, sf.KeysFile)
 				out = append(out, f)
 			}
-		case behind:
-			f.Severity, f.Rule = Info, RuleKeyBehindTrunk
-			f.Message = fmt.Sprintf("%s uses key %s here, which trunk has retired (trunk's current key is %s).", sf.Name(), sf.Keys.Current, tk.Current)
-			f.Hint = "Merge trunk: git merge " + tp.Ref
-			out = append(out, f)
-		case !hasPendingRevocation(trunkCur, sa):
-			f.Rule = RuleKeyChanged
-			f.Message = fmt.Sprintf("The scope key of %s changed (%s on trunk, %s here), but trunk's key had no pending revocation to justify a rotation.", sf.Name(), tk.Current, sf.Keys.Current)
-			f.Hint = fmt.Sprintf("Restore it: git checkout %s -- %s. A rotation follows a removal merged to trunk (carbon remove, then carbon apply).", tp.Ref, sf.KeysFile)
-			out = append(out, f)
+		default:
+			reason := ""
+			if wr, ok := sf.Keys.Keys[tk.Current]; ok {
+				reason = wr.Reason
+			}
+			r := base
+			r.Severity, r.Rule, r.File = Info, RuleKeyRotated, sf.KeysFile
+			r.Message = fmt.Sprintf("SCOPE KEY ROTATED: %s changes from key %s (trunk) to %s here, reason %q. Only a reader can rotate, but carbon cannot prove who did: confirm the author is a current reader of %s.",
+				sf.Name(), tk.Current, sf.Keys.Current, reason, sf.Name())
+			r.Hint = "This is what `carbon apply` writes after a removal merges; check who committed it."
+			r.Banner = fmt.Sprintf("SCOPE KEY ROTATED %s -> %s (%q): confirm the author is a current reader of %s", tk.Current, sf.Keys.Current, reason, sf.Name())
+			out = append(out, r)
+			if probs := rotationProblems(sf, tk, sa, eligible); len(probs) > 0 {
+				f.Rule = RuleKeyChanged
+				f.Message = fmt.Sprintf("The scope key of %s changed (%s on trunk, %s here) in a way `carbon apply` never writes: %s.", sf.Name(), tk.Current, sf.Keys.Current, strings.Join(probs, "; "))
+				f.Hint = fmt.Sprintf("Restore it: git checkout %s -- %s. A rotation follows a removal merged to trunk (carbon remove, then carbon apply by a current reader).", tp.Ref, sf.KeysFile)
+				out = append(out, f)
+			}
 		}
+	}
+	out = append(out, s.removedFindings()...)
+	return out
+}
+
+// rotationProblems lists how a change of current key differs from what
+// `apply` writes for a merged removal. Empty means acceptable.
+func rotationProblems(sf *ScopeFiles, tk *store.Keys, sa *policy.ScopeAccess, eligible []policy.Device) []string {
+	var probs []string
+	trunkCur := tk.CurrentKey()
+	wt := sf.Keys
+	cur := wt.CurrentKey()
+	if !hasPendingRevocation(trunkCur, sa) {
+		probs = append(probs, "trunk's key had no pending revocation to justify a rotation")
+	}
+	old, ok := wt.Keys[tk.Current]
+	switch {
+	case !ok || !old.IsRetired():
+		probs = append(probs, fmt.Sprintf("trunk's key %s is not kept as a retired record", tk.Current))
+	case old.Successor == "" || old.Reason == "" || old.Sealed == "":
+		probs = append(probs, fmt.Sprintf("retired key %s lacks successor, reason or sealed", tk.Current))
+	default:
+		if !reaches(wt, tk.Current, wt.Current) {
+			probs = append(probs, fmt.Sprintf("retired key %s does not lead to the current key %s", tk.Current, wt.Current))
+		}
+		if !old.Created.Equal(trunkCur.Created) || old.InboxSealed != trunkCur.InboxSealed {
+			probs = append(probs, fmt.Sprintf("retired key %s does not keep trunk's created time and inbox_sealed", tk.Current))
+		}
+	}
+	allowed := map[string]bool{}
+	for _, d := range eligible {
+		allowed[d.ID] = true
+	}
+	var extra []string
+	for _, dev := range sortedKeys(cur.Slots) {
+		if !allowed[dev] {
+			extra = append(extra, dev)
+		}
+	}
+	if len(extra) > 0 {
+		probs = append(probs, "the new key has slots trunk policy does not grant: "+strings.Join(extra, ", "))
+	}
+	if cur.Inbox == "" || cur.InboxSealed == "" {
+		probs = append(probs, "the new key has no inbox")
+	}
+	if sf.TrunkSecrets != nil && !sf.BadSecrets {
+		var gone, redated []string
+		for _, name := range sf.TrunkSecrets.Names() {
+			we, ok := sf.Secrets.Entries[name]
+			switch {
+			case !ok:
+				gone = append(gone, name)
+			case !we.Set.Equal(sf.TrunkSecrets.Entries[name].Set):
+				redated = append(redated, name)
+			}
+		}
+		if len(gone) > 0 {
+			probs = append(probs, "values on trunk vanished: "+strings.Join(gone, ", "))
+		}
+		if len(redated) > 0 {
+			probs = append(probs, "values changed their set time (a rotation re-seals, it does not re-date): "+strings.Join(redated, ", "))
+		}
+	}
+	return probs
+}
+
+// reaches reports whether following successors from id arrives at want.
+func reaches(ks *store.Keys, id, want string) bool {
+	for i := 0; i <= len(ks.Keys); i++ {
+		if id == want {
+			return true
+		}
+		k, ok := ks.Keys[id]
+		if !ok || !k.IsRetired() {
+			return false
+		}
+		id = k.Successor
+	}
+	return false
+}
+
+// sameRecord reports whether two key records are identical.
+func sameRecord(a, b *store.Key) bool {
+	if !a.Created.Equal(b.Created) || !a.Retired.Equal(b.Retired) || a.Reason != b.Reason ||
+		a.Successor != b.Successor || a.Sealed != b.Sealed || a.InboxSealed != b.InboxSealed ||
+		a.Inbox != b.Inbox || len(a.Slots) != len(b.Slots) {
+		return false
+	}
+	for dev, blob := range a.Slots {
+		if b.Slots[dev] != blob {
+			return false
+		}
+	}
+	return true
+}
+
+type behind int
+
+const (
+	behindOK behind = iota
+	behindRollback
+	behindChanged
+	behindUnknown
+)
+
+// behindState classifies a working tree whose current key trunk retired.
+func (s *State) behindState(keysFile string) (behind, string) {
+	ref := s.Trunk.Ref
+	anc, err := s.Repo.IsAncestor(ref, "HEAD")
+	if err != nil {
+		return behindUnknown, err.Error()
+	}
+	if anc {
+		return behindRollback, ""
+	}
+	mb, err := s.Repo.MergeBase("HEAD", ref)
+	if errors.Is(err, gitx.ErrNoMergeBase) {
+		return behindUnknown, "this clone has no merge base of HEAD and " + ref + " (shallow clone or unrelated history)"
+	}
+	if err != nil {
+		return behindUnknown, err.Error()
+	}
+	same, err := s.Repo.UnchangedSince(mb, keysFile)
+	if err != nil {
+		return behindUnknown, err.Error()
+	}
+	if !same {
+		return behindChanged, ""
+	}
+	return behindOK, ""
+}
+
+// removedFindings reports scopes trunk has keys for that the working tree no
+// longer has, and files that belong to no scope.
+func (s *State) removedFindings() []Finding {
+	var out []Finding
+	still := map[string]bool{}
+	for _, r := range s.Removed {
+		f := Finding{Scope: r.Name(), Package: r.Package, Env: r.Env, File: r.TrunkFile}
+		if r.StillHere {
+			still[r.TrunkFile] = true
+			f.Severity, f.Rule = Error, RuleKeyRemoved
+			f.Message = fmt.Sprintf("%s is no longer a scope here (its package or environment was removed), but its keys file %s is still here. Keys for a scope trunk does not have cannot be checked, so they cannot stay.", r.Name(), r.TrunkFile)
+			f.Hint = fmt.Sprintf("To remove the scope, delete its files in this same change: git rm %s and its secrets file. Otherwise keep the environment or package.", r.TrunkFile)
+		} else {
+			f.Severity, f.Rule = Info, RuleScopeRemoved
+			f.Message = fmt.Sprintf("SCOPE REMOVED: %s and its keys file %s are removed in this change. Confirm that is intended: re-creating it later makes a new key, which must again be created by a reader.", r.Name(), r.TrunkFile)
+			f.Hint = "Nothing to do if intended."
+		}
+		out = append(out, f)
+	}
+	for _, o := range s.Orphans {
+		if still[o] {
+			continue
+		}
+		out = append(out, Finding{Severity: Error, Rule: RuleStoreOrphan, File: o,
+			Message: fmt.Sprintf("%s belongs to no scope: no package in that directory, or an environment the workspace does not have. carbon never checks it, so it cannot stay.", o),
+			Hint:    "Delete it, or add the package or environment it belongs to (and let a reader create its key after the policy merges)."})
 	}
 	return out
 }

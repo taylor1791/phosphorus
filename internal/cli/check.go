@@ -16,7 +16,7 @@ import (
 func init() {
 	Register(&Command{
 		Name:    "check",
-		Usage:   "[--strict] [--max-debt <duration>] [--unused]",
+		Usage:   "[--strict] [--max-debt <duration>] [--unused] [--bootstrap]",
 		Summary: "Validate graph, policy, and keys; the CI gate",
 		Help: `check audits the whole repository without a key: the [env] reference graph,
 declared versus stored secrets (every workspace environment counts), slots and
@@ -30,19 +30,26 @@ pending revocations and other warnings are reported too.
   --strict         also fail on warnings, pending grants and pending revocations
   --max-debt 14d   fail on rotation debt older than the limit (<n>d or <n>h)
   --unused         also list secrets that no [env] table references
+  --bootstrap      allow a check with no trunk at all (a brand-new repository)
 
-Drops, new scope keys and values set after their key was retired are listed
-first: carbon cannot prove their author is a reader, so review accepts them.
+What check cannot prove: it opens nothing, so it cannot tell a rotation or a
+new scope key made by a reader from one forged by someone else. It enforces
+every structural rule a legitimate "carbon apply" commit satisfies, and it
+lists every key change (new key, rotation, new slot, removed scope), every
+drop and every value under a retired or older key in a banner at the top. A
+passing check on a change to keys files is not "safe to merge without
+review": confirm its author is a current reader of the scope.
 
 Trunk is CARBON_TRUNK, else git config carbon.trunk, else the remote default
 branch; check says which it compared against. In CI, set CARBON_TRUNK and
-fetch that ref: with remotes but no trunk, check fails.
+fetch that ref: with no trunk at all, check fails unless --bootstrap is given.
 
 With --json, stdout is {"ok", "trunk", "counts", "findings", "rules"}.`,
 		Flags: func(fs *flag.FlagSet) {
 			fs.Bool("strict", false, "fail on warnings, pending grants and pending revocations too")
 			fs.String("max-debt", "", "fail on rotation debt older than this (`duration`, e.g. 14d)")
 			fs.Bool("unused", false, "list secrets that no [env] table references")
+			fs.Bool("bootstrap", false, "allow checking with no trunk at all (a new repository with no remote and no carbon.trunk)")
 		},
 		Run: runCheck,
 	})
@@ -69,12 +76,6 @@ type checkTrunk struct {
 	// yet), worktree, or unreadable.
 	Mode     string `json:"mode"`
 	Describe string `json:"describe"`
-}
-
-// reviewRules are listed in the banner at the top of check's output.
-var reviewRules = map[string]bool{
-	audit.RuleDropPending: true, audit.RuleDropForbidden: true,
-	audit.RuleKeyNew: true, audit.RuleSecretStaleAfter: true,
 }
 
 func describeTrunk(st *audit.State) checkTrunk {
@@ -150,6 +151,16 @@ func runCheck(c *Context) error {
 	if st.TrunkErr != nil {
 		return trunkErr(st.TrunkErr)
 	}
+	if st.TrunkRef != nil && st.TrunkRef.From == policy.TrunkFromNone && !c.Bool("bootstrap") {
+		return &Error{Code: ExitError, Message: "check has no trunk to compare with: this clone has no remote-tracking refs and no " + policy.TrunkConfigKey,
+			Details: []string{
+				"Without trunk, every keys file would be judged by itself, so a forged key would pass.",
+				"In CI: set " + policy.TrunkEnv + " to the trunk ref (for example " + policy.TrunkEnv + "=origin/main) and fetch it " +
+					"(e.g. git fetch --no-tags --depth=1 origin main:refs/remotes/origin/main); a checkout of one commit has no remote-tracking refs.",
+				"In a new repository that has no trunk yet, run `carbon check --bootstrap` to check the working tree against itself.",
+			},
+			Hint: "Set it:   export " + policy.TrunkEnv + "=origin/main   (and fetch it)\nOr for this clone:   git config " + policy.TrunkConfigKey + " <ref>"}
+	}
 	rep := st.Check(audit.Options{Now: c.Now(), MaxDebt: maxDebt, Strict: c.Bool("strict"), Unused: c.Bool("unused")})
 	res := checkResult{OK: !rep.Failed(), Strict: c.Bool("strict"), MaxDebt: c.String("max-debt"),
 		Trunk: describeTrunk(st), Findings: rep.Findings, Rules: audit.Rules, report: rep}
@@ -159,7 +170,7 @@ func runCheck(c *Context) error {
 	res.Counts = checkCounts{Errors: rep.Count(audit.Error), Warnings: rep.Count(audit.Warning), Info: rep.Count(audit.Info),
 		Drops: len(rep.ByRule(audit.RuleDropPending)) + len(rep.ByRule(audit.RuleDropForbidden))}
 	for _, f := range rep.Findings {
-		if reviewRules[f.Rule] {
+		if audit.Banner(f.Rule) {
 			res.Counts.Review++
 		}
 	}
@@ -186,35 +197,31 @@ func printCheck(out io.Writer, res checkResult) {
 
 	var review []audit.Finding
 	for _, f := range res.Findings {
-		if reviewRules[f.Rule] {
+		if audit.Banner(f.Rule) {
 			review = append(review, f)
 		}
 	}
 	if len(review) > 0 {
 		bar := strings.Repeat("!", 72)
 		fmt.Fprintln(out, bar)
-		fmt.Fprintf(out, "!! %s TO REVIEW: drops, new scope keys and values under retired keys\n", strings.ToUpper(plural(len(review), "item")))
-		fmt.Fprintln(out, "!! are written by someone carbon cannot prove is a reader. Accept each")
-		fmt.Fprintln(out, "!! one deliberately, like code.")
+		fmt.Fprintf(out, "!! %s TO REVIEW: drops, key changes and values under retired keys.\n", strings.ToUpper(plural(len(review), "item")))
+		fmt.Fprintln(out, "!! check cannot open anything, so it cannot tell a reader's change from a")
+		fmt.Fprintln(out, "!! forged one: confirm each author is a current reader before merging.")
 		fmt.Fprintln(out, "!!")
 		rows := [][]string{}
 		for _, f := range review {
-			item, set, state := f.Secret, "", ""
+			item, set := f.Secret, ""
+			if item == "" {
+				item = "(keys)"
+			}
 			if f.Set != nil {
 				set = "set " + f.Set.Format("2006-01-02T15:04:05Z")
 			}
-			switch f.Rule {
-			case audit.RuleDropPending:
-				state = "DROP"
-			case audit.RuleDropForbidden:
-				state = "DROP (drops are off here: error)"
-			case audit.RuleSecretStaleAfter:
-				state = "SUSPECT: set after its key was retired"
-			case audit.RuleKeyNew:
-				item = "(key)"
-				state = "NEW SCOPE KEY: confirm the author is a reader of " + f.Scope
+			where := f.Scope
+			if where == "" {
+				where = f.File
 			}
-			rows = append(rows, []string{"!!   " + f.Scope, item, set, state})
+			rows = append(rows, []string{"!!   " + where, item, set, f.Banner})
 		}
 		Table(out, rows)
 		fmt.Fprintln(out, bar)
@@ -232,7 +239,7 @@ func printCheck(out io.Writer, res checkResult) {
 	for _, sec := range sections {
 		var fs []audit.Finding
 		for _, f := range res.Findings {
-			if f.Severity == sec.sev && f.Rule != audit.RuleDropPending && f.Rule != audit.RuleKeyNew {
+			if f.Severity == sec.sev && !(f.Severity == audit.Info && audit.Banner(f.Rule)) {
 				fs = append(fs, f)
 			}
 		}

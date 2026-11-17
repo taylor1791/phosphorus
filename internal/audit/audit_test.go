@@ -31,7 +31,7 @@ func TestRulesListEveryRuleOnce(t *testing.T) {
 		}
 		seen[r.ID] = true
 	}
-	if len(seen) != 38 {
+	if len(seen) != 48 {
 		t.Fatalf("%d rules; update this test when adding one", len(seen))
 	}
 }
@@ -494,7 +494,7 @@ func TestKeyChangedInbox(t *testing.T) {
 func TestKeyChangedKeysFileDeleted(t *testing.T) {
 	f := newFx(t)
 	f.git("rm", "-q", "svc/app/.carbon/dev.keys.toml")
-	want(t, f.check(Options{}), RuleKeyChanged, Error)
+	want(t, f.check(Options{}), RuleKeyRemoved, Error)
 }
 
 func TestKeyBehindTrunk(t *testing.T) {

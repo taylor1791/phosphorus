@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path"
 	"path/filepath"
 	"sort"
@@ -36,6 +37,12 @@ type State struct {
 	// Scopes is every working-tree package in every workspace environment,
 	// ordered by package name, then environment in workspace order.
 	Scopes []*ScopeFiles
+	// Removed are scopes trunk has keys for that the working tree no longer
+	// has (package or environment removed).
+	Removed []RemovedScope
+	// Orphans are keys and secrets files that belong to no working-tree
+	// scope, as slash paths.
+	Orphans []string
 
 	// TrunkRef is how this clone chose its trunk (CARBON_TRUNK, git config,
 	// remote default); nil when it could not choose one (TrunkErr).
@@ -46,6 +53,7 @@ type State struct {
 	TrunkErr error
 
 	trunkSrc     *gitx.RefSource
+	badDirs      []string // package directories whose carbon.toml did not parse
 	loadFindings []Finding
 }
 
@@ -61,9 +69,11 @@ type ScopeFiles struct {
 	Secrets *store.Secrets
 	// TrunkKeys is the keys file at trunk, when policy came from trunk and
 	// the file exists there.
-	TrunkKeys  *store.Keys
-	KeysFile   string // slash path relative to the root
-	SecretFile string
+	TrunkKeys *store.Keys
+	// TrunkSecrets is the secrets file at trunk, under the same condition.
+	TrunkSecrets *store.Secrets
+	KeysFile     string // slash path relative to the root
+	SecretFile   string
 
 	BadKeys, BadSecrets bool
 }
@@ -137,6 +147,7 @@ func (s *State) loadPackages(src config.DirSource, ws *config.Workspace) (map[st
 		fws, p, err := config.ParseFile(f, data)
 		if err != nil {
 			s.fileError(f, data, err)
+			s.badDirs = append(s.badDirs, path.Dir(f))
 			continue
 		}
 		if fws != nil && f != config.FileName {
@@ -403,10 +414,111 @@ func (s *State) loadScopes() {
 				default:
 					sf.TrunkKeys = tk
 				}
+				sf.TrunkSecrets = s.trunkSecrets(sf, at, env)
 			}
 			s.Scopes = append(s.Scopes, sf)
 		}
 	}
+	s.loadRemoved()
+	s.loadOrphans()
+}
+
+// trunkSecrets reads a scope's secrets file at trunk; nil when absent or
+// unreadable (reported).
+func (s *State) trunkSecrets(sf *ScopeFiles, dir, env string) *store.Secrets {
+	rel := path.Join(dir, config.CarbonDir, env+".secrets.toml")
+	data, err := s.trunkSrc.ReadFile(rel)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err == nil {
+		var sec *store.Secrets
+		if sec, err = store.ParseSecrets(s.trunkSrc.String()+":"+rel, data); err == nil {
+			return sec
+		}
+	}
+	s.add(Finding{Severity: Error, Rule: RuleTrunkUnreadable, Scope: sf.Name(), Package: sf.Package.Name, Env: env,
+		Message: fmt.Sprintf("The secrets file of %s on trunk cannot be read: %v. Entries in %s were not compared with trunk.", sf.Name(), err, sf.Name()),
+		Hint:    "Fix the secrets file on trunk."})
+	return nil
+}
+
+// RemovedScope is a scope trunk has a keys file for that the working tree no
+// longer loads as a scope: its package or environment was removed.
+type RemovedScope struct {
+	Package, Env string
+	// TrunkFile is the keys file's slash path at trunk.
+	TrunkFile string
+	// StillHere is set when the working tree still has that file.
+	StillHere bool
+}
+
+// Name is "<package>/<env>".
+func (r RemovedScope) Name() string { return config.ScopeName(r.Package, r.Env) }
+
+func (s *State) loadRemoved() {
+	if !s.TrunkIsReviewed() || s.trunkSrc == nil {
+		return
+	}
+	for _, name := range sortedKeys(s.Trunk.Packages) {
+		tp := s.Trunk.Packages[name]
+		for _, env := range s.Trunk.Workspace.Environments {
+			if wp, ok := s.Worktree.Packages[name]; ok && s.Workspace.HasEnvironment(env) && wp != nil {
+				continue
+			}
+			tk, err := scope.ReadKeysAt(s.trunkSrc, tp.Dir, env)
+			if err != nil || tk == nil {
+				continue
+			}
+			rel := path.Join(tp.Dir, config.CarbonDir, env+".keys.toml")
+			_, statErr := os.Stat(filepath.Join(s.Root, filepath.FromSlash(rel)))
+			s.Removed = append(s.Removed, RemovedScope{Package: name, Env: env, TrunkFile: rel, StillHere: statErr == nil})
+		}
+	}
+}
+
+// loadOrphans finds keys and secrets files under a .carbon directory that
+// belong to no scope of the working tree: an unknown environment, or no
+// package in that directory.
+func (s *State) loadOrphans() {
+	owned := map[string]bool{}
+	for _, sf := range s.Scopes {
+		owned[sf.KeysFile], owned[sf.SecretFile] = true, true
+	}
+	filepath.WalkDir(s.Root, func(p string, e fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if e.IsDir() {
+			n := e.Name()
+			if p != s.Root && (n == ".git" || n == "node_modules" || (strings.HasPrefix(n, ".") && n != config.CarbonDir)) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filepath.Base(filepath.Dir(p)) != config.CarbonDir {
+			return nil
+		}
+		n := e.Name()
+		if !strings.HasSuffix(n, ".keys.toml") && !strings.HasSuffix(n, ".secrets.toml") {
+			return nil
+		}
+		rel, rerr := filepath.Rel(s.Root, p)
+		if rerr != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		pkgDir := path.Dir(path.Dir(rel))
+		for _, d := range s.badDirs {
+			if d == pkgDir {
+				return nil // its carbon.toml is already reported
+			}
+		}
+		if !owned[rel] {
+			s.Orphans = append(s.Orphans, rel)
+		}
+		return nil
+	})
 }
 
 func (s *State) storeError(sf *ScopeFiles, file string, err error) {
