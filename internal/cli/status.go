@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -9,7 +10,9 @@ import (
 
 	"github.com/taylor1791/phosphorus/internal/agewrap"
 	"github.com/taylor1791/phosphorus/internal/audit"
+	"github.com/taylor1791/phosphorus/internal/pins"
 	"github.com/taylor1791/phosphorus/internal/policy"
+	"github.com/taylor1791/phosphorus/internal/scope"
 )
 
 func init() {
@@ -17,11 +20,16 @@ func init() {
 		Name:    "status",
 		Usage:   "[--all]",
 		Summary: "What you can read, grant, and should rotate",
-		Help: `status says who you are (from your identity's public key; nothing is
-decrypted), the current environment, the scopes you can read, the scopes you
-are waiting on, the grants and revocations you could apply, drops waiting to
-be promoted, and rotation debt. A passphrase-protected identity is not
-decrypted unless --unlock is given.
+		Help: `status says who you are (from your identity's public key), the current
+environment, the scopes you can read, the scopes carbon would refuse to
+open here (keys that do not follow from trunk's, or that replaced the key
+you pinned), the scopes you are waiting on, the grants, revocations and
+re-keys you could apply, drops waiting to be promoted, values under retired
+keys (unproven), new scope keys not on trunk, and rotation debt. It reads
+metadata only, except that for a scope whose key changed since you last
+verified it, it unwraps the key (as get would) to check it against your
+pin. A passphrase-protected identity is not decrypted unless --unlock is
+given.
 
 Drops and debt cover the scopes you can read; --all covers every scope. With
 no identity on this device, status still works and shows less.`,
@@ -50,9 +58,14 @@ type statusWait struct {
 }
 
 type statusGrant struct {
-	Kind   string   `json:"kind"` // "grant" or "revoke"
+	Kind   string   `json:"kind"` // "grant", "revoke", or "rekey" (the device's key changed)
 	Device string   `json:"device"`
 	Scopes []string `json:"scopes"`
+}
+
+type statusRefused struct {
+	Scope  string `json:"scope"`
+	Reason string `json:"reason"`
 }
 
 type statusDrop struct {
@@ -77,6 +90,14 @@ type statusResult struct {
 	// Trunk is the trunk ref and where it came from, or why there is none.
 	Trunk string       `json:"trunk"`
 	Debt  []audit.Debt `json:"debt"`
+	// Refused are scopes you hold a slot in that carbon will not open
+	// here: the keys differ from trunk's, or from the key you pinned.
+	Refused []statusRefused `json:"refused"`
+	// Unproven are values under a retired key: whoever wrote them held
+	// that key, which a removed reader may still hold.
+	Unproven []statusDrop `json:"unproven"`
+	// PinsErr is set when this clone's pins file cannot be read.
+	PinsErr string `json:"pins_error,omitempty"`
 }
 
 func runStatus(c *Context) error {
@@ -94,7 +115,8 @@ func runStatus(c *Context) error {
 	}
 	all := c.Bool("all")
 	res := statusResult{Environment: env, All: all, Readable: []string{}, Waiting: []statusWait{},
-		Grants: []statusGrant{}, Drops: []statusDrop{}, Debt: []audit.Debt{}, NewKeys: []string{}}
+		Grants: []statusGrant{}, Drops: []statusDrop{}, Debt: []audit.Debt{}, NewKeys: []string{},
+		Refused: []statusRefused{}, Unproven: []statusDrop{}}
 	if st.TrunkErr != nil {
 		res.Trunk = "unresolved: " + st.TrunkErr.Error()
 	} else {
@@ -131,8 +153,47 @@ func runStatus(c *Context) error {
 	mine := DeviceIDs(me)
 
 	readable := map[string]bool{}
-	grants, revokes := map[string][]string{}, map[string][]string{}
-	var grantOrder, revokeOrder []string
+	grants, revokes, rekeys := map[string][]string{}, map[string][]string{}, map[string][]string{}
+	var grantOrder, revokeOrder, rekeyOrder []string
+	// Key changes check rejects: readers refuse such a scope, or it is a
+	// forgery that only the key would expose.
+	suspect := map[string]string{}
+	if st.TrunkIsReviewed() {
+		for _, f := range st.Check(audit.Options{Now: c.Now()}).Findings {
+			switch f.Rule {
+			case audit.RuleKeyChanged, audit.RuleKeyRetiredChanged, audit.RuleKeyUnverified:
+				if _, ok := suspect[f.Scope]; !ok {
+					suspect[f.Scope] = f.Rule
+				}
+			}
+		}
+	}
+	var verifyPin func(*audit.ScopeFiles, *scope.KeyPin) error
+	if len(ids) > 0 {
+		verifyPin = func(sf *audit.ScopeFiles, pin *scope.KeyPin) error {
+			s, err := scope.Load(w.Dir(sf.Package), sf.Package.Name, sf.Env)
+			if err != nil {
+				return err
+			}
+			o, err := s.Open(ids, mine...)
+			if err != nil {
+				return err
+			}
+			defer o.Close()
+			_, err = o.CheckPin(pin, sf.TrunkKeys)
+			return err
+		}
+	}
+	var pinFile *pins.File
+	reader := ""
+	if len(ids) > 0 {
+		reader = pins.ReaderID(ids)
+		if pf, err := c.LoadPins(w); err == nil {
+			pinFile = pf
+		} else {
+			res.PinsErr = AsError(err).Message
+		}
+	}
 	for _, sf := range st.Scopes {
 		if sf.Keys == nil {
 			continue
@@ -145,8 +206,12 @@ func runStatus(c *Context) error {
 			}
 		}
 		if has {
-			readable[sf.Name()] = true
-			res.Readable = append(res.Readable, sf.Name())
+			if why := statusRefusal(sf, st.TrunkIsReviewed(), pinFile, reader, suspect, verifyPin); why != "" {
+				res.Refused = append(res.Refused, statusRefused{Scope: sf.Name(), Reason: why})
+			} else {
+				readable[sf.Name()] = true
+				res.Readable = append(res.Readable, sf.Name())
+			}
 		}
 		wsa, _ := st.Worktree.Scope(sf.Package.Name, sf.Env)
 		var tsa *policy.ScopeAccess
@@ -165,7 +230,7 @@ func runStatus(c *Context) error {
 			}
 			res.Waiting = append(res.Waiting, sw)
 		}
-		if has && tsa != nil {
+		if readable[sf.Name()] && tsa != nil {
 			eligible, _ := tsa.Eligible()
 			for _, d := range eligible {
 				if _, ok := slots[d.ID]; !ok {
@@ -176,6 +241,13 @@ func runStatus(c *Context) error {
 				}
 			}
 			for _, id := range sortedNames(slots) {
+				if d, named := tsa.Device(id); named && sf.Keys.CurrentKey().SlotTo[id] != d.RecipientHash() {
+					if _, seen := rekeys[id]; !seen {
+						rekeyOrder = append(rekeyOrder, id)
+					}
+					rekeys[id] = append(rekeys[id], sf.Name())
+					continue
+				}
 				if !tsa.Names(id) {
 					if _, seen := revokes[id]; !seen {
 						revokeOrder = append(revokeOrder, id)
@@ -191,13 +263,20 @@ func runStatus(c *Context) error {
 	for _, id := range revokeOrder {
 		res.Grants = append(res.Grants, statusGrant{Kind: "revoke", Device: id, Scopes: revokes[id]})
 	}
+	for _, id := range rekeyOrder {
+		res.Grants = append(res.Grants, statusGrant{Kind: "rekey", Device: id, Scopes: rekeys[id]})
+	}
 	for _, sf := range st.Scopes {
 		if !all && !readable[sf.Name()] {
 			continue
 		}
 		for _, name := range sf.Secrets.Names() {
-			if e := sf.Secrets.Entries[name]; e.IsDrop() {
+			e := sf.Secrets.Entries[name]
+			if e.IsDrop() {
 				res.Drops = append(res.Drops, statusDrop{Scope: sf.Name(), Secret: name,
+					Set: e.Set.Format("2006-01-02T15:04:05Z"), Reader: readable[sf.Name()]})
+			} else if sf.Keys != nil && e.Key != sf.Keys.Current {
+				res.Unproven = append(res.Unproven, statusDrop{Scope: sf.Name(), Secret: name,
 					Set: e.Set.Format("2006-01-02T15:04:05Z"), Reader: readable[sf.Name()]})
 			}
 		}
@@ -274,6 +353,10 @@ func printStatus(out io.Writer, res statusResult, envs []string) {
 		}
 	}
 	if res.Identity != nil && res.Identity.Known {
+		var refused [][]string
+		for _, r := range res.Refused {
+			refused = append(refused, []string{r.Scope, r.Reason})
+		}
 		if len(res.Readable) == 0 {
 			section("Readable", [][]string{{"none yet"}})
 		} else {
@@ -284,13 +367,17 @@ func printStatus(out io.Writer, res statusResult, envs []string) {
 			waits = append(waits, []string{wt.Scope, wt.text})
 		}
 		section("Waiting", waits)
+		section("Refused", refused)
 		var grants [][]string
 		for _, g := range res.Grants {
-			verb := "pending"
-			if g.Kind == "revoke" {
-				verb = "revoke"
+			line := fmt.Sprintf("pending: %s -> %s", g.Device, plural(len(g.Scopes), "scope"))
+			switch g.Kind {
+			case "revoke":
+				line = fmt.Sprintf("revoke: %s -> rotate %s", g.Device, plural(len(g.Scopes), "scope"))
+			case "rekey":
+				line = fmt.Sprintf("rekey: %s's key changed -> rotate %s", g.Device, plural(len(g.Scopes), "scope"))
 			}
-			grants = append(grants, []string{fmt.Sprintf("%s: %s -> %s", verb, g.Device, plural(len(g.Scopes), "scope")), "carbon apply"})
+			grants = append(grants, []string{line, "carbon apply"})
 		}
 		section("You can grant", grants)
 	}
@@ -303,6 +390,11 @@ func printStatus(out io.Writer, res statusResult, envs []string) {
 		drops = append(drops, []string{d.Scope, d.Secret, "set " + d.Set + "; " + next})
 	}
 	section("Drops", drops)
+	var unproven [][]string
+	for _, u := range res.Unproven {
+		unproven = append(unproven, []string{u.Scope, u.Secret, "under a retired key, author unproven; carbon apply --reseal-unproven vouches for it"})
+	}
+	section("Unproven", unproven)
 	var keys [][]string
 	for _, s := range res.NewKeys {
 		keys = append(keys, []string{s, "new scope key, not on trunk", "confirm its author is a reader of " + s})
@@ -319,6 +411,9 @@ func printStatus(out io.Writer, res statusResult, envs []string) {
 	Table(out, rows)
 	if !res.All && (res.Identity == nil || !res.Identity.Known) {
 		footer = append(footer, "Run `carbon status --all` for drops and rotation debt in every scope.")
+	}
+	if res.PinsErr != "" {
+		footer = append(footer, "Your pins could not be read ("+res.PinsErr+"); refusals by pin are not shown.")
 	}
 	if strings.HasPrefix(res.Trunk, "unresolved: ") {
 		footer = append(footer, "Trunk is "+res.Trunk+"; grants and new scope keys are not shown. Fix: git fetch, or git config "+policy.TrunkConfigKey+" <ref>")
@@ -346,4 +441,50 @@ func envsOf(scopes, envs []string) []string {
 		}
 	}
 	return out
+}
+
+// statusRefusal says why carbon would refuse to open a scope you hold a
+// slot in, judged without a key: the working tree's keys file does not
+// descend from trunk's (the readers' trunk check), or its key is not the
+// one you pinned in this clone. Both checks are completed with the key by
+// the commands that open the scope; status only predicts them.
+func statusRefusal(sf *audit.ScopeFiles, reviewed bool, pf *pins.File, reader string, suspect map[string]string, verifyPin func(*audit.ScopeFiles, *scope.KeyPin) error) string {
+	if rule, ok := suspect[sf.Name()]; ok {
+		return "its key does not follow from trunk's (carbon check: " + rule + "); restore it: git checkout <trunk> -- " + sf.KeysFile
+	}
+	keys, trunk := sf.Keys, sf.TrunkKeys
+	behind := false
+	if reviewed && trunk != nil {
+		cur, tcur := keys.CurrentKey(), trunk.CurrentKey()
+		tr, retiredOnTrunk := trunk.Keys[keys.Current]
+		behind = retiredOnTrunk && tr.IsRetired()
+		switch {
+		case keys.Current == trunk.Current:
+			if cur.Inbox != tcur.Inbox || cur.InboxSealed != tcur.InboxSealed {
+				return "its inbox differs from trunk's (git checkout <trunk> -- " + sf.KeysFile + ")"
+			}
+		case behind:
+		default:
+			if r, ok := keys.Keys[trunk.Current]; !ok || !r.IsRetired() {
+				return "its key does not descend from trunk's (git checkout <trunk> -- " + sf.KeysFile + ")"
+			}
+		}
+	}
+	if pf == nil || reader == "" {
+		return ""
+	}
+	pin, ok := pf.Get(reader, sf.Name())
+	if !ok || pin.KeyID == keys.Current || behind {
+		return ""
+	}
+	if verifyPin != nil {
+		// The key changed since you pinned it: check the chain with the key,
+		// as the commands that open the scope will.
+		if err := verifyPin(sf, pin); err == nil || !errors.Is(err, scope.ErrKeyReplaced) {
+			return ""
+		}
+	} else if r, ok := keys.Keys[pin.KeyID]; ok && r.IsRetired() {
+		return ""
+	}
+	return fmt.Sprintf("key %s replaced the key %s you pinned (git log -p -- %s; carbon trust)", keys.Current, pin.KeyID, sf.KeysFile)
 }
