@@ -11,6 +11,11 @@ import (
 	"github.com/taylor1791/phosphorus/migrate/internal/migrate"
 )
 
+type list []string
+
+func (l *list) String() string     { return strings.Join(*l, ",") }
+func (l *list) Set(s string) error { *l = append(*l, s); return nil }
+
 type pairs map[string]string
 
 func (p pairs) String() string { return "" }
@@ -56,6 +61,8 @@ func main() {
 	fs.Var(pkgNames, "package-name", "rename a service: `old=new` (repeatable)")
 	fs.StringVar(&o.Trunk, "trunk", "", "set CARBON_TRUNK=`ref` for the carbon commands this run makes; nothing is written (default: carbon's own choice)")
 	fs.StringVar(&o.Key, "key", "", "the 0.0.3 private key `file` (default: .carbon/private-key.age; only that one is moved)")
+	var keep list
+	fs.Var(&keep, "keep-recipient", "carry over a key that is still a sops recipient but was removed from the creation rule: its `name-or-key` (repeatable)")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		if err == flag.ErrHelp {
 			os.Exit(0)
@@ -66,7 +73,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "carbon-migrate takes no arguments (got %q)\n", fs.Args())
 		os.Exit(migrate.ExitUsage)
 	}
-	o.EnvNames, o.PackageNames = envNames, pkgNames
+	o.EnvNames, o.PackageNames, o.KeepRecipients = envNames, pkgNames, keep
 	o.Stdout, o.Stderr = os.Stdout, os.Stderr
 	os.Exit(migrate.Run(o))
 }

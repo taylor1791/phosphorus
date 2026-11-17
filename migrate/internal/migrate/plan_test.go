@@ -217,6 +217,7 @@ func TestPlanBlockers(t *testing.T) {
 func TestPlanPeople(t *testing.T) {
 	r := reg("", legacy.User{Name: "Ada Okafor", Key: keyA})
 	r.Granted = append(r.Granted, keyB) // granted by hand, no users entry
+	r.Requested = append(r.Requested, keyB)
 	p := Build(baseInput([]*legacy.Service{svc(t, "a/carbon.toml", "name = \"a\"\n")}, nil, r))
 	if len(p.People) != 2 || p.People[0].ID != "ada-okafor" || p.People[1].ID != "unknown-1" || p.Me != "ada-okafor" {
 		t.Fatalf("people = %+v me %q", p.People, p.Me)

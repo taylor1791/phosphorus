@@ -27,6 +27,9 @@ func requireTools(t *testing.T, names ...string) {
 			missing = append(missing, n)
 		}
 	}
+	if len(missing) > 0 && os.Getenv("CARBON_MIGRATE_REQUIRE_FIXTURE") == "1" {
+		t.Fatalf("CARBON_MIGRATE_REQUIRE_FIXTURE=1 but %s is not on PATH, so the carbon 0.0.3 fixture cannot be built; see migrate/README.md (Tests)", strings.Join(missing, ", "))
+	}
 	if len(missing) > 0 {
 		t.Skipf("SKIPPED: needs %s on PATH to build a real carbon 0.0.3 fixture; see migrate/README.md (Tests) for the nix shell command", strings.Join(missing, ", "))
 	}

@@ -38,6 +38,8 @@ type Options struct {
 	PackageNames map[string]string
 	Trunk        string
 	Key          string // the 0.0.3 private key; default .carbon/private-key.age
+	// KeepRecipients carries over keys that are pending 0.0.3 removals.
+	KeepRecipients []string
 
 	Stdout, Stderr io.Writer
 	Environ        []string // the process environment; os.Environ() if nil
@@ -222,9 +224,10 @@ func (r *runner) run() (int, error) {
 		return ExitFailed, err
 	}
 
-	if data, err := os.ReadFile(filepath.Join(r.root, legacy.ServiceFile)); err == nil && !legacy.IsLegacyConfig(data) && bytes.Contains(data, []byte("[workspace]")) {
-		in.RootWorkspace = true
-	}
+	in.IdentitySameAsKey = sameFile(in.IdentityPath, keyPath)
+	in.IdentityInRepo = insideDir(in.IdentityPath, r.root)
+	in.KeepRecipients = r.o.KeepRecipients
+
 	if data, err := os.ReadFile(filepath.Join(r.root, ".gitattributes")); err == nil {
 		in.GitAttributes = data
 	} else if !errors.Is(err, fs.ErrNotExist) {
@@ -256,6 +259,42 @@ func (r *runner) run() (int, error) {
 		return ExitFailed, nil
 	}
 	return ExitOK, nil
+}
+
+// sameFile reports whether a and b are the same file, following symlinks.
+func sameFile(a, b string) bool {
+	sa, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	sb, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(sa, sb)
+}
+
+// insideDir reports whether p, with symlinks in its existing ancestors
+// resolved, is dir or below it.
+func insideDir(p, dir string) bool {
+	resolve := func(x string) string {
+		x, _ = filepath.Abs(x)
+		rest := ""
+		for {
+			if r, err := filepath.EvalSymlinks(x); err == nil {
+				return filepath.Join(r, rest)
+			}
+			parent := filepath.Dir(x)
+			if parent == x {
+				return filepath.Join(x, rest)
+			}
+			rest = filepath.Join(filepath.Base(x), rest)
+			x = parent
+		}
+	}
+	rp, rd := resolve(p), resolve(dir)
+	rel, err := filepath.Rel(rd, rp)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func findTool(flagValue, name string) (string, error) {
@@ -430,6 +469,10 @@ func (r *runner) execute(plan *Plan, carbon, keyPath string) error {
 		fmt.Fprintf(out, "  deleted  %s\n", d)
 	}
 	if plan.MoveKey {
+		if sameFile(idPath, keyPath) {
+			// Never delete the only copy (Build blocks this; belt and braces).
+			return fmt.Errorf("%s and %s are the same file; it was not removed", idPath, plan.KeyFile)
+		}
 		if err := os.Remove(keyPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("removing %s after installing it: %w", plan.KeyFile, err)
 		}
@@ -442,9 +485,9 @@ Migrated. %d secret value(s) were copied and every one reads back identical.
 
 Next:
   1. Work through the manual items above (they are also comments in each carbon.toml).
-  2. Review and commit:   git add -A && git commit -m "Migrate to Carbon 1.0"
-  3. Open a pull request. Teammates keep their own .carbon/private-key.age until they
-     move it to ~/.config/carbon/identity themselves (see migrate/README.md).
+  2. Review the changes (git status, git diff) and commit them; nothing was committed.
+  3. Teammates' keys are already devices in .carbon/people; each of them makes their
+     0.0.3 key their carbon identity file (see "After the migration" in migrate/README.md).
 `, len(plan.Copies))
 	r.printUndo(out, true)
 	return nil

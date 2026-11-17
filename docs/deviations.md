@@ -115,9 +115,14 @@ rollout") was not enough. Details are in `migrate/README.md`.
 4. **Derives whose variants are plain text become a var** per environment plus
    `[env] X = "${X}"`; variants with templates cannot vary by environment in
    1.0 and are listed for a manual choice.
-5. **Readers are the registry's actual sops recipients**, not the creation
-   rule: a key that requested access but was never rekeyed gets a person
-   file and no access.
+5. **Access is per key: a recipient of the registry that is still in its
+   creation rule.** A key that requested access but was never rekeyed gets a
+   person file and no access; a recipient removed from the creation rule (a
+   pending 0.0.3 removal) gets none unless `--keep-recipient` names it. Keys
+   sharing a `users` name are one person only when they read the same
+   environments, otherwise `alice`, `alice-2`, ... A final check blocks any
+   plan that would let a device read an environment whose registry was not
+   encrypted to it.
 6. **Values are piped to `carbon set` and must round-trip `carbon get` before
    anything old is deleted**; the identity is installed before verification
    so the check also proves the moved key works.

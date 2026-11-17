@@ -102,16 +102,40 @@ type Repo struct {
 	Root       string
 	Services   []*Service
 	Registries []*Registry // default first, then by name
+	// NewFormat lists carbon.toml files with Carbon 1.0 keys; they are never
+	// treated as 0.0.3 services.
+	NewFormat []NewFormatFile
+}
+
+// NewFormatFile is a carbon.toml with Carbon 1.0 keys.
+type NewFormatFile struct {
+	File string
+	Keys []string
+}
+
+// NewFormatKeys are top-level keys only a Carbon 1.0 carbon.toml has.
+var NewFormatKeys = []string{"workspace", "secrets", "vars", "env", "access"}
+
+// newFormatKeys returns the 1.0 keys a parsed carbon.toml has.
+func newFormatKeys(m map[string]any) []string {
+	var out []string
+	for _, k := range NewFormatKeys {
+		if _, ok := m[k]; ok {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 // IsLegacyConfig reports whether a carbon.toml's content is a 0.0.3 service
-// file: it has a name and no [workspace] table.
+// file: it has a name, [push], [pull] or [derive], and none of the 1.0 keys
+// ([workspace], [secrets], [vars], [env], [access]).
 func IsLegacyConfig(data []byte) bool {
 	var m map[string]any
 	if toml.Unmarshal(data, &m) != nil {
 		return false
 	}
-	if _, ok := m["workspace"]; ok {
+	if len(newFormatKeys(m)) > 0 {
 		return false
 	}
 	_, push := m["push"]
@@ -129,6 +153,15 @@ func Load(root string, files []string) (*Repo, error) {
 		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(f)))
 		if err != nil {
 			return nil, err
+		}
+		var m map[string]any
+		if err := toml.Unmarshal(data, &m); err != nil {
+			return nil, fmt.Errorf("%s: %w", f, err)
+		}
+		if keys := newFormatKeys(m); len(keys) > 0 {
+			// Never rewrite a file that has Carbon 1.0 content.
+			repo.NewFormat = append(repo.NewFormat, NewFormatFile{File: f, Keys: keys})
+			continue
 		}
 		if !IsLegacyConfig(data) {
 			continue

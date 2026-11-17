@@ -49,14 +49,21 @@ type Input struct {
 	// IdentityPath ("" when there is none; "?" when it cannot be read).
 	IdentityExisting string
 	IdentityExists   bool
+	// IdentitySameAsKey is true when IdentityPath is (or resolves to) the
+	// 0.0.3 key file itself; IdentityInRepo when it resolves to a path inside
+	// the repository.
+	IdentitySameAsKey bool
+	IdentityInRepo    bool
+
+	// KeepRecipients names keys (by recipient, `users` name or person id)
+	// that are still sops recipients of a registry but were removed from its
+	// creation rule, and whose access should be carried over anyway.
+	KeepRecipients []string
 
 	// Existing reports whether a slash path exists in the working tree.
 	Existing func(string) bool
 	// GitAttributes is the current .gitattributes content (nil if absent).
 	GitAttributes []byte
-	// RootWorkspace is true when the root carbon.toml is already a 1.0
-	// workspace file.
-	RootWorkspace bool
 }
 
 // Env maps an old registry to a 1.0 environment.
@@ -87,6 +94,8 @@ type Package struct {
 	// keyNames maps a 0.0.3 push key to its 1.0 secret or var name.
 	keyNames map[string]string
 	isSecret map[string]bool
+	envFrom  map[string]string // [env] key -> the 0.0.3 pull/derive name
+
 }
 
 // Copy is one secret value to pipe into `carbon set`.
@@ -162,8 +171,12 @@ func (pl *planner) manual(format string, a ...any) {
 
 func (pl *planner) build() {
 	in, p := pl.in, pl.p
-	if in.RootWorkspace {
-		pl.block("the root carbon.toml already has a [workspace] table: this repository looks migrated already.")
+	for _, nf := range in.Repo.NewFormat {
+		what := "it is never treated as a 0.0.3 service or rewritten"
+		if nf.File == "carbon.toml" && contains1(nf.Keys, "workspace") {
+			what = "this repository looks migrated already"
+		}
+		pl.block("%s has Carbon 1.0 keys (%s): %s. Move it aside or finish the migration by hand.", nf.File, strings.Join(nf.Keys, ", "), what)
 	}
 	if len(in.Repo.Services) == 0 {
 		pl.block("no carbon 0.0.3 carbon.toml (a service file with name, [push], [pull] or [derive]) was found.")
@@ -187,6 +200,46 @@ func (pl *planner) build() {
 		}
 	}
 	pl.planFiles()
+	for _, v := range CheckAccess(p) {
+		pl.block("internal check failed, refusing to grant access 0.0.3 never gave: %s", v)
+	}
+}
+
+func contains1(xs []string, x string) bool {
+	for _, y := range xs {
+		if y == x {
+			return true
+		}
+	}
+	return false
+}
+
+// CheckAccess is the invariant over a finished plan: every device of every
+// person an environment's [access] names must be a key the old registry for
+// that environment was encrypted to. It returns one line per violation.
+func CheckAccess(p *Plan) []string {
+	byID := map[string]*Person{}
+	for _, per := range p.People {
+		byID[per.ID] = per
+	}
+	var out []string
+	for _, e := range p.Envs {
+		granted := map[string]bool{}
+		for _, k := range e.Reg.Granted {
+			granted[k] = true
+		}
+		for _, per := range p.People {
+			if !contains1(per.Reads, e.New) {
+				continue
+			}
+			for _, dev := range sortedKeys(per.Devices) {
+				if k := per.Devices[dev]; !granted[k] {
+					out = append(out, fmt.Sprintf("%s/%s (%s) would read %s, but %s was not encrypted to it", per.ID, dev, short(k), e.New, e.Reg.RegistryFile))
+				}
+			}
+		}
+	}
+	return out
 }
 
 func (pl *planner) planEnvs() {
@@ -239,9 +292,18 @@ func (pl *planner) envLabel(e Env) string {
 	return fmt.Sprintf("%s (was registry %s)", e.New, e.Reg.Label())
 }
 
-// planPeople turns sops `users` and recipients into people files. A person
-// reads an environment when the registry is actually wrapped to one of their
-// keys; a key that only requested access is listed for a manual decision.
+// planPeople turns sops `users` and recipients into people files.
+//
+// What a key can read is decided per key, from the registries alone: a key
+// reads an environment when the registry is encrypted to it (a sops
+// recipient) and it is still in the registry's creation rule. A recipient
+// that was removed from the creation rule is a pending 0.0.3 removal (no
+// `carbon rekey` yet) and reads nothing unless --keep-recipient names it.
+//
+// Keys recorded under one `users` name become devices of one person only
+// when they read exactly the same environments; otherwise each distinct
+// access set becomes its own person (alice, alice-2, ...), so no key gains
+// access through a merge. Every merge and split is listed.
 func (pl *planner) planPeople() {
 	p := pl.p
 	keyName := map[string]string{}
@@ -274,84 +336,198 @@ func (pl *planner) planPeople() {
 			addKey(k, "")
 		}
 	}
-	byID := map[string]*Person{}
-	keyPerson := map[string]*Person{}
-	unknown := 0
+
+	keep := func(k string) bool {
+		for _, x := range pl.in.KeepRecipients {
+			if x == k || (keyName[k] != "" && (x == keyName[k] || x == slugName(keyName[k]))) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// What each key reads, and what it only asked for.
+	reads := map[string][]string{}
+	pendingRemoval := map[string][]Env{}
+	for _, e := range pl.envs {
+		requested := map[string]bool{}
+		for _, k := range e.Reg.Requested {
+			requested[k] = true
+		}
+		for _, k := range e.Reg.Granted {
+			switch {
+			case !e.Reg.HasSops || requested[k]:
+				reads[k] = append(reads[k], e.New)
+			case keep(k):
+				reads[k] = append(reads[k], e.New)
+				pl.manual("key %s (%s) is still a recipient of %s but was removed from its sops creation rule; --keep-recipient carries its access to %s over.", short(k), nameOr(keyName[k]), e.Reg.RegistryFile, e.New)
+			default:
+				pendingRemoval[k] = append(pendingRemoval[k], e)
+			}
+		}
+	}
 	for _, k := range order {
-		name := keyName[k]
-		var id string
-		if name == "" {
-			unknown++
-			id = fmt.Sprintf("unknown-%d", unknown)
-			pl.manual("key %s can read or asked to read a registry but no `users` entry names it. It became person %s (.carbon/people/%s.toml); rename the file to the person it belongs to.", short(k), id, id)
-		} else {
-			id = slugName(name)
-			if id != name {
-				pl.manual("user %q became person %q (person names are lower-case letters, digits, '-' and '_').", name, id)
-			}
-			if name == "Enter your name" {
-				pl.manual("person %q comes from a 0.0.3 request made without $USER; rename .carbon/people/%s.toml to the real person.", id, id)
-			}
-		}
-		per, ok := byID[id]
-		if !ok {
-			per = &Person{ID: id, Name: name, Devices: map[string]string{}}
-			byID[id] = per
-			p.People = append(p.People, per)
-		}
-		dev := "migrated"
-		if n := len(per.Devices); n > 0 {
-			dev = fmt.Sprintf("migrated-%d", n+1)
-		}
-		per.Devices[dev] = k
-		keyPerson[k] = per
-		if k == pl.in.Me {
-			p.Me = id
+		for _, e := range pendingRemoval[k] {
+			pl.manual("pending removal: key %s (%s) can still decrypt %s, but it was removed from that registry's sops creation rule and 0.0.3 `carbon rekey` has not run since, so it is NOT a reader of %s. Choose: run 0.0.3 `carbon rekey %s` first (completing the removal) and re-run carbon-migrate, or pass --keep-recipient %s to carry its access over.",
+				short(k), nameOr(keyName[k]), e.Reg.RegistryFile, e.New, e.Old, keepArg(keyName[k], k))
 		}
 	}
 	for _, e := range pl.envs {
-		granted := e.Reg.Granted
 		if !e.Reg.HasRegistry {
-			granted = e.Reg.Requested
+			pl.manual("registry %s has no %s, so nobody can read it today; environment %s starts with no readers. Add them to [access] %s in carbon.toml.", e.Reg.Label(), e.Reg.RegistryFile, e.New, e.New)
 		}
-		readers := map[string]bool{}
-		for _, k := range granted {
-			readers[keyPerson[k].ID] = true
+	}
+
+	// Group keys by person name, then split by access set.
+	type group struct {
+		base string
+		name string
+		keys []string
+	}
+	var groups []*group
+	byBase := map[string]*group{}
+	unknown := 0
+	for _, k := range order {
+		name := keyName[k]
+		if name == "" {
+			if len(reads[k]) == 0 && !requestedAnywhere(pl.envs, k) {
+				continue // only a pending removal: no person file
+			}
+			unknown++
+			id := fmt.Sprintf("unknown-%d", unknown)
+			g := &group{base: id, keys: []string{k}}
+			groups = append(groups, g)
+			what := "reads nothing"
+			if len(reads[k]) > 0 {
+				what = "reads " + strings.Join(reads[k], ", ")
+			}
+			pl.manual("key %s is in a registry or creation rule but no `users` entry names it. It became person %s, which %s, exactly as in 0.0.3. Find out whose key it is before merging; if nobody claims it, delete .carbon/people/%s.toml and remove %q from [access].", short(k), id, what, id, id)
+			continue
 		}
-		for _, per := range p.People {
-			if readers[per.ID] {
-				per.Reads = append(per.Reads, e.New)
+		base := slugName(name)
+		g, ok := byBase[base]
+		if !ok {
+			g = &group{base: base, name: name}
+			byBase[base] = g
+			groups = append(groups, g)
+			if base != name {
+				pl.manual("user %q became person %q (person names are lower-case letters, digits, '-' and '_').", name, base)
+			}
+			if name == "Enter your name" {
+				pl.manual("person %q comes from a 0.0.3 request made without $USER; rename .carbon/people/%s.toml to the real person.", base, base)
 			}
 		}
+		g.keys = append(g.keys, k)
+	}
+
+	used := map[string]bool{}
+	for _, g := range groups {
+		used[g.base] = true
+	}
+	keyPerson := map[string]*Person{}
+	for _, g := range groups {
+		// Partition the group's keys by identical access sets, in key order.
+		var parts [][]string
+		partOf := map[string]int{}
+		for _, k := range g.keys {
+			sig := strings.Join(reads[k], ",")
+			i, ok := partOf[sig]
+			if !ok {
+				i = len(parts)
+				partOf[sig] = i
+				parts = append(parts, nil)
+			}
+			parts[i] = append(parts[i], k)
+		}
+		var made []string
+		for i, keys := range parts {
+			id := g.base
+			if i > 0 {
+				for n := i + 1; ; n++ {
+					id = fmt.Sprintf("%s-%d", g.base, n)
+					if !used[id] {
+						break
+					}
+				}
+				used[id] = true
+			}
+			per := &Person{ID: id, Name: g.name, Devices: map[string]string{}, Reads: append([]string(nil), reads[keys[0]]...)}
+			for j, k := range keys {
+				dev := "migrated"
+				if j > 0 {
+					dev = fmt.Sprintf("migrated-%d", j+1)
+				}
+				per.Devices[dev] = k
+				keyPerson[k] = per
+				if k == pl.in.Me {
+					p.Me = id
+				}
+			}
+			p.People = append(p.People, per)
+			made = append(made, fmt.Sprintf("%s (%d key(s), reads %s)", id, len(keys), readsLabel(per.Reads)))
+		}
+		switch {
+		case len(parts) > 1:
+			pl.manual("split: %d keys are recorded as %q but could read different registries, so they became separate people to keep each key's access exactly as it was: %s. Merge them into one person only if every key should read every one of those environments (then run `carbon apply`).", len(g.keys), g.name, strings.Join(made, "; "))
+		case len(g.keys) > 1:
+			pl.manual("merge: %d keys are recorded as %q and could read the same registries, so they became devices of one person: %s.", len(g.keys), g.name, made[0])
+		}
+	}
+
+	for _, e := range pl.envs {
 		g := map[string]bool{}
-		for _, k := range granted {
+		for _, k := range e.Reg.Granted {
 			g[k] = true
 		}
 		for _, k := range e.Reg.Requested {
-			if !g[k] {
-				pl.manual("%s requested access to registry %s but was never granted it (no `carbon rekey`), so they are not a reader of %s. To grant it, add %q to [access] %s in carbon.toml after merging and run `carbon apply`.", keyPerson[k].ID, e.Reg.Label(), e.New, keyPerson[k].ID, e.New)
+			if !g[k] && keyPerson[k] != nil {
+				pl.manual("%s requested access to registry %s but was never granted it (no `carbon rekey`), so they are not a reader of %s. If they should be, add %q to [access] %s in carbon.toml; access starts after a reader runs `carbon apply`.", keyPerson[k].ID, e.Reg.Label(), e.New, keyPerson[k].ID, e.New)
 			}
 		}
 	}
 	sort.Slice(p.People, func(i, j int) bool { return p.People[i].ID < p.People[j].ID })
 	if pl.in.Me != "" && p.Me == "" {
-		pl.block("your 0.0.3 key (%s) is not a recipient of any registry, so it would be a reader of nothing in the new policy. Carbon 1.0 only lets a device that policy names as a reader create a scope's first key (`carbon set` exits 3 otherwise), so you cannot write the values. Run carbon-migrate as someone every registry is encrypted to.", short(pl.in.Me))
+		pl.block("your 0.0.3 key (%s) reads no registry, so it would be a reader of nothing in the new policy. Carbon 1.0 only lets a device that policy names as a reader create a scope's first key (`carbon set` exits 3 otherwise), so you cannot write the values. Run carbon-migrate as someone every registry is encrypted to.", short(pl.in.Me))
 	}
 	pl.p.notReader = map[string]bool{}
 	if p.Me != "" {
+		me := keyPerson[pl.in.Me]
 		for _, e := range pl.envs {
-			reads := false
-			for _, env := range byID[p.Me].Reads {
-				if env == e.New {
-					reads = true
-				}
+			if !contains1(me.Reads, e.New) {
+				pl.p.notReader[e.New] = true
 			}
-			if reads {
-				continue
-			}
-			pl.p.notReader[e.New] = true
 		}
 	}
+}
+
+func requestedAnywhere(envs []Env, k string) bool {
+	for _, e := range envs {
+		if contains1(e.Reg.Requested, k) {
+			return true
+		}
+	}
+	return false
+}
+
+func nameOr(n string) string {
+	if n == "" {
+		return "no `users` entry"
+	}
+	return fmt.Sprintf("%q", n)
+}
+
+func keepArg(name, key string) string {
+	if name != "" && validName(slugName(name)) {
+		return slugName(name)
+	}
+	return key
+}
+
+func readsLabel(envs []string) string {
+	if len(envs) == 0 {
+		return "nothing"
+	}
+	return strings.Join(envs, ", ")
 }
 
 // checkReaderOfCopies blocks when the migrating user would not be a reader
@@ -585,12 +761,22 @@ func (pl *planner) ref(from *Package, service, key string) (string, *Package, st
 	return "${" + target.Name + "." + name + "}", target, name, nil
 }
 
+// envKey maps a pull or derive name to its [env] key. Two different 0.0.3
+// names that land on one key block the run, as push keys do; a derive with
+// the same name as a pull is 0.0.3's own override and is allowed.
 func (pl *planner) envKey(pkg *Package, what, k string) string {
-	if validSecret(k) {
-		return k
+	n := k
+	if !validSecret(k) {
+		n = slugSecret(k)
+		pl.noteBoth(pkg, "%s %q became [env] key %q (process variable names are letters, digits and '_'); the program now sees %s.", what, k, n, n)
 	}
-	n := slugSecret(k)
-	pl.noteBoth(pkg, "%s %q became [env] key %q (process variable names are letters, digits and '_'); the program now sees %s.", what, k, n, n)
+	if pkg.envFrom == nil {
+		pkg.envFrom = map[string]string{}
+	}
+	if prev, ok := pkg.envFrom[n]; ok && prev != k {
+		pl.block("%s: %q and %s %q would both become [env] key %q. Rename one in the 0.0.3 file first.", pkg.File, prev, what, k, n)
+	}
+	pkg.envFrom[n] = k
 	return n
 }
 
@@ -854,6 +1040,12 @@ func (pl *planner) planIdentity() {
 	in, p := pl.in, pl.p
 	p.KeyFile, p.MoveKey, p.IdentityPath = in.KeyFile, in.MoveKey, in.IdentityPath
 	switch {
+	case in.IdentitySameAsKey:
+		p.IdentityAction = "conflict"
+		pl.block("the Carbon 1.0 identity path %s is the 0.0.3 key file %s itself (or a link to it). Moving the key would delete its only copy, so carbon-migrate stops. The 1.0 identity must live outside the repository: unset CARBON_IDENTITY_FILE (or point it outside the repository), remove the link if %s is one, and re-run; carbon-migrate then moves the key there.", in.IdentityPath, in.KeyFile, in.IdentityPath)
+	case in.IdentityInRepo:
+		p.IdentityAction = "conflict"
+		pl.block("the Carbon 1.0 identity path %s is inside the repository. The 1.0 identity must live outside it (by default ~/.config/carbon/identity), where git can neither commit nor clean it. Unset CARBON_IDENTITY_FILE or XDG_CONFIG_HOME, or point them outside the repository, and re-run.", in.IdentityPath)
 	case !in.IdentityExists:
 		p.IdentityAction = "install"
 	case in.IdentityExisting == in.Me && in.Me != "":
