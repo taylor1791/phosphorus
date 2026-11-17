@@ -7,6 +7,9 @@ import (
 	"io"
 	"strings"
 	"text/tabwriter"
+
+	"github.com/taylor1791/phosphorus/internal/agewrap"
+	"github.com/taylor1791/phosphorus/internal/policy"
 )
 
 // Context is what a command runs with.
@@ -23,6 +26,11 @@ type Context struct {
 	ArgsLenAtDash int
 
 	ws *Workspace
+	// Loaded once per command (see TrunkPolicy, WorktreePolicy, Identities).
+	trunkPol *policy.Policy
+	trunkErr error
+	wtPol    *policy.Policy
+	ids      []agewrap.Identity
 }
 
 // JSON reports whether --json was given.

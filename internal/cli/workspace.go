@@ -50,6 +50,8 @@ func (c *Context) Workspace() (*Workspace, error) {
 	if err != nil {
 		return nil, err
 	}
+	// One command, one snapshot of each ref: read every trunk file once.
+	repo.CacheSources = true
 	c.ws = &Workspace{Root: repo.Root, Repo: repo, Config: ws}
 	return c.ws, nil
 }
@@ -183,22 +185,38 @@ func (c *Context) Environment(w *Workspace) (string, error) {
 
 // TrunkPolicy reads policy from trunk, with the bootstrap and
 // trunk = "worktree" exceptions, and prints the bootstrap notice on stderr.
-// Use it for anything that wraps keys or writes drops.
+// Use it for anything that wraps keys or writes drops. It is loaded once per
+// command (trunk cannot change while a command runs), so the notice is
+// printed once however many scopes a command touches.
 func (c *Context) TrunkPolicy(w *Workspace) (*policy.Policy, error) {
+	if c.trunkPol != nil || c.trunkErr != nil {
+		return c.trunkPol, c.trunkErr
+	}
 	p, err := policy.LoadTrunkWith(w.Repo, c.Getenv)
 	if err != nil {
+		c.trunkErr = err
 		return nil, err
 	}
 	if p.Notice != "" {
 		c.Notice("%s", p.Notice)
 	}
+	c.trunkPol = p
 	return p, nil
 }
 
 // WorktreePolicy reads policy from the working tree (who, access, status,
-// run, and messages).
+// run, and messages). It is loaded once per command; a command that writes
+// policy files and needs to see them must call policy.LoadWorktree itself.
 func (c *Context) WorktreePolicy(w *Workspace) (*policy.Policy, error) {
-	return policy.LoadWorktree(w.Root)
+	if c.wtPol != nil {
+		return c.wtPol, nil
+	}
+	p, err := policy.LoadWorktree(w.Root)
+	if err != nil {
+		return nil, err
+	}
+	c.wtPol = p
+	return p, nil
 }
 
 // IdentityPath is the identity file: CARBON_IDENTITY_FILE, else
@@ -217,8 +235,20 @@ func (c *Context) IdentityPath() string {
 // Identities loads the caller's identities from CARBON_IDENTITY (content)
 // or the identity file. With required, a missing identity is an exit-6
 // error; otherwise it returns nil. A passphrase-protected file prompts on
-// the terminal, and is an exit-6 error without one.
+// the terminal, and is an exit-6 error without one. Loaded identities are
+// kept for the rest of the command, so a passphrase is asked for once.
 func (c *Context) Identities(required bool) ([]agewrap.Identity, error) {
+	if c.ids != nil {
+		return c.ids, nil
+	}
+	ids, err := c.loadIdentities(required)
+	if err == nil && ids != nil {
+		c.ids = ids
+	}
+	return ids, err
+}
+
+func (c *Context) loadIdentities(required bool) ([]agewrap.Identity, error) {
 	var data []byte
 	source := "CARBON_IDENTITY"
 	if v := c.Getenv("CARBON_IDENTITY"); v != "" {
