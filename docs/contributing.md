@@ -21,6 +21,7 @@ themselves. To build carbon by hand: `CGO_ENABLED=0 go build ./cmd/carbon`.
 | `internal/scope` | Everything about a scope's keys and values: `Load`, `Create`, `Open`, `Reveal`/`RevealAll`, `Seal`, `Drop`, `AddSlots`, `DiffSlots`, `Rotate`, `Promote`/`PromoteDrops`, `Refresh`, `TrunkInbox`, `ReadKeysAt`, `List` |
 | `internal/policy` | Who reads a scope: `LoadTrunk` (apply, drops, scope creation, check's slot rules), `LoadWorktree` (who, access, status, run), `Policy.Scope` (devices, `Why`, `Unresolved`, `RequirePQ`, `Drops`, `Eligible`), `Scopes`, `ScopesOf`, `Identify`, `TeamsOf` |
 | `internal/config` | Parsing people-written files, names, `ParseTemplate`, `ParseDuration`, `ParseGenerate`, `Quote`, writers for people/machines/teams |
+| `internal/audit` | Keyless analysis of the whole repo (`check`, `status`): `Load` → `State.Check` (findings with stable rule ids, listed in `audit.Rules`), `State.Debts`, `BuildGraph`, `Refs` |
 | `internal/store` | Parsing and writing secrets/keys files (rarely needed directly; `scope` wraps it) |
 | `internal/agewrap` | age: recipients, identities, slots, drops, `StanzaTypes` (for `check`), `Fingerprint` |
 | `internal/seal` | Sealed blobs and associated data (only `scope` should call it) |

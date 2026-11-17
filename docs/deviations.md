@@ -74,3 +74,26 @@ Each entry says what differs from `docs/implementation.md` and why.
 13. **`DirSource.Find` skips** directories whose name starts with `.` and
     `node_modules` when looking for package files, in the working tree and at
     a ref alike.
+14. **`check`: which environments count.** A declared secret with no value
+    in any workspace environment is an error (`secret.unset`): `run`
+    resolves the same `[env]` table in every environment. A referenced var
+    with no value and no `default` for an environment is an error too.
+15. **`check`: slot rules without a reviewed trunk.** Under bootstrap and
+    `trunk = "worktree"` the working tree is the baseline: an unnamed slot
+    is a pending revocation, never an unbacked grant, and key changes are not
+    compared. A slot is "on trunk" only if trunk has the identical line (same
+    current key id, device and age file). A branch whose current key trunk
+    has retired is behind trunk (`key.behind-trunk`, info).
+16. **`check`: an inbox replaced under the same key id is always an
+    error.** The contract excuses a changed `current` or `inbox` when trunk's
+    key had a pending revocation; carbon reads that as excusing a rotation
+    (a new key id), which always changes both. Drops are forbidden when
+    either trunk's or the working tree's policy turns them off.
+17. **`check`: a repointed trunk** (`policy.trunk-changed`) is detected by
+    asking every ref that could be trunk what it says: the named ref, the
+    remote's default branch, and any other `trunk` value in HEAD's history
+    whose ref still names itself. This also catches a branch naming itself
+    or a missing ref (to force bootstrap); a shallow clone has less history.
+18. **Rotation debt** reads retired keys from the working tree and trunk
+    together, so deleting a retired key on a branch does not hide debt; debt
+    from a removal counts from the earliest removal after the value was set.

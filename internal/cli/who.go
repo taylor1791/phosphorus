@@ -253,7 +253,7 @@ func runAccess(c *Context) error {
 	if m, ok := strings.CutPrefix(who, config.MachinePrefix); ok {
 		if _, found := pol.Machines[m]; !found {
 			return Errorf(ExitNotFound, "no machine named %q", m).
-				WithDetail("Machines are files in " + config.MachinesDir + "/.").
+				WithDetail("Machines are files in "+config.MachinesDir+"/.").
 				WithHint("To create one:   carbon join --machine %s", m)
 		}
 		res.Machine = true

@@ -26,8 +26,8 @@ func setAll(t *testing.T, w *clitest.World) {
 }
 
 type checkJSON struct {
-	OK     bool
-	Counts struct{ Errors, Warnings, Info, Drops int }
+	OK       bool
+	Counts   struct{ Errors, Warnings, Info, Drops int }
 	Findings []struct {
 		Severity, Rule, Scope, Secret, Device, Message, Hint string
 		Strict                                               bool
