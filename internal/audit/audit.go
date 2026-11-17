@@ -75,6 +75,9 @@ const (
 	RuleSlotPendingRevocation = "slot.pending-revocation"
 	RuleSlotPendingGrant      = "slot.pending-grant"
 	RuleSlotGranted           = "slot.granted"
+	RuleSlotRemoved           = "slot.removed"
+	RuleSlotRecipient         = "slot.recipient"
+	RuleSlotRekeyed           = "slot.rekeyed"
 	RuleSlotMalformed         = "slot.malformed"
 	RuleSlotNotPQ             = "slot.not-pq"
 	RuleDeviceNotPQ           = "device.not-pq"
@@ -143,6 +146,9 @@ var Rules = []RuleInfo{
 	{RuleSlotPendingRevocation, Warning, "a slot for a device trunk policy no longer names; `carbon apply` rotates the key", false},
 	{RuleSlotPendingGrant, Info, "a device trunk policy names has no slot yet; `carbon apply` wraps it", false},
 	{RuleSlotGranted, Info, "a named device gets a slot trunk does not have: confirm a current reader wrapped it", true},
+	{RuleSlotRemoved, Error, "a slot on trunk's current key is removed or changed (blob or to) while the key is unchanged: slots are append-only until a rotation", false},
+	{RuleSlotRecipient, Error, "a slot new relative to trunk records a `to` that is not the hash of its device's trunk policy key", false},
+	{RuleSlotRekeyed, Warning, "a slot on trunk is wrapped to a key its device no longer has: a pending revocation; `carbon apply` rotates", false},
 	{RuleSlotMalformed, Error, "a slot is not an age file with exactly one recipient stanza", false},
 	{RuleSlotNotPQ, Error, "under require_pq, a slot's stanza is not the hybrid post-quantum type", false},
 	{RuleDeviceNotPQ, Error, "under require_pq, a device policy names has a key that is not hybrid", false},

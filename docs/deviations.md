@@ -89,26 +89,56 @@ Each entry says what differs from `docs/implementation.md` and why.
 17. **`check`: slot rules without a reviewed trunk.** Under bootstrap and
     `worktree` trunk the working tree is the baseline: an unnamed slot is a
     pending revocation, never an unbacked grant, and key changes are not
-    compared. A slot is "on trunk" only if trunk has the identical line (same
-    current key id, device and age file). A branch whose current key trunk
-    has retired is behind trunk (`key.behind-trunk`, info). New scope keys
-    (`key.new`, info, never raised by `--strict`) are listed only against a
-    reviewed trunk; under bootstrap every key is new. Values under retired
-    keys are `secret.stale-key` (author unproven) or, when their set time is
-    after the key's retirement, `secret.stale-after-retirement`; both are
-    warnings, and the latter is listed with drops and new keys at the top of
-    `check`. With remotes but no resolvable trunk, `check` fails (exit 1)
-    with the foundation's error plus what CI must set; `status` carries on.
-18. **`check`: an inbox replaced under the same key id is always an
-    error.** The contract excuses a changed `current` or `inbox` when trunk's
-    key had a pending revocation; carbon reads that as excusing a rotation
-    (a new key id), which always changes both. Drops are forbidden when
-    either trunk's or the working tree's policy turns them off.
+    compared. `check` refuses to run at all when no trunk ref can be chosen
+    (no remote-tracking refs, no override; a CI checkout of one commit looks
+    like that) unless `--bootstrap` is given; a resolved trunk ref without a
+    `carbon.toml` stays an automatic bootstrap. With remotes but no
+    resolvable trunk, `check` fails (exit 1) with what CI must set; `status`
+    carries on.
+18. **`check`: the shape of a key change.** The contract excuses a changed
+    `current` or `inbox` when trunk's key had a pending revocation. `check`
+    reads that as excusing a rotation exactly as `apply` writes it: trunk's
+    current key kept as a retired record (successor, reason, sealed, and
+    trunk's `created` and `inbox_sealed`) whose successors lead to the new
+    current key; the new key's slots only for devices trunk policy grants,
+    each `to` the hash of that device's trunk policy key; an inbox; and every
+    value trunk has still present with trunk's `set` time. Anything else is
+    `key.changed`. With the same `current`, `inbox` and `inbox_sealed` must
+    equal trunk's and trunk's slots may not be removed or changed
+    (`slot.removed`). A working tree whose current key trunk retired is a
+    rollback (error) when trunk's tip is an ancestor of HEAD; otherwise it is
+    behind trunk only if its keys file is unchanged since the merge base, and
+    an unprovable merge base is an error (`key.unverified`). Retired records
+    trunk has are append-only (`key.retired-changed`). Drops are forbidden
+    when either trunk's or the working tree's policy turns them off.
 19. **Rotation debt** reads retired keys from the working tree and trunk
-    together, so deleting a retired key on a branch does not hide debt; debt
-    from a removal counts from the earliest removal after the value was set.
+    together, trunk's record winning, so editing or deleting a retired key on
+    a branch does not hide debt; debt from a removal counts from the earliest
+    removal after the value was set.
+20. **`check`: scopes across trunk and the working tree.** A scope in an
+    environment trunk does not have gets every slot reported as unbacked
+    (its keys cannot be created before its policy merges), plus `key.new`.
+    A keys or secrets file that belongs to no working-tree scope is
+    `store.orphan`. A scope trunk has keys for that the working tree no
+    longer has is `key.removed` (error) while its keys file is still here,
+    and `scope.removed` (banner) once the change deletes its files too. So
+    removing an environment while keeping forged keys for it fails, and
+    re-adding it later meets the new-environment rule: the review's
+    two-pull-request trick reduces to `key.new`, which is in the banner.
+21. **`status`** does not decrypt a passphrase-protected identity unless
+    `--unlock` is given; a wrong passphrase is "no usable identity", not an
+    abort.
 
 ## Limits
+
+- **A keyless check cannot tell a reader's key change from a forged one.**
+  `check` opens nothing, so a rotation or a new scope key made by a reader
+  looks the same as one made by someone else with public keys only. It
+  enforces every structural rule a legitimate `apply` commit satisfies, and
+  lists every key change (new key, rotation, new slot, removed scope), every
+  drop, and every value under a retired or older key in a banner so none
+  passes silently. A passing check on a change to keys files is not "safe to
+  merge without review": its author must be a current reader of the scope.
 
 - **carbon cannot prove who generated a scope's first key.** A keys file is
   only as trustworthy as the review that merged it. A new keys file in a pull

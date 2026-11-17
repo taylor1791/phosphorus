@@ -189,7 +189,27 @@ func (s *State) slotFindings() []Finding {
 				f.Hint = "Give the device a hybrid key, then a reader runs `carbon apply`."
 				out = append(out, f)
 			}
-			onTrunk := tk != nil && tk.Current == sf.Keys.Current && trunkCur.Slots[dev] == blob
+			onTrunk := tk != nil && tk.Current == sf.Keys.Current && trunkCur.Slots[dev] == blob &&
+				trunkCur.SlotTo[dev] == cur.SlotTo[dev]
+			// `to` is not authenticated: check it against the device's key
+			// in trunk policy.
+			if d, known := policyDevice(tp, dev); known && reviewed && !behind && cur.SlotTo[dev] != d.RecipientHash() {
+				g := base
+				g.Device, g.File = dev, sf.KeysFile
+				if onTrunk {
+					if sa.Names(dev) {
+						g.Severity, g.Rule = Warning, RuleSlotRekeyed
+						g.Message = fmt.Sprintf("The slot for %s in %s is wrapped to a key %s no longer has: the device's public key changed, so whoever holds the old key can still open %s. A pending revocation.", dev, sf.Name(), dev, sf.Name())
+						g.Hint = "A reader of " + sf.Name() + " runs `carbon apply`, which rotates the key."
+						out = append(out, g)
+					}
+				} else {
+					g.Severity, g.Rule = Error, RuleSlotRecipient
+					g.Message = fmt.Sprintf("The new slot for %s in %s says it is wrapped to %s, but %s's key in trunk policy hashes to %s: the label does not match the device.", dev, sf.Name(), cur.SlotTo[dev], dev, d.RecipientHash())
+					g.Hint = "Delete the slot line; a reader runs `carbon apply` to wrap the key to the device's real key."
+					out = append(out, g)
+				}
+			}
 			if sa.Names(dev) {
 				if reviewed && tk != nil && !onTrunk && !rotated && !behind {
 					g := base
@@ -254,6 +274,22 @@ func (s *State) slotFindings() []Finding {
 		f.Severity, f.File = Error, sf.KeysFile
 		switch {
 		case sf.Keys.Current == tk.Current:
+			// Slots are append-only until a rotation.
+			for _, dev := range sortedKeys(trunkCur.Slots) {
+				blob, ok := cur.Slots[dev]
+				if ok && blob == trunkCur.Slots[dev] && cur.SlotTo[dev] == trunkCur.SlotTo[dev] {
+					continue
+				}
+				what := "changed"
+				if !ok {
+					what = "removed"
+				}
+				g := base
+				g.Severity, g.Rule, g.Device, g.File = Error, RuleSlotRemoved, dev, sf.KeysFile
+				g.Message = fmt.Sprintf("Trunk's slot for %s in %s (key %s) was %s here. Slots are append-only until a rotation: removing or relabelling one hides a device that can still open the key, so `carbon apply` would not rotate it away.", dev, sf.Name(), tk.Current, what)
+				g.Hint = fmt.Sprintf("Restore it: git checkout %s -- %s. To revoke a device, remove it from policy and let a reader run `carbon apply`.", tp.Ref, sf.KeysFile)
+				out = append(out, g)
+			}
 			if cur.Inbox != trunkCur.Inbox || cur.InboxSealed != trunkCur.InboxSealed {
 				f.Rule = RuleKeyChanged
 				f.Message = fmt.Sprintf("The inbox key of %s (key %s) differs from trunk's. Drops would go to a key someone swapped on this branch.", sf.Name(), tk.Current)
@@ -309,8 +345,15 @@ func rotationProblems(sf *ScopeFiles, tk *store.Keys, sa *policy.ScopeAccess, el
 		}
 	}
 	allowed := map[string]bool{}
+	var mislabelled []string
 	for _, d := range eligible {
 		allowed[d.ID] = true
+		if _, ok := cur.Slots[d.ID]; ok && cur.SlotTo[d.ID] != d.RecipientHash() {
+			mislabelled = append(mislabelled, d.ID)
+		}
+	}
+	if len(mislabelled) > 0 {
+		probs = append(probs, "the new key's slots do not record the trunk policy key of: "+strings.Join(mislabelled, ", "))
 	}
 	var extra []string
 	for _, dev := range sortedKeys(cur.Slots) {
@@ -345,6 +388,19 @@ func rotationProblems(sf *ScopeFiles, tk *store.Keys, sa *policy.ScopeAccess, el
 	return probs
 }
 
+// policyDevice finds a device (person device or machine) by id in policy.
+func policyDevice(p *policy.Policy, id string) (policy.Device, bool) {
+	if p == nil {
+		return policy.Device{}, false
+	}
+	for _, d := range p.AllDevices() {
+		if d.ID == id {
+			return d, true
+		}
+	}
+	return policy.Device{}, false
+}
+
 // reaches reports whether following successors from id arrives at want.
 func reaches(ks *store.Keys, id, want string) bool {
 	for i := 0; i <= len(ks.Keys); i++ {
@@ -368,7 +424,7 @@ func sameRecord(a, b *store.Key) bool {
 		return false
 	}
 	for dev, blob := range a.Slots {
-		if b.Slots[dev] != blob {
+		if b.Slots[dev] != blob || a.SlotTo[dev] != b.SlotTo[dev] {
 			return false
 		}
 	}
