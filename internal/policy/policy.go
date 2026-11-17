@@ -9,9 +9,8 @@
 package policy
 
 import (
-	"errors"
 	"fmt"
-	"io/fs"
+	"os"
 	"sort"
 
 	"github.com/taylor1791/phosphorus/internal/agewrap"
@@ -28,7 +27,8 @@ const (
 	// OriginBootstrap: the trunk ref is missing or has no root carbon.toml,
 	// so policy was read from the working tree.
 	OriginBootstrap Origin = "bootstrap"
-	// OriginWorktreeTrunk: the workspace sets trunk = "worktree".
+	// OriginWorktreeTrunk: the trunk is "worktree" (from CARBON_TRUNK or git
+	// config only; never from the working tree file).
 	OriginWorktreeTrunk Origin = "trunk-is-worktree"
 	// OriginWorktree: read from the working tree on purpose (who, access,
 	// status, run, ...).
@@ -39,11 +39,14 @@ const (
 // source.
 type Policy struct {
 	Origin Origin
-	// Ref is the trunk ref when Origin is OriginTrunk or OriginBootstrap.
+	// Ref is the trunk ref when Origin is OriginTrunk, or OriginBootstrap with
+	// a ref that has no carbon.toml.
 	Ref string
-	// Notice is a one-line message for stderr when policy did not come from
-	// trunk although trunk was asked for; empty otherwise.
+	// Notice is a line for stderr when trunk policy fell back to the working
+	// tree (bootstrap); empty otherwise.
 	Notice string
+	// Trunk is how the trunk ref was chosen; nil for working-tree loads.
+	Trunk *Trunk
 
 	Workspace *config.Workspace
 	Packages  map[string]*config.Package
@@ -80,58 +83,12 @@ func LoadWorktree(root string) (*Policy, error) {
 }
 
 // LoadTrunk reads policy the way commands that grant or encrypt must: from
-// the trunk ref named by the working tree's workspace file, with the
-// bootstrap and trunk = "worktree" exceptions.
-//
-// The trunk ref's own workspace file decides whether trunk is "worktree":
-// a branch cannot opt itself out by editing its copy, except by naming a
-// different ref, which `check` should flag.
+// the trunk ref chosen by [ResolveTrunk] (CARBON_TRUNK, git config
+// carbon.trunk, the remote default branch), with the bootstrap and
+// "worktree" cases of [LoadTrunkAt]. worktree is unused and kept for
+// compatibility: nothing in the working tree chooses the trunk.
 func LoadTrunk(repo *gitx.Repo, worktree *config.Workspace) (*Policy, error) {
-	if worktree.TrunkIsWorktree() {
-		p, err := LoadWorktree(repo.Root)
-		if err != nil {
-			return nil, err
-		}
-		p.Origin = OriginWorktreeTrunk
-		return p, nil
-	}
-	ref := worktree.Trunk
-	ok, err := repo.RefExists(ref)
-	if err != nil {
-		return nil, err
-	}
-	bootstrap := func(why string) (*Policy, error) {
-		p, err := LoadWorktree(repo.Root)
-		if err != nil {
-			return nil, err
-		}
-		p.Origin, p.Ref = OriginBootstrap, ref
-		p.Notice = fmt.Sprintf("notice: %s; reading policy from the working tree until carbon is on trunk.", why)
-		return p, nil
-	}
-	if !ok {
-		return bootstrap(fmt.Sprintf("trunk %s does not exist", ref))
-	}
-	src := repo.Source(ref)
-	if _, err := src.ReadFile(config.FileName); errors.Is(err, fs.ErrNotExist) {
-		return bootstrap(fmt.Sprintf("trunk %s has no %s", ref, config.FileName))
-	} else if err != nil {
-		return nil, err
-	}
-	p, err := Load(src)
-	if err != nil {
-		return nil, fmt.Errorf("reading policy from trunk %s: %w", ref, err)
-	}
-	if p.Workspace.TrunkIsWorktree() {
-		wp, err := LoadWorktree(repo.Root)
-		if err != nil {
-			return nil, err
-		}
-		wp.Origin = OriginWorktreeTrunk
-		return wp, nil
-	}
-	p.Origin, p.Ref = OriginTrunk, ref
-	return p, nil
+	return LoadTrunkWith(repo, os.Getenv)
 }
 
 // Device is one public key that can hold a slot.

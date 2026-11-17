@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -115,5 +116,51 @@ func TestGitDirAndIgnore(t *testing.T) {
 	}
 	if _, err := r.Rel(filepath.Dir(r.Root)); err == nil {
 		t.Fatal("path outside repo accepted")
+	}
+}
+
+// Finding 8: git subprocesses never see carbon key material.
+func TestGitDoesNotSeeIdentity(t *testing.T) {
+	r := newRepo(t)
+	t.Setenv("CARBON_IDENTITY", "AGE-SECRET-KEY-1SECRETMATERIAL")
+	t.Setenv("CARBON_IDENTITY_FILE", "/secret/path")
+	out, err := r.Git("-c", "alias.envdump=!env", "envdump")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "CARBON_IDENTITY") || strings.Contains(string(out), "SECRETMATERIAL") {
+		t.Fatal("git saw CARBON_IDENTITY")
+	}
+	got := ScrubbedEnviron([]string{"A=1", "CARBON_IDENTITY=x", "CARBON_IDENTITY_FILE=y", "CARBON_IDENTITYX=z", "CARBON_ENV=dev"})
+	if strings.Join(got, ",") != "A=1,CARBON_IDENTITYX=z,CARBON_ENV=dev" {
+		t.Fatalf("ScrubbedEnviron = %v", got)
+	}
+}
+
+func TestConfigAndRemotes(t *testing.T) {
+	r := newRepo(t)
+	if _, ok, err := r.ConfigGet("carbon.trunk"); ok || err != nil {
+		t.Fatal(ok, err)
+	}
+	if err := r.ConfigSet("carbon.trunk", "origin/main"); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok, _ := r.ConfigGet("carbon.trunk"); !ok || v != "origin/main" {
+		t.Fatal(v)
+	}
+	if ok, _ := r.HasRemoteRefs(); ok {
+		t.Fatal("remotes in a new repo")
+	}
+	if _, ok, _ := r.RemoteDefault(); ok {
+		t.Fatal("remote default in a new repo")
+	}
+	write(t, r, "a", "a")
+	r.Commit("a", "a")
+	r.Git("update-ref", "refs/remotes/origin/master", "HEAD")
+	if ok, _ := r.HasRemoteRefs(); !ok {
+		t.Fatal("no remotes")
+	}
+	if d, ok, _ := r.RemoteDefault(); !ok || d != "origin/master" {
+		t.Fatal(d)
 	}
 }

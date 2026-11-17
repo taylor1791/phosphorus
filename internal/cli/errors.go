@@ -8,6 +8,7 @@ import (
 	"github.com/taylor1791/phosphorus/internal/agewrap"
 	"github.com/taylor1791/phosphorus/internal/config"
 	"github.com/taylor1791/phosphorus/internal/gitx"
+	"github.com/taylor1791/phosphorus/internal/policy"
 	"github.com/taylor1791/phosphorus/internal/scope"
 )
 
@@ -82,6 +83,23 @@ func AsError(err error) *Error {
 	var legacy *config.LegacyError
 	if errors.As(err, &legacy) {
 		return LegacyErr(legacy.Path)
+	}
+	var missing *policy.TrunkMissingError
+	if errors.As(err, &missing) {
+		return &Error{Code: ExitError, Message: missing.Error(), Err: err,
+			Details: []string{"carbon reads access policy and inbox keys from trunk, and will not fall back to the working tree while this clone has remotes."},
+			Hint:    "Fetch it:   git fetch\nOr choose another trunk for this clone:   git config " + policy.TrunkConfigKey + " <ref>"}
+	}
+	var notrunk *policy.NoTrunkError
+	if errors.As(err, &notrunk) {
+		return &Error{Code: ExitError, Message: notrunk.Error(), Err: err,
+			Details: []string{"carbon reads access policy and inbox keys from trunk: the remote default branch unless CARBON_TRUNK or git config " + policy.TrunkConfigKey + " says otherwise."},
+			Hint:    "Record the remote default:   git remote set-head origin -a\nOr fetch:   git fetch\nOr choose it:   git config " + policy.TrunkConfigKey + " <ref>"}
+	}
+	if errors.Is(err, config.ErrTrunkSettingRemoved) {
+		return &Error{Code: ExitError, Message: "carbon.toml still has [workspace] trunk, which was removed", Err: err,
+			Details: []string{"The trunk ref is chosen per clone, never by a commit: CARBON_TRUNK, then git config " + policy.TrunkConfigKey + ", then the remote default branch."},
+			Hint:    "Delete the trunk line from carbon.toml. If this clone needs a trunk other than the remote default:   git config " + policy.TrunkConfigKey + " <ref>"}
 	}
 	var conflict *config.ConflictError
 	if errors.As(err, &conflict) {

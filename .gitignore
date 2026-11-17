@@ -4,3 +4,4 @@
 *.test
 .direnv/
 result
+/.claude/
