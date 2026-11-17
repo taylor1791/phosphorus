@@ -84,7 +84,7 @@ func TestJoinPeopleDevicesMachines(t *testing.T) {
 	ada2.Fails(2, "join", "--person", "ada", "--device", "laptop")
 	ada2.Must("join", "--person", "ada", "--device", "desk", "--x25519")
 	person = r.Read(".carbon/people/ada.toml")
-	if !regexp.MustCompile(`desk = "age1[^p]`).MatchString(person) || !strings.Contains(person, "laptop = \"age1pq1") {
+	if !regexp.MustCompile(`desk = "age1`).MatchString(person) || regexp.MustCompile(`desk = "age1pq1`).MatchString(person) || !strings.Contains(person, "laptop = \"age1pq1") {
 		t.Fatalf("person file:\n%s", person)
 	}
 	// Only the first person joins teams automatically.

@@ -189,3 +189,27 @@ func TestKeyChangesInPolicyAreInTheBanner(t *testing.T) {
 	mustContain(t, "banner", res.Stdout, "TO REVIEW", "KEY CHANGED for lin/laptop: new fingerprint "+fp, "NEW DEVICE ada/desk")
 	ci(t, w.Repo, 0, "--strict") // review items, not failures
 }
+
+// Finding 9: check never bootstraps without --bootstrap, also when trunk
+// resolves but carbon 1.0 is not on it.
+func TestCheckNeverBootstrapsSilently(t *testing.T) {
+	r := clitest.NewRepo(t)
+	r.Write("README", "hello\n")
+	r.Commit("readme")
+	r.SetTrunk("main")
+	r.Branch("adopt")
+	ada := r.Person("ada")
+	ada.Must("init")
+	ada.Join()
+	r.Commit("adopt carbon")
+	res := r.Anyone().Fails(1, "check")
+	mustContain(t, "check", res.Stderr, "no carbon 1.0 carbon.toml", "carbon check --bootstrap")
+	r.Anyone().Must("check", "--bootstrap")
+	// A carbon 0.0.3 root on trunk (the migration cutover) needs it too.
+	r.Checkout("main")
+	r.Write("carbon.toml", "name = \"svc\"\n\n[push]\nx = { value = \"1\" }\n")
+	r.Commit("0.0.3 service")
+	r.Checkout("adopt")
+	r.Anyone().Fails(1, "check")
+	r.Anyone().Must("check", "--bootstrap")
+}

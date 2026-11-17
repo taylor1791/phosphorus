@@ -158,11 +158,23 @@ func runCheck(c *Context) error {
 		return &Error{Code: ExitError, Message: "check has no trunk to compare with: this clone has no remote-tracking refs and no " + policy.TrunkConfigKey,
 			Details: []string{
 				"Without trunk, every keys file would be judged by itself, so a forged key would pass.",
-				"In CI: set " + policy.TrunkEnv + " to the trunk ref (for example " + policy.TrunkEnv + "=origin/main) and fetch it " +
+				"In CI: set " + policy.TrunkEnv + " to the trunk ref (for example " + policy.TrunkEnv + "=refs/remotes/origin/main) and fetch it " +
 					"(e.g. git fetch --no-tags --depth=1 origin main:refs/remotes/origin/main); a checkout of one commit has no remote-tracking refs.",
 				"In a new repository that has no trunk yet, run `carbon check --bootstrap` to check the working tree against itself.",
 			},
-			Hint: "Set it:   export " + policy.TrunkEnv + "=origin/main   (and fetch it)\nOr for this clone:   git config " + policy.TrunkConfigKey + " <ref>"}
+			Hint: "Set it:   export " + policy.TrunkEnv + "=refs/remotes/origin/main   (and fetch it)\nOr for this clone:   git config " + policy.TrunkConfigKey + " <ref>"}
+	}
+	if st.Trunk != nil && st.Trunk.Origin == policy.OriginBootstrap && !c.Bool("bootstrap") {
+		// Trunk resolves, but carbon 1.0 is not on it (no carbon.toml, or a
+		// carbon 0.0.3 one: the migration cutover). check never judges
+		// a branch by its own files unless asked to.
+		return &Error{Code: ExitError, Message: fmt.Sprintf("check has no carbon policy on trunk to compare with: %s has no carbon 1.0 carbon.toml", st.TrunkRef.Display()),
+			Details: []string{
+				"Without policy on trunk, every keys file would be judged by itself, so a forged key would pass.",
+				"If this is the change that adopts carbon (or the carbon-migrate cutover), run `carbon check --bootstrap` to check the working tree against itself.",
+				"Otherwise trunk is the wrong ref: set " + policy.TrunkEnv + " or git config " + policy.TrunkConfigKey + " to the branch that has the carbon workspace.",
+			},
+			Hint: "carbon check --bootstrap"}
 	}
 	rep := st.Check(audit.Options{Now: c.Now(), MaxDebt: maxDebt, Strict: c.Bool("strict"), Unused: c.Bool("unused")})
 	res := checkResult{OK: !rep.Failed(), Strict: c.Bool("strict"), MaxDebt: c.String("max-debt"),
