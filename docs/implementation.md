@@ -142,8 +142,8 @@ inbox = "age1pq1..."
 inbox_sealed = "carbon1:..."
 
 [keys.k3f9q2.slots]
-"lin/laptop" = "age1:..."
-"machine:deploy-checkout" = "age1:..."
+"lin/laptop" = { to = "sha256:...", slot = "age1:..." }
+"machine:deploy-checkout" = { to = "sha256:...", slot = "age1:..." }
 
 [keys.k1a8c0]
 created = 2026-06-01T10:00:00Z
@@ -179,9 +179,20 @@ contain newlines, so the encoding is unambiguous.
 Times in associated data are RFC 3339 UTC with whole seconds, e.g.
 `2026-11-02T17:04:11Z`.
 
-### Slot: `age1:<base64(age file)>`
+### Slot: `{ to = "sha256:<hex>", slot = "age1:<base64(age file)>" }`
 
-A binary age file encrypted to exactly one recipient. Plaintext:
+One line per slot, an inline table with both fields required. `to` is
+`sha256:` and the hex SHA-256 of the recipient string the slot was wrapped to,
+exactly as written in the people or machine file (`agewrap.RecipientHash`,
+`policy.Device.RecipientHash`). It is not authenticated by cryptography;
+`check` protects it: a slot on trunk's current key may not be removed or
+altered while `current` is unchanged, and a new slot's `to` must equal the
+hash of trunk policy's key for that device. `apply` treats a slot whose `to`
+differs from the device's current policy key as a revocation and a grant
+(`SlotDiff.Rekeyed`): it rotates. A bare-string slot (the earlier form) is a
+parse error.
+
+`slot` is a binary age file encrypted to exactly one recipient. Plaintext:
 
 ```
 carbon/v1/slot
@@ -342,10 +353,14 @@ checks) reads the working tree.
 - **Grant.** `apply`, run by a reader, adds a slot for each device trunk policy
   names that has none.
 - **Removal.** When the current key has a slot for a device trunk policy no
-  longer names, `apply` rotates: new key and inbox pair, slots for the readers
+  longer names, or a slot whose `to` is not the hash of the device's
+  current policy key (re-keyed device), `apply` rotates: new key and inbox pair, slots for the readers
   that remain, every value re-sealed under the new key **keeping its `set`
   time**, the old key retired and sealed under the new one with
   `reason = "removed <who>"`.
+- **Removed readers cannot write.** `set` refuses (exit 3) when the policy in
+  effect no longer names the caller's device for the scope, even while its
+  slot still opens the key before the rotation.
 - **Drops.** `set` by a non-reader writes a drop to the trunk inbox key.
   Readers open drops transparently in `get`, `run`, `export`. `apply` promotes
   each drop to a sealed value, keeping its `set` time unless that is later

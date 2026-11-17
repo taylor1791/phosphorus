@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/taylor1791/phosphorus/internal/agewrap"
 	"github.com/taylor1791/phosphorus/internal/config"
 	"github.com/taylor1791/phosphorus/internal/policy"
 	"github.com/taylor1791/phosphorus/internal/scope"
@@ -100,6 +101,10 @@ func runSet(c *Context) error {
 			}
 			if opened != nil {
 				if err := c.VerifyTrunk(w, pkg, opened); err != nil {
+					opened.Close()
+					return err
+				}
+				if err := c.stillNamed(w, pkg.Name, env, ids); err != nil {
 					opened.Close()
 					return err
 				}
@@ -319,4 +324,35 @@ func (c *Context) secretValue(scopeName, name string, decl config.Secret, genera
 			Hint: fmt.Sprintf("Pipe the value in (printf %%s \"$VALUE\" | carbon set %s) or type it at the prompt.", name)}
 	}
 	return v, nil
+}
+
+// stillNamed refuses a caller whose slot still opens the key but whom the
+// policy in effect (trunk, or the working tree in bootstrap and worktree
+// mode) no longer names for the scope: a removed reader, before the
+// rotation, must not write values that later look reader-made. They may
+// not drop either; they simply cannot set.
+func (c *Context) stillNamed(w *Workspace, pkg, env string, ids []agewrap.Identity) error {
+	pol, err := c.TrunkPolicy(w)
+	if err != nil {
+		return err
+	}
+	sa, err := pol.Scope(pkg, env)
+	if err != nil {
+		return err
+	}
+	if sa.Readable(DeviceIDs(Me(pol, ids))...) {
+		return nil
+	}
+	name := sa.Name()
+	where := "trunk policy"
+	if pol.Origin != policy.OriginTrunk {
+		where = "policy"
+	}
+	return &Error{Code: ExitNoAccess,
+		Message: fmt.Sprintf("%s no longer names you for %s", where, name),
+		Details: []string{
+			"Your device still holds a slot for the current key, but access was removed; the key will be rotated by the next `carbon apply`.",
+			"Values you seal now would look as if a reader wrote them, so carbon refuses.",
+		},
+		Hint: fmt.Sprintf("To ask for access again:   carbon request %s --env %s", pkg, env)}
 }

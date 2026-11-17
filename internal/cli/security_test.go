@@ -240,3 +240,21 @@ func TestJoinAddsToTeamsOnlyBeforeTrunk(t *testing.T) {
 	r.Person("ada").Join()
 	contains(t, "teams", r.Read(".carbon/teams.toml"), "engineering = []")
 }
+
+// B: a reader removed from trunk policy, whose slot still opens the key
+// until the next rotation, cannot seal values that would look reader-made.
+func TestRemovedReaderCannotSetBeforeRotation(t *testing.T) {
+	w := clitest.Standard(t)
+	w.Lin.Stdin("sk").In(w.PkgDir).Must("set", "stripe_api_key", "--env", "prod")
+	w.Commit("key")
+	w.SetTeams(map[string][]string{"engineering": {"ada", "lin", "sam"}, "payments": {}})
+	w.Commit("remove lin from payments")
+	res := w.Lin.Stdin("sk_after_removal").In(w.PkgDir).Fails(3, "set", "stripe_api_key", "--env", "prod")
+	contains(t, "stderr", res.Stderr, "trunk policy no longer names you for checkout/prod")
+	// Reading is unaffected until the rotation.
+	if got := w.Lin.In(w.PkgDir).Must("get", "stripe_api_key", "--env", "prod").Stdout; got != "sk" {
+		t.Fatalf("get = %q", got)
+	}
+	// Still named: the machine may set.
+	w.Deploy.Stdin("sk2").In(w.PkgDir).Must("set", "stripe_api_key", "--env", "prod")
+}

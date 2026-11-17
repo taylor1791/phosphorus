@@ -7,6 +7,8 @@ import (
 	"io"
 	"strings"
 	"text/tabwriter"
+
+	"github.com/taylor1791/phosphorus/internal/policy"
 )
 
 // Context is what a command runs with.
@@ -22,7 +24,8 @@ type Context struct {
 	// ArgsLenAtDash is the number of positionals before "--", or -1.
 	ArgsLenAtDash int
 
-	ws *Workspace
+	ws       *Workspace
+	trunkPol *policy.Policy // cached by TrunkPolicy: loaded once per command
 }
 
 // JSON reports whether --json was given.

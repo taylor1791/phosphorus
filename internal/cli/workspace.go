@@ -186,6 +186,9 @@ func (c *Context) Environment(w *Workspace) (string, error) {
 // trunk = "worktree" exceptions, and prints the bootstrap notice on stderr.
 // Use it for anything that wraps keys or writes drops.
 func (c *Context) TrunkPolicy(w *Workspace) (*policy.Policy, error) {
+	if c.trunkPol != nil {
+		return c.trunkPol, nil
+	}
 	p, err := policy.LoadTrunkWith(w.Repo, c.Getenv)
 	if err != nil {
 		return nil, err
@@ -193,6 +196,7 @@ func (c *Context) TrunkPolicy(w *Workspace) (*policy.Policy, error) {
 	if p.Notice != "" {
 		c.Notice("%s", p.Notice)
 	}
+	c.trunkPol = p
 	return p, nil
 }
 
