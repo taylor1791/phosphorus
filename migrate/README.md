@@ -35,7 +35,7 @@ directory.
 | `--default-env <name>` | Environment name for the unnamed default registry (default `dev`). |
 | `--env-name old=new` | Rename a registry on the way (repeatable), e.g. `--env-name prd=prod`. |
 | `--package-name old=new` | Rename a service (repeatable). Needed for names 1.0 rejects or reserves (`carbon`, `env`). |
-| `--trunk <ref>` | The workspace's `trunk` (default: origin's HEAD, else `origin/main`). |
+| `--trunk <ref>` | Set `CARBON_TRUNK=<ref>` for the `carbon` commands this run makes, and nothing else; no file or git config is written. Default: carbon's own choice. |
 | `--key <file>` | Use a 0.0.3 key from elsewhere. Only the repository's own `.carbon/private-key.age` is moved. |
 | `--force` | Run on a dirty working tree. Rollback by git is then no longer exact. |
 | `--show-files` | Also print the new files' contents during `--write` (a dry run always does). |
@@ -56,7 +56,9 @@ was changed).
    - `carbon.toml` at the root: `[workspace]` with one environment per
      registry and `[access]` listing, per environment, the people the registry
      is actually encrypted to. If the root was itself a 0.0.3 service, the
-     workspace and that package share the file.
+     workspace and that package share the file. No `trunk` is written: carbon
+     chooses trunk from `CARBON_TRUNK`, then `git config carbon.trunk`, then
+     the remote default branch.
    - `.carbon/people/<person>.toml` for every key in the old setup: each sops
      `users` entry, plus any recipient nobody named (as `unknown-N`). Keys move
      over unchanged as a device named `migrated`.
@@ -64,9 +66,15 @@ was changed).
      with a `# carbon-migrate:` comment for each item that needs a decision.
    - the `.gitattributes` line `carbon init` adds for keys files.
 3. **Copies** every secret value with `carbon set <name> --env <env> --package
-   <pkg>`, the value on stdin. The first set in each scope creates its key,
-   wrapped to every reader's device, so access carries over without
-   `carbon apply`.
+   <pkg>`, the value on stdin (`--allow-empty` for an empty value). The first
+   set in each scope creates its key, wrapped to every reader's device, so
+   access carries over without `carbon apply`. On the cutover branch trunk
+   still holds the 0.0.3 files, which carbon treats as "not adopted on trunk
+   yet": it reads the policy just written in the working tree and says so in
+   a notice. Carbon 1.0 lets only a device that policy names as a reader
+   create a scope's first key, so you must be a reader of every environment
+   that gets values; you are when your key can decrypt every registry, and the
+   plan blocks, naming the registry, when you are not.
 4. **Moves** `.carbon/private-key.age` to the 1.0 identity path
    (`$CARBON_IDENTITY_FILE`, else `$XDG_CONFIG_HOME/carbon/identity`, else
    `~/.config/carbon/identity`), mode 0600, unchanged. It never overwrites an
@@ -132,13 +140,13 @@ cannot reference each other.
 - **`{{carbon.registry}}`** where the registry was renamed (the default
   registry was `""` and is now `dev`).
 - **Plaintext `.environment.json`** files left by 0.0.3 `pull`: delete them.
-- Empty secret values (1.0 refuses them) and anything 0.0.3 itself rejected.
+- Anything 0.0.3 itself rejected (empty secret values are migrated as empty).
 
 Blockers (nothing is changed until they are fixed): a dirty tree, a registry
 your key cannot decrypt, a different identity already installed, a service in
 a dot-directory or `node_modules` (1.0 does not look there; `git mv` it
 first), duplicate or reserved package names, environment names 1.0 rejects,
-and a trunk whose root `carbon.toml` is a 0.0.3 file (see below).
+and an environment you would not be a reader of.
 
 ## Rolling back
 
@@ -169,24 +177,33 @@ mkdir -p ~/.config/carbon && mv .carbon/private-key.age ~/.config/carbon/identit
 Their access is already in place: their key is a device in
 `.carbon/people/<them>.toml` and has a slot in every scope they could read.
 
-## Trunk with a 0.0.3 root `carbon.toml`
+## Trunk during the cutover
 
-Carbon 1.0 reads policy from trunk's root `carbon.toml`. If trunk's root file
-is a 0.0.3 service, every `carbon set` stops on it, so `carbon-migrate`
-refuses. Run with `--trunk worktree`, merge, then set `trunk` back to your
-real trunk ref in a follow-up change.
+Run the migration on a branch off trunk. While trunk still has the 0.0.3
+files (a 0.0.3 root `carbon.toml`, or none), carbon reads policy from the
+working tree, the policy this tool just wrote, and prints a notice saying so.
+Once the branch merges, trunk has the 1.0 workspace and policy is read from
+trunk as usual. If carbon cannot choose a trunk (an override that does not
+resolve, or remote-tracking refs without a default branch), `carbon set`
+fails and the rollback commands are printed; fix it with
+`git remote set-head origin -a`, or pass `--trunk <ref>` to set
+`CARBON_TRUNK` for this run only.
 
 ## Tests
 
 The exit test builds a real 0.0.3 repository with the real 0.0.3 script
 (`internal/migrate/testdata/carbon-0.0.3`, a verbatim copy of carbon 0.0.3)
 under nushell, sops and rage — three users, three registries, pushes, a
-`rekey`, a pending request, a `pull` — reads the expected values back with
-0.0.3's own `carbon read`, migrates, and checks that every value reads back
-identical through 1.0 `carbon get`, that the policy files parse (for go-toml
-and for `carbon ls`), that access carried over, and that the old files are
-gone. Other tests cover the dry run, the dirty-tree gate, the identity guard,
-and a failure part-way followed by running the printed rollback commands.
+`rekey`, a pending request, a `pull`, an empty value, a 0.0.3 service at the
+root — pushes it to a bare `origin` (so trunk is `origin/main` with the 0.0.3
+files) and migrates on a branch, as a real cutover would. It reads the
+expected values back with 0.0.3's own `carbon read`, migrates, and checks
+that every value reads back identical through 1.0 `carbon get`, that the
+policy files parse (for go-toml and for `carbon ls`), that access carried
+over, and that the old files are gone. Other tests cover the dry run, the
+dirty-tree gate, the identity guard, a failure part-way followed by running
+the printed rollback commands, and the built `carbon-migrate` binary end to
+end (dry run, usage error, `--write`).
 
 The 0.0.3 script needs nushell 0.116 (the version its flake pins; 0.108 cannot
 parse it). From this directory:

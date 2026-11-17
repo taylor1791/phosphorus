@@ -54,7 +54,7 @@ func main() {
 	fs.StringVar(&o.DefaultEnv, "default-env", "dev", "environment `name` for the unnamed 0.0.3 default registry")
 	fs.Var(envNames, "env-name", "rename a registry: `old=new` (repeatable)")
 	fs.Var(pkgNames, "package-name", "rename a service: `old=new` (repeatable)")
-	fs.StringVar(&o.Trunk, "trunk", "", "trunk `ref` for the workspace (default: origin's HEAD, else origin/main)")
+	fs.StringVar(&o.Trunk, "trunk", "", "set CARBON_TRUNK=`ref` for the carbon commands this run makes; nothing is written (default: carbon's own choice)")
 	fs.StringVar(&o.Key, "key", "", "the 0.0.3 private key `file` (default: .carbon/private-key.age; only that one is moved)")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		if err == flag.ErrHelp {

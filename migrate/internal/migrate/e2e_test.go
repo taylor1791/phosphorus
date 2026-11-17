@@ -28,6 +28,10 @@ var secretsInFixture = []struct {
 	// A static variant of a command secret: ends in "\r\n", so the stdin
 	// framing for `carbon set` is exercised for real.
 	{"stg", "db", "cert", "db", "stg", "cert", true},
+	{"", "db", "optional", "db", "dev", "optional", true},
+	// An empty static value: copied with `carbon set --allow-empty`.
+	{"prd", "db", "optional", "db", "prd", "optional", true},
+	{"stg", "db", "optional", "db", "stg", "optional", true},
 	{"", "api", "session_key", "api", "dev", "session_key", true},
 	{"prd", "api", "session_key", "api", "prd", "session_key", true},
 	{"stg", "api", "session_key", "api", "stg", "session_key", true},
@@ -57,8 +61,8 @@ func TestMigrateFixture(t *testing.T) {
 			secretValues = append(secretValues, v)
 		}
 	}
-	if len(wants) != 14 {
-		t.Fatalf("fixture has %d secret values, want 14", len(wants))
+	if len(wants) != 17 {
+		t.Fatalf("fixture has %d secret values, want 17", len(wants))
 	}
 	if v, _ := f.oldValue("stg", "db", "cert"); !strings.HasSuffix(v, "\r\n") {
 		t.Fatalf("fixture: stg cert should end in CRLF, got %q", v)
@@ -86,7 +90,7 @@ func TestMigrateFixture(t *testing.T) {
 	if code != ExitOK {
 		t.Fatalf("dry run exit %d\nstdout:\n%s\nstderr:\n%s", code, out, errOut)
 	}
-	for _, s := range []string{"dry run", "Secrets to copy with `carbon set` (14 values", "db/prd", "Needs a manual choice", "--- services/api/carbon.toml", ".carbon/registry.prd.yaml"} {
+	for _, s := range []string{"dry run", "Secrets to copy with `carbon set` (17 values", "db/prd", "Needs a manual choice", "--- services/api/carbon.toml", ".carbon/registry.prd.yaml"} {
 		if !strings.Contains(out, s) {
 			t.Errorf("dry run output lacks %q", s)
 		}
@@ -106,7 +110,7 @@ func TestMigrateFixture(t *testing.T) {
 		t.Fatalf("migrate --write exit %d", code)
 	}
 	assertNoSecrets(t, "--write", out+errOut, secretValues)
-	if !strings.Contains(out, "14 of 14 value(s) read back identical") {
+	if !strings.Contains(out, "17 of 17 value(s) read back identical") {
 		t.Errorf("migrate did not report its own verification")
 	}
 
@@ -156,24 +160,37 @@ func TestMigrateFixture(t *testing.T) {
 			t.Errorf("%s does not parse: %v", p, err)
 		}
 	}
-	for _, pkg := range []string{"db", "api"} {
+	for _, pkg := range []string{"db", "api", "web"} {
 		for _, env := range []string{"dev", "prd", "stg"} {
 			if _, stderr, err := f.cmd(f.root, f.env, nil, f.carbon, "ls", "--package", pkg, "--env", env); err != nil {
 				t.Errorf("carbon ls --package %s --env %s: %v\n%s", pkg, env, err, stderr)
 			}
 		}
 	}
+	// Trunk (origin/main) still holds the 0.0.3 root file: carbon read the
+	// working tree's policy, and said so.
+	if !strings.Contains(out, "still has a carbon 0.0.3 carbon.toml") {
+		t.Error("carbon's bootstrap notice for a 0.0.3 trunk was not shown")
+	}
 
 	var ws struct {
+		Name      string `toml:"name"`
 		Workspace struct {
 			Environments       []string `toml:"environments"`
 			DefaultEnvironment string   `toml:"default_environment"`
-			Trunk              string   `toml:"trunk"`
+			Trunk              *string  `toml:"trunk"`
 		} `toml:"workspace"`
 		Access map[string][]string `toml:"access"`
+		Env    map[string]string   `toml:"env"`
 	}
 	if err := toml.Unmarshal([]byte(f.read("carbon.toml")), &ws); err != nil {
 		t.Fatal(err)
+	}
+	if ws.Workspace.Trunk != nil {
+		t.Error("the workspace file names a trunk, which carbon 1.0 rejects")
+	}
+	if ws.Name != "web" || ws.Env["db_host"] != "${db.host}" {
+		t.Errorf("root package: name %q env %v", ws.Name, ws.Env)
 	}
 	if got := strings.Join(ws.Workspace.Environments, ","); got != "dev,prd,stg" || ws.Workspace.DefaultEnvironment != "dev" {
 		t.Errorf("environments %s default %s", got, ws.Workspace.DefaultEnvironment)
@@ -270,7 +287,7 @@ func TestMigrateFixture(t *testing.T) {
 func assertNoSecrets(t *testing.T, what, output string, values []string) {
 	t.Helper()
 	for _, v := range values {
-		if strings.Contains(output, v) {
+		if v != "" && strings.Contains(output, v) {
 			t.Errorf("%s output contains a secret value", what)
 		}
 	}
@@ -284,7 +301,7 @@ func TestMigrateRefusesDirtyTree(t *testing.T) {
 	if code != ExitBlocked || !strings.Contains(out, "uncommitted changes") {
 		t.Fatalf("dirty tree: exit %d, output:\n%s", code, out)
 	}
-	if !f.exists(".carbon/registry.yaml") || f.exists("carbon.toml") {
+	if !f.exists(".carbon/registry.yaml") || strings.Contains(f.read("carbon.toml"), "[workspace]") {
 		t.Fatal("a blocked run changed files")
 	}
 }

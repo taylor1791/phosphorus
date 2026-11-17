@@ -211,6 +211,13 @@ value = "-----BEGIN-----\r\nstg\r\n"
 
 [[push.cert]]
 command = "cat cert.txt"
+
+[[push.optional]]
+registry_pattern = "^prd$"
+value = ""
+
+[[push.optional]]
+command = "cat optional.txt"
 `
 	if withRetired {
 		s += "\n[push.retired_flag]\ncommand = \"echo gone\"\n"
@@ -281,6 +288,7 @@ var fixtureFiles = map[string]string{
 	"services/api/session-stg.txt": "sess-stg\n",
 	"services/api/token.txt":       "tok-123\n",
 	"services/db/cert.txt":         "-----BEGIN-----\ncmd\n-----END-----\n",
+	"services/db/optional.txt":     "opt-value-9f3\n",
 }
 
 // newFixture builds the 0.0.3 repository:
@@ -362,8 +370,19 @@ func newFixture(t *testing.T) *fixture {
 	// The committed state.
 	f.write("services/db/carbon.toml", dbToml("", false))
 	f.write("services/api/carbon.toml", apiToml("", true, true))
+	// A service at the root, so trunk's root carbon.toml is a 0.0.3 file.
+	f.write("carbon.toml", "name = \"web\"\n\n[pull.db_host]\nservice = \"db\"\nname = \"host\"\n")
 	f.git("add", "-A")
 	f.git("commit", "-qm", "carbon 0.0.3 fixture")
+
+	// The realistic cutover: trunk (origin/main, the remote's default
+	// branch) holds the 0.0.3 files, and the migration runs on a branch.
+	origin := filepath.Join(tmp, "origin.git")
+	f.must(tmp, f.env, "git", "init", "-q", "--bare", origin)
+	f.git("remote", "add", "origin", origin)
+	f.git("push", "-q", "-u", "origin", "main")
+	f.git("remote", "set-head", "origin", "main")
+	f.git("checkout", "-q", "-b", "carbon-1.0")
 	return f
 }
 

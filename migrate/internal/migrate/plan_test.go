@@ -37,7 +37,6 @@ func baseInput(services []*legacy.Service, values map[string]legacy.Values, regs
 		Repo:          &legacy.Repo{Services: services, Registries: regs},
 		Values:        values,
 		DecryptErrors: map[string]string{},
-		Trunk:         "origin/main",
 		Me:            keyA,
 		KeyFile:       legacy.PrivateKeyFile,
 		MoveKey:       true,
@@ -194,7 +193,6 @@ func TestPlanBlockers(t *testing.T) {
 		{"env collision", func(in *Input) { in.EnvNames = map[string]string{"prd": "dev"} }, []string{"a/carbon.toml:a"}, "would both become environment"},
 		{"bad env name", func(in *Input) { in.EnvNames = map[string]string{"prd": "Prod"} }, []string{"a/carbon.toml:a"}, "cannot be the environment"},
 		{"identity conflict", func(in *Input) { in.IdentityExists, in.IdentityExisting = true, keyB }, []string{"a/carbon.toml:a"}, "never overwrites an identity"},
-		{"legacy trunk", func(in *Input) { in.TrunkRootLegacy = true }, []string{"a/carbon.toml:a"}, "--trunk worktree"},
 		{"cannot decrypt", func(in *Input) { in.DecryptErrors = map[string]string{"prd": "no key"} }, []string{"a/carbon.toml:a"}, "cannot decrypt .carbon/registry.prd.yaml"},
 	}
 	for _, c := range cases {
@@ -229,6 +227,27 @@ func TestPlanPeople(t *testing.T) {
 	}
 	if !contains(p.Manual, "no `users` entry names it") {
 		t.Errorf("manual = %v", p.Manual)
+	}
+}
+
+// TestPlanMigratorMustReadEveryScope: carbon 1.0 lets only a reader create a
+// scope's first key, so the plan blocks when the migrator's key would not
+// read an environment that gets values; empty values are copied.
+func TestPlanMigratorMustReadEveryScope(t *testing.T) {
+	db := svc(t, "db/carbon.toml", "name = \"db\"\n[push.pw]\ncommand = \"x\"\n")
+	alice := legacy.User{Name: "alice", Key: keyA}
+	bob := legacy.User{Name: "bob", Key: keyB}
+	values := map[string]legacy.Values{"": {"db": {"pw": ""}}, "prd": {"db": {"pw": "p"}}}
+	p := Build(baseInput([]*legacy.Service{db}, values, reg("", alice), reg("prd", bob)))
+	if !contains(p.Blockers, "would not be a reader of environment prd") {
+		t.Fatalf("blockers = %v", p.Blockers)
+	}
+	p = Build(baseInput([]*legacy.Service{db}, values, reg("", alice), reg("prd", alice, bob)))
+	if len(p.Blockers) > 0 {
+		t.Fatalf("blockers = %v", p.Blockers)
+	}
+	if len(p.Copies) != 2 || p.Copies[0].Value() != "" || p.Copies[0].Env != "dev" {
+		t.Fatalf("an empty value was not copied: %+v", p.Copies)
 	}
 }
 

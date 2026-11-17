@@ -205,21 +205,8 @@ func (r *runner) run() (int, error) {
 		}
 	}
 
-	// Trunk.
+	// Trunk: only an override for the carbon subprocesses.
 	in.Trunk = r.o.Trunk
-	if in.Trunk == "" {
-		in.Trunk = "origin/main"
-		if out, err := r.git("symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"); err == nil {
-			if t := strings.TrimSpace(string(out)); t != "" {
-				in.Trunk = t
-			}
-		}
-	}
-	if in.Trunk != "worktree" {
-		if out, err := r.git("show", in.Trunk+":"+legacy.ServiceFile); err == nil && legacy.IsLegacyConfig(out) {
-			in.TrunkRootLegacy = true
-		}
-	}
 
 	// The 1.0 identity.
 	in.IdentityPath = r.identityPath()
@@ -325,6 +312,9 @@ func appendOnce(xs []string, x string) []string {
 // without anything that would pick a different identity or environment.
 func (r *runner) carbonEnv(identityFile string) []string {
 	env := legacy.WithoutEnv(r.environ, "CARBON_IDENTITY", "CARBON_IDENTITY_FILE", "CARBON_ENV")
+	if r.o.Trunk != "" {
+		env = append(legacy.WithoutEnv(env, "CARBON_TRUNK"), "CARBON_TRUNK="+r.o.Trunk)
+	}
 	return append(env, "CARBON_IDENTITY_FILE="+identityFile)
 }
 
@@ -370,8 +360,16 @@ func (r *runner) execute(plan *Plan, carbon, keyPath string) error {
 			}
 		}
 		stdin := stdinFor(c.value)
-		_, stderr, err := r.carbonCmd(carbon, keyPath, stdin, "set", c.Name, "--env", c.Env, "--package", c.Package)
+		args := []string{"set", c.Name, "--env", c.Env, "--package", c.Package}
+		if c.value == "" {
+			args = append(args, "--allow-empty")
+		}
+		_, stderr, err := r.carbonCmd(carbon, keyPath, stdin, args...)
 		clear(stdin)
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && ee.ExitCode() == 3 {
+			return fmt.Errorf("`carbon set %s --env %s --package %s` refused (exit 3): your key is not a reader of %s in the policy carbon is using, and carbon 1.0 only lets a reader create a scope's first key. Check that %s lists you, and that carbon reads the working tree's policy (its notice says so); if trunk already has a 1.0 carbon.toml it reads trunk's instead.\n%s", c.Name, c.Env, c.Package, c.Scope(), "carbon.toml [access]", indentLines(stderr))
+		}
 		if err != nil {
 			return fmt.Errorf("`carbon set %s --env %s --package %s` failed (%d of %d): %v\n%s", c.Name, c.Env, c.Package, i+1, len(plan.Copies), err, indentLines(stderr))
 		}

@@ -30,7 +30,10 @@ type Input struct {
 	DefaultEnv   string            // name for the unnamed registry ("dev")
 	EnvNames     map[string]string // old registry name -> environment
 	PackageNames map[string]string // old service name -> package name
-	Trunk        string
+	// Trunk is a CARBON_TRUNK override for the carbon subprocesses only
+	// ("" lets carbon choose: CARBON_TRUNK, git config carbon.trunk, the
+	// remote default branch). Nothing is written for it.
+	Trunk string
 
 	// Me is the recipient of the 0.0.3 key running the migration.
 	Me string
@@ -51,8 +54,6 @@ type Input struct {
 	Existing func(string) bool
 	// GitAttributes is the current .gitattributes content (nil if absent).
 	GitAttributes []byte
-	// TrunkRootLegacy is true when the trunk ref has a 0.0.3 root carbon.toml.
-	TrunkRootLegacy bool
 	// RootWorkspace is true when the root carbon.toml is already a 1.0
 	// workspace file.
 	RootWorkspace bool
@@ -127,6 +128,8 @@ type Plan struct {
 	Me             string // person id of the migrator, if known
 	Manual         []string
 	Blockers       []string
+
+	notReader map[string]bool // environments the migrator would not read
 }
 
 // Value returns the plaintext of a copy. It is only ever piped to carbon.
@@ -171,6 +174,7 @@ func (pl *planner) build() {
 	pl.planEnvs()
 	pl.planPeople()
 	pl.planPackages()
+	pl.checkReaderOfCopies()
 	pl.planOrphans()
 	pl.planTrunk()
 	pl.planIdentity()
@@ -331,24 +335,45 @@ func (pl *planner) planPeople() {
 	}
 	sort.Slice(p.People, func(i, j int) bool { return p.People[i].ID < p.People[j].ID })
 	if pl.in.Me != "" && p.Me == "" {
-		pl.block("your 0.0.3 key (%s) is not a recipient of any registry, so you cannot copy the values.", short(pl.in.Me))
+		pl.block("your 0.0.3 key (%s) is not a recipient of any registry, so it would be a reader of nothing in the new policy. Carbon 1.0 only lets a device that policy names as a reader create a scope's first key (`carbon set` exits 3 otherwise), so you cannot write the values. Run carbon-migrate as someone every registry is encrypted to.", short(pl.in.Me))
 	}
+	pl.p.notReader = map[string]bool{}
 	if p.Me != "" {
 		for _, e := range pl.envs {
-			if !e.Reg.HasRegistry {
-				continue
-			}
 			reads := false
 			for _, env := range byID[p.Me].Reads {
 				if env == e.New {
 					reads = true
 				}
 			}
-			if !reads {
-				if _, bad := pl.in.DecryptErrors[e.Old]; !bad {
-					pl.block("your key is not a recipient of %s, so `carbon get` could not verify environment %s.", e.Reg.RegistryFile, e.New)
-				}
+			if reads {
+				continue
 			}
+			pl.p.notReader[e.New] = true
+		}
+	}
+}
+
+// checkReaderOfCopies blocks when the migrating user would not be a reader
+// of an environment that gets values: carbon 1.0 lets only a device that the
+// policy in effect (the working tree's, during the cutover) names create a
+// scope's first key, and `carbon get` needs it to verify.
+func (pl *planner) checkReaderOfCopies() {
+	envs := map[string]bool{}
+	for _, c := range pl.p.Copies {
+		if pl.p.notReader[c.Env] {
+			envs[c.Env] = true
+		}
+	}
+	for _, env := range sortedKeys(envs) {
+		for _, e := range pl.envs {
+			if e.New != env {
+				continue
+			}
+			if _, bad := pl.in.DecryptErrors[e.Old]; bad {
+				continue // already blocked: cannot decrypt
+			}
+			pl.block("you (%s) would not be a reader of environment %s: your key is not a recipient of %s. Carbon 1.0 only lets a reader create a scope's first key, so `carbon set` would exit 3 there. With 0.0.3, run `carbon request %s` and have a current reader run `carbon rekey %s` and commit, or run carbon-migrate as someone who reads every registry.", pl.p.Me, env, e.Reg.RegistryFile, e.Old, e.Old)
 		}
 	}
 }
@@ -476,11 +501,6 @@ func (pl *planner) planSecret(pkg *Package, key, name string, exprs []legacy.Exp
 	for _, e := range pl.envs {
 		vals := pl.in.Values[e.Old]
 		if v, ok := vals.Get(s.Name, key); ok {
-			if v == "" {
-				pl.noteBoth(pkg, "secret %s is empty in %s; carbon 1.0 refuses empty values, so it was not copied.", name, e.New)
-				unset = append(unset, e.New)
-				continue
-			}
 			pl.p.Copies = append(pl.p.Copies, Copy{Package: pkg.Name, Env: e.New, Name: name,
 				Source: fmt.Sprintf("registry %s, %s.%s", e.Reg.Label(), s.Name, key), value: v})
 			pl.markValue(pkg.Name, name, e.New)
@@ -489,12 +509,10 @@ func (pl *planner) planSecret(pkg *Package, key, name string, exprs []legacy.Exp
 		sel, err := legacy.Select(exprs, e.Old)
 		if err == nil && sel.Value != nil {
 			v := pushTemplate(*sel.Value, e.Old)
-			if v != "" {
-				pl.p.Copies = append(pl.p.Copies, Copy{Package: pkg.Name, Env: e.New, Name: name,
-					Source: fmt.Sprintf("carbon.toml static value for registry %s (never pushed there)", e.Reg.Label()), value: v})
-				pl.markValue(pkg.Name, name, e.New)
-				continue
-			}
+			pl.p.Copies = append(pl.p.Copies, Copy{Package: pkg.Name, Env: e.New, Name: name,
+				Source: fmt.Sprintf("carbon.toml static value for registry %s (never pushed there)", e.Reg.Label()), value: v})
+			pl.markValue(pkg.Name, name, e.New)
+			continue
 		}
 		unset = append(unset, e.New)
 	}
@@ -825,11 +843,11 @@ func (pl *planner) planOrphans() {
 	}
 }
 
+// planTrunk records the CARBON_TRUNK override, if any. On the cutover branch
+// trunk still holds 0.0.3 files (or nothing), which carbon treats as "not
+// adopted yet" and reads the working tree's policy, the policy written here.
 func (pl *planner) planTrunk() {
 	pl.p.Trunk = pl.in.Trunk
-	if pl.in.TrunkRootLegacy && pl.in.Trunk != "worktree" {
-		pl.block("trunk %s has a carbon 0.0.3 carbon.toml at the root, and carbon 1.0 reads policy from trunk's root carbon.toml, so `carbon set` would stop on it. Re-run with --trunk worktree (policy is then read from the working tree), and set trunk back to %q once this branch has merged.", pl.in.Trunk, pl.in.Trunk)
-	}
 }
 
 func (pl *planner) planIdentity() {
@@ -907,7 +925,7 @@ func renderWorkspace(p *Plan) string {
 	}
 	fmt.Fprintf(&b, "environments = [%s]\n", strings.Join(envs, ", "))
 	fmt.Fprintf(&b, "default_environment = %s\n", quote(p.DefaultEnv))
-	fmt.Fprintf(&b, "trunk = %s\n\n[access]\n", quote(p.Trunk))
+	b.WriteString("\n[access]\n")
 	for _, e := range p.Envs {
 		var readers []string
 		for _, per := range p.People {

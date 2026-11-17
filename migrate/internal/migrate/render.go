@@ -20,7 +20,11 @@ func (p *Plan) Render(w io.Writer, contents bool) {
 		}
 		fmt.Fprintf(w, "  %-12s from %s%s\n", e.New, from, def)
 	}
-	fmt.Fprintf(w, "  trunk = %q\n", p.Trunk)
+	if p.Trunk != "" {
+		fmt.Fprintf(w, "  trunk: CARBON_TRUNK=%s for the carbon commands this run makes (nothing is written)\n", p.Trunk)
+	} else {
+		fmt.Fprintln(w, "  trunk: carbon chooses it (CARBON_TRUNK, git config carbon.trunk, else the remote default branch)")
+	}
 
 	fmt.Fprintln(w, "\nPeople (from sops `users` and registry recipients)")
 	for _, per := range p.People {
