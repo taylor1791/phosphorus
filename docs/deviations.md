@@ -92,5 +92,107 @@ Each entry says what differs from `docs/implementation.md` and why.
   keys.
 - **A value under a retired key** proves only that its writer held that key,
   which a removed reader still may. Readers can still open it (old branches
-  must merge), `ls` marks it "author unproven", and `apply` should list such
-  values for confirmation before re-sealing them.
+  must merge), `ls` marks it "author unproven", and `apply` lists each such
+  value by name before re-sealing it (see 22 below).
+
+## User management: decisions (apply, request, remove, rename)
+
+16. **`apply` creates keys** for scopes whose package declares secrets and
+    that have no key on the branch or on trunk, wrapped to the eligible
+    devices trunk policy names, but only when the caller is one of those
+    devices (as for `set`). Otherwise the scope is reported as waiting for
+    one of them. Two branches that both create the same scope conflict on
+    its keys file.
+17. **`apply` scope filters** are `--package` and `--env` only (both global
+    flags); `CARBON_ENV` and `carbon env use` do not narrow it. `--dry-run`
+    prints the plan and changes nothing. The plan header says where policy
+    came from: `main (git config carbon.trunk)`, `origin/main (remote
+    default)`, or the working tree.
+18. **`apply` exit codes.** Nothing to do: 0. Work done, other scopes left
+    for someone else: 0, with the rest reported. Nothing the caller could do
+    but work pending: 3 if any scope needs a reader, else 1. A scope that
+    fails is left untouched, the others are committed, and the exit is 1.
+19. **`apply` and uncommitted files.** Without `--no-commit`, it refuses
+    (before asking) when a keys or secrets file of a scope it would change
+    has uncommitted changes, since its commit would include them. It commits
+    with `git commit -- <paths>`, so other staged changes stay staged.
+20. **`apply` against trunk, one rule.** For each scope with a key, when
+    trunk has a keys file:
+    - trunk has a key and the branch has none: *blocked* (merge trunk);
+    - the caller can open the scope: `VerifyTrunk` runs before anything
+      else. A key that does not descend from trunk's is *refused* (fix:
+      restore the keys file from trunk). A key that descends from trunk's
+      but whose `current` differs (this branch rotated, or trunk rotated and
+      this branch has not merged it) is *blocked* as out of step: apply does
+      not rotate on top of a key trunk does not use;
+    - the caller cannot open it and `current` differs: *blocked*.
+    A key that exists only on the branch is applied to.
+21. **Drops that do not open** are never fatal: rotation uses
+    `RotateSkippingBadDrops`, promotion skips them, and each is named in the
+    plan ("leaves drop") and the commit message. Promotion uses `PromoteAt`,
+    so a future set time becomes now.
+22. **Unproven values.** Every entry under a retired key is listed by name
+    in the plan ("re-seals as trusted"), with its key and set time, and
+    flagged when its set time is after its key was retired. Confirming (or
+    `--yes`) re-seals them under the current key, including during a
+    rotation. `--skip-unproven` leaves them, and stale drops, as they are
+    (a rotation keeps them under their old key ids; the chain still opens
+    them).
+23. **`require_pq`.** Non-hybrid devices are never wrapped to; they are
+    reported. An existing non-hybrid slot is not rotated away by itself (it
+    is reported as a `check` failure), but a rotation for another reason
+    wraps only to hybrid devices.
+24. **Rotation reason.** `removed <who>` names a person when all of their
+    slots go and the scope no longer names any of their devices, else each
+    device (`ada/laptop`), and machines as `machine:<name>`. "Can finish
+    it" lists only current readers who stay readers.
+25. **`request`** refuses the root package (its `[access]` is the default
+    for every package). It proposes the caller's person, or
+    `machine:<name>` for a machine identity, and reports "already reads"
+    when the reader is named or reaches the scope through a team. A missing
+    entry is created from the workspace default plus the reader.
+26. **`remove`** refuses to remove a person's only device (that would leave
+    a person in every list who reads nothing); remove the person instead.
+27. **`rename`** needs a reader of every environment that has a key,
+    re-wraps each slot to the public key trunk policy has for that device id
+    (refusing if trunk has none: run `apply` first), keeps values under the
+    key they were sealed with, and does not commit. Until it merges:
+    - readers verify the branch's keys against trunk's file in the same
+      directory, which still names the old package. `VerifyTrunk` accepts a
+      different package name only when the opened keys unseal trunk's
+      `inbox_sealed` under the old name (`scope/rename_verify.go`), which
+      proves they are trunk's keys; the environment must match;
+    - `apply` takes the scope's access from the old name's trunk entry, not
+      the workspace default that an unknown package name would get;
+    - non-readers cannot drop into it (trunk's inbox is bound to the old
+      name);
+    - moving the directory in the same change would leave nothing on trunk
+      to verify against, so `rename` tells people to move it separately.
+28. **tomledit** appends to lists (it does not sort), deletes a list
+    element's whole line when it has one, and refuses, with what to edit by
+    hand, inline tables it would have to restructure, arrays of tables, and
+    comments between inline elements.
+
+## Known merge limits
+
+- **A rotation and a branch that adds or changes a secret in the same
+  scope conflict.** A rotation re-seals every line of the scope's secrets
+  file, so any line another branch (cut before the rotation) added or
+  changed lands inside a changed region and git reports a conflict. The
+  design's merge table says such a branch merges; it does so cleanly only
+  when the rotation did not touch the secrets file (the scope had no values
+  yet). Resolution: keep the rotated side's lines, then add back each line
+  the other side added or changed, exactly as written there. Each line is
+  self-contained: the added value still opens through the retired key, and
+  the next `carbon apply` lists it as unproven and re-seals it. The
+  conflict-marker error for a secrets file prints this resolution.
+- **Two concurrent applies can conflict on a slot line.** Two branches that
+  grant different devices merge cleanly when their new slot lines land at
+  different places in the sorted list. They conflict when both insert at
+  the same place, or when both wrap the same device. The latter is the
+  common case on a linear trunk: the later apply sees every grant merged
+  so far and also wraps the person the earlier, unmerged apply granted.
+  Either side's line is valid (both wrap the same key to the same device);
+  keep either. The conflict-marker error for a keys file says so. Two
+  branches that both rotate the same key conflict on `current`: keep one
+  side's keys and secrets files and run `carbon apply` to rotate again.
