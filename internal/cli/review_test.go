@@ -363,7 +363,7 @@ func TestRunGitProcessCount(t *testing.T) {
 	if strings.Count(calls, "cat-file") > 1 {
 		t.Errorf("more than one cat-file process:\n%s", calls)
 	}
-	if two > 8 {
+	if two > 6 {
 		t.Errorf("%d git processes for one run:\n%s", two, calls)
 	}
 }
@@ -419,4 +419,22 @@ func TestReferencedScopeNotFromTrunkIsRefused(t *testing.T) {
 			t.Fatalf("released:\n%s", res)
 		}
 	}
+}
+
+// doctor names a corrupt pin file and the fix; run and export refuse.
+func TestDoctorReportsCorruptPins(t *testing.T) {
+	w := runWorld(t)
+	helper := childHelper(t)
+	// A first read pins the scopes.
+	w.Lin.With("FROM_SHELL=x").In(w.PkgDir).Must("run", "--", helper, "exit")
+	res := w.Lin.In(w.PkgDir).Must("doctor")
+	contains(t, "doctor", res.Stdout, "ok    pins")
+	pins := filepath.Join(w.Git("rev-parse", "--path-format=absolute", "--git-common-dir"), "carbon", "pins.toml")
+	if err := os.WriteFile(pins, []byte("not = [toml"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res = w.Lin.In(w.PkgDir).Fails(1, "doctor")
+	contains(t, "doctor", res.Stdout, "FAIL  pins", "rm "+pins)
+	res = w.Lin.With("FROM_SHELL=x").In(w.PkgDir).Fails(1, "run", "--", helper, "exit")
+	contains(t, "stderr", res.Stderr, "rm "+pins)
 }

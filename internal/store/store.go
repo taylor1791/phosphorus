@@ -14,6 +14,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -143,6 +144,12 @@ type Key struct {
 	Inbox       string
 	InboxSealed string
 	Slots       map[string]string // device id -> "age1:..."
+	// SlotTo maps each slot's device id to "sha256:<64 hex>": the SHA-256 of
+	// the recipient string the slot was wrapped to, exactly as written in the
+	// people or machine file (agewrap.RecipientHash). Every slot needs one;
+	// set both maps together (SetSlot). Not authenticated by cryptography:
+	// `check` protects it against trunk.
+	SlotTo map[string]string
 
 	Retired   time.Time
 	Reason    string
@@ -167,14 +174,19 @@ func (k *Keys) CurrentKey() *Key { return k.Keys[k.Current] }
 func (k *Keys) IDs() []string { return sortedKeys(k.Keys) }
 
 type keyTOML struct {
-	Created     *time.Time        `toml:"created"`
-	Inbox       string            `toml:"inbox"`
-	InboxSealed string            `toml:"inbox_sealed"`
-	Slots       map[string]string `toml:"slots"`
-	Retired     *time.Time        `toml:"retired"`
-	Reason      string            `toml:"reason"`
-	Successor   string            `toml:"successor"`
-	Sealed      string            `toml:"sealed"`
+	Created     *time.Time          `toml:"created"`
+	Inbox       string              `toml:"inbox"`
+	InboxSealed string              `toml:"inbox_sealed"`
+	Slots       map[string]slotTOML `toml:"slots"`
+	Retired     *time.Time          `toml:"retired"`
+	Reason      string              `toml:"reason"`
+	Successor   string              `toml:"successor"`
+	Sealed      string              `toml:"sealed"`
+}
+
+type slotTOML struct {
+	To   string `toml:"to"`
+	Slot string `toml:"slot"`
 }
 
 type keysTOML struct {
@@ -191,15 +203,17 @@ func ParseKeys(path string, data []byte) (*Keys, error) {
 		return nil, &config.ConflictError{Path: path}
 	}
 	var raw keysTOML
-	if err := strictDecode(data, &raw); err != nil {
-		return nil, &ParseError{path, err}
-	}
 	if loose, err := looseTables(data); err != nil {
 		return nil, &ParseError{path, err}
+	} else if id, dev, old := oldSlotForm(loose); old {
+		return nil, &ParseError{path, fmt.Errorf("[keys.%s.slots] %q uses the old slot format (a bare string): a slot is now { to = \"sha256:...\", slot = \"age1:...\" }; regenerate the keys file", id, dev)}
 	} else if keys, ok := loose["keys"].(map[string]any); ok {
 		if err := offsetTimesOnly(data, keys, "created", "retired"); err != nil {
 			return nil, &ParseError{path, err}
 		}
+	}
+	if err := strictDecode(data, &raw); err != nil {
+		return nil, &ParseError{path, err}
 	}
 	fail := func(f string, a ...any) error { return &ParseError{path, fmt.Errorf(f, a...)} }
 	if _, _, err := config.ParseScopeName(raw.Scope); err != nil {
@@ -210,7 +224,7 @@ func ParseKeys(path string, data []byte) (*Keys, error) {
 		if !config.ValidKeyID(id) {
 			return nil, fail("[keys.%s]: not a key id", id)
 		}
-		k := &Key{Inbox: r.Inbox, InboxSealed: r.InboxSealed, Slots: r.Slots,
+		k := &Key{Inbox: r.Inbox, InboxSealed: r.InboxSealed, Slots: map[string]string{}, SlotTo: map[string]string{},
 			Reason: r.Reason, Successor: r.Successor, Sealed: r.Sealed}
 		if r.Created == nil {
 			return nil, fail("[keys.%s]: missing created", id)
@@ -219,8 +233,8 @@ func ParseKeys(path string, data []byte) (*Keys, error) {
 		if k.Created, err = checkTime(*r.Created); err != nil {
 			return nil, fail("[keys.%s] created: %v", id, err)
 		}
-		if k.Slots == nil {
-			k.Slots = map[string]string{}
+		for dev, s := range r.Slots {
+			k.Slots[dev], k.SlotTo[dev] = s.Slot, s.To
 		}
 		if (r.Retired == nil || k.InboxSealed != "") && !strings.HasPrefix(k.InboxSealed, "carbon1:") {
 			return nil, fail("[keys.%s]: inbox_sealed must be a carbon1: blob", id)
@@ -254,6 +268,9 @@ func ParseKeys(path string, data []byte) (*Keys, error) {
 				}
 				if !strings.HasPrefix(slot, "age1:") {
 					return nil, fail("[keys.%s.slots] %s is not an age1: blob", id, dev)
+				}
+				if !slotToRe.MatchString(k.SlotTo[dev]) {
+					return nil, fail("[keys.%s.slots] %s: to must be \"sha256:<64 hex>\", the hash of the recipient it is wrapped to", id, dev)
 				}
 			}
 		}
@@ -313,7 +330,7 @@ func (k *Keys) Marshal() []byte {
 		if len(r.Slots) > 0 {
 			fmt.Fprintf(&b, "\n[keys.%s.slots]\n", id)
 			for _, dev := range sortedKeys(r.Slots) {
-				fmt.Fprintf(&b, "%s = %s\n", config.Quote(dev), config.Quote(r.Slots[dev]))
+				fmt.Fprintf(&b, "%s = { to = %s, slot = %s }\n", config.Quote(dev), config.Quote(r.SlotTo[dev]), config.Quote(r.Slots[dev]))
 			}
 		}
 	}
@@ -443,4 +460,32 @@ func looseTables(data []byte) (map[string]any, error) {
 		return nil, err
 	}
 	return m, nil
+}
+
+var slotToRe = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+// SetSlot stores a slot and the hash of the recipient it was wrapped to.
+func (k *Key) SetSlot(device, to, slot string) {
+	if k.Slots == nil {
+		k.Slots = map[string]string{}
+	}
+	if k.SlotTo == nil {
+		k.SlotTo = map[string]string{}
+	}
+	k.Slots[device], k.SlotTo[device] = slot, to
+}
+
+// oldSlotForm reports a slot written in the pre-`to` string form.
+func oldSlotForm(loose map[string]any) (string, string, bool) {
+	keys, _ := loose["keys"].(map[string]any)
+	for id, v := range keys {
+		rec, _ := v.(map[string]any)
+		slots, _ := rec["slots"].(map[string]any)
+		for dev, s := range slots {
+			if _, ok := s.(string); ok {
+				return id, dev, true
+			}
+		}
+	}
+	return "", "", false
 }

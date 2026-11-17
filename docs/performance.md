@@ -42,28 +42,37 @@ Three setups:
 
 ### Result
 
-Intel Core i7-10750H (12 threads), Linux 6.12, Go 1.25.4, 16 Nov 2026. Two
-runs (a third, on a busy machine, gave the same small number and noisier
-monorepo numbers):
+The numbers include the per-clone key pin (`<git common dir>/carbon/pins.toml`):
+each opened scope's key is compared with the reader's pin, read from that
+file. After the warm-up rounds the pins exist, so the timed runs read the
+file and do not write it (the first read of a scope writes it once).
+
+Intel Core i7-10750H (12 threads), Linux 6.12, Go 1.25.4, 16 Nov 2026,
+three runs (the third monorepo-1-scope run was on a busy machine: p90
+31 ms):
 
 | Setup | `carbon run -- cmd` median | `cmd` median | Overhead |
 |---|---|---|---|
-| small | 13.48 / 12.21 ms | 0.86 / 0.79 ms | 12.6 / 11.4 ms |
-| monorepo, 1 scope | 16.08 / 16.22 ms | 0.77 / 0.80 ms | 15.3 / 15.4 ms |
-| monorepo, 3 scopes | 19.53 / 18.06 ms | 0.83 / 0.80 ms | 18.7 / 17.3 ms |
+| small | 11.70 / 12.68 / 11.63 ms | 0.83 / 0.85 / 0.80 ms | 10.9 / 11.8 / 10.8 ms |
+| monorepo, 1 scope | 15.65 / 15.96 / 20.97 ms | 0.79 / 0.79 / 0.93 ms | 14.9 / 15.2 / 20.1 ms |
+| monorepo, 3 scopes | 17.65 / 17.89 / 18.96 ms | 0.80 / 0.81 / 0.82 ms | 16.8 / 17.1 / 18.1 ms |
 
-`carbon run` adds 11 to 19 ms, under the 50 ms goal; p90 was under 22 ms.
+`carbon run` adds 11 to 18 ms (20 ms on the busy run), under the 50 ms
+goal.
 
 ### How the cost scales
 
-- **git processes are constant: 6 per `run`**, however many scopes are
-  opened and however many people, machines and packages there are:
-  `rev-parse --show-toplevel`, `rev-parse --absolute-git-dir` (for
-  `carbon env use`), `config --get carbon.trunk`, `rev-parse --verify` of
-  the trunk ref, one `ls-tree` of trunk, and one `cat-file --batch` that
-  serves every file read at trunk. `TestRunGitProcessCount` fails if a
-  second scope or more people add a process. They are most of the fixed
-  cost: about 1.3 ms each here.
+- **git processes are constant: 5 per `run`**, however many scopes are
+  opened and however many people, machines and packages there are: one
+  `rev-parse` for the top level, git directory and common directory, then
+  `config --get carbon.trunk`, `rev-parse --verify` of the trunk ref, one
+  `ls-tree` of trunk, and one `cat-file --batch` that serves every file
+  read at trunk. `TestRunGitProcessCount` fails if a second scope adds a
+  process, if more than one `cat-file` starts, or if a run with nine people
+  takes more than 6. They are most of the fixed cost: about 1.3 ms each
+  here.
+- **The pin file** is read once per opened scope (a small local file), and
+  written only when a scope's pin moves.
 - **People, machines and packages** are parsed twice (working tree and
   trunk), in process: going from 6 people and 1 package to 30 people and 10
   packages added about 3 to 4 ms.
@@ -80,5 +89,6 @@ measured 6.0 to 7.3 ms. The first version of the trunk check reloaded trunk
 policy for every scope and started one `git cat-file` per file read at
 trunk (18 git processes for one scope, 34 for two); the small setup then
 measured 22.5 to 22.9 ms. Caching trunk policy, working-tree policy and the
-identity once per command, and reading trunk files through one
-`git cat-file --batch`, brought it to the numbers above.
+identity once per command, reading trunk files through one
+`git cat-file --batch`, and asking `rev-parse` for all three directories at
+once brought it to the numbers above.

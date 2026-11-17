@@ -11,6 +11,7 @@ import (
 	"github.com/taylor1791/phosphorus/internal/agewrap"
 	"github.com/taylor1791/phosphorus/internal/config"
 	"github.com/taylor1791/phosphorus/internal/gitx"
+	"github.com/taylor1791/phosphorus/internal/pins"
 	"github.com/taylor1791/phosphorus/internal/policy"
 	"github.com/taylor1791/phosphorus/internal/scope"
 	"github.com/taylor1791/phosphorus/internal/store"
@@ -347,30 +348,125 @@ func (c *Context) OpenScope(w *Workspace, p *config.Package, s *scope.Scope) (*s
 
 // VerifyTrunk checks an opened scope against trunk's keys file with
 // scope.Opened.VerifyTrunk, when trunk is a ref that has one, and turns a
-// failure into an error with the fix. Every path that opens a scope to read
+// failure into an error with the fix. It then checks the reader's pin
+// for the scope (scope.Opened.CheckPin; pins in <git common dir>/carbon) and
+// moves it forward when the key legitimately changed. Every path that opens a scope to read
 // or seal must call it (OpenScope does).
 func (c *Context) VerifyTrunk(w *Workspace, p *config.Package, o *scope.Opened) error {
-	pol, err := c.TrunkPolicy(w)
+	trunk, err := c.verifyTrunkKeys(w, p, o)
 	if err != nil {
 		return err
 	}
+	return c.checkPin(w, p, o, trunk)
+}
+
+// verifyTrunkKeys is the trunk half of VerifyTrunk. It returns trunk's keys
+// file for the scope (nil when trunk is not a ref or has none).
+func (c *Context) verifyTrunkKeys(w *Workspace, p *config.Package, o *scope.Opened) (*store.Keys, error) {
+	pol, err := c.TrunkPolicy(w)
+	if err != nil {
+		return nil, err
+	}
 	if pol.Origin != policy.OriginTrunk {
-		return nil
+		return nil, nil
 	}
 	keys, err := c.TrunkKeys(w, pol, p, o.Env)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	err = o.VerifyTrunk(keys)
 	if errors.Is(err, scope.ErrNotFromTrunk) {
 		rel := w.Rel(o.KeysPath())
-		return &Error{Code: ExitError, Err: err,
+		return nil, &Error{Code: ExitError, Err: err,
 			Message: fmt.Sprintf("the key for %s on this branch does not descend from trunk's", o.Name()),
 			Details: []string{err.Error(), "carbon will not read or seal under a key that trunk did not lead to."},
 			Hint: fmt.Sprintf("Restore the keys file from trunk:   git checkout %s -- %s\nor bring this branch up to date:   git merge %s",
 				pol.Ref, rel, pol.Ref)}
 	}
-	return err
+	return keys, err
+}
+
+// LoadPins loads this clone's pins file (<git common dir>/carbon/pins.toml).
+// A corrupt file is an error naming the file and the fix.
+func (c *Context) LoadPins(w *Workspace) (*pins.File, error) {
+	path, err := pins.Path(w.Repo)
+	if err != nil {
+		return nil, err
+	}
+	f, err := pins.Load(path)
+	var ce *pins.CorruptError
+	if errors.As(err, &ce) {
+		return nil, &Error{Code: ExitError, Err: err, Message: ce.Error(),
+			Details: []string{"It holds the last scope key you verified for each scope in this clone."},
+			Hint:    "Delete it; carbon re-pins each scope the next time you open it:   rm " + path}
+	}
+	return f, err
+}
+
+// checkPin applies scope.Opened.CheckPin with the pin of the identities
+// that opened o, and stores the new pin when it moves.
+func (c *Context) checkPin(w *Workspace, p *config.Package, o *scope.Opened, trunk *store.Keys) error {
+	ids := o.Identities()
+	if len(ids) == 0 {
+		return nil
+	}
+	f, err := c.LoadPins(w)
+	if err != nil {
+		return err
+	}
+	reader := pins.ReaderID(ids)
+	pin, _ := f.Get(reader, o.Name())
+	next, err := o.CheckPin(pin, trunk)
+	var pe *scope.PinError
+	if errors.As(err, &pe) {
+		rel := w.Rel(o.KeysPath())
+		return &Error{Code: ExitError, Err: err,
+			Message: fmt.Sprintf("the key for %s was replaced by someone who did not hold the previous key (or your pin is stale)", o.Name()),
+			Details: []string{
+				fmt.Sprintf("Pinned key:  %s (the last key you verified in this clone)", pe.PinnedID),
+				fmt.Sprintf("Current key: %s (%s)", pe.CurrentID, pe.Reason),
+				"carbon will not read or seal under it.",
+			},
+			Hint: fmt.Sprintf("Investigate the commit that changed it:   git log -p -- %s\nIf the change is known to be legitimate (for example the scope was re-created):   carbon trust %s --env %s",
+				rel, p.Name, o.Env)}
+	}
+	if err != nil || next == nil {
+		return err
+	}
+	f.Set(reader, o.Name(), *next)
+	return f.Save()
+}
+
+// RecordPin pins o's current key for the holder of ids (o.Identities() when
+// ids is nil). Call it after Scope.Save when the caller created the scope's
+// key, or after a rotation it performed is saved, so its own new key is not
+// later mistaken for a replacement.
+func (c *Context) RecordPin(w *Workspace, o *scope.Opened, ids []agewrap.Identity) error {
+	if ids == nil {
+		ids = o.Identities()
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	f, err := c.LoadPins(w)
+	if err != nil {
+		return err
+	}
+	f.Set(pins.ReaderID(ids), o.Name(), o.CurrentPin())
+	return f.Save()
+}
+
+// RenamePins moves every reader's pin from oldScope to newScope
+// ("<package>/<env>") in this clone, for `rename`.
+func (c *Context) RenamePins(w *Workspace, oldScope, newScope string) error {
+	f, err := c.LoadPins(w)
+	if err != nil {
+		return err
+	}
+	if f.Rename(oldScope, newScope) {
+		return f.Save()
+	}
+	return nil
 }
 
 // NoAccessErr builds the "you cannot read <package> in <env>" error: who

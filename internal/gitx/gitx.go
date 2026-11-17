@@ -52,11 +52,15 @@ type Repo struct {
 
 	mu      sync.Mutex
 	sources map[string]*RefSource
+	// The git directories never change for a work tree: Find fills them,
+	// GitDir and CommonDir remember them.
+	gitDir, commonDir string
 }
 
 // Find returns the repo containing dir.
 func Find(dir string) (*Repo, error) {
-	out, err := run(dir, "rev-parse", "--show-toplevel")
+	// One process answers the three questions every command asks.
+	out, err := run(dir, "rev-parse", "--path-format=absolute", "--show-toplevel", "--absolute-git-dir", "--git-common-dir")
 	if err != nil {
 		var ge *Error
 		if errors.As(err, &ge) && strings.Contains(ge.Stderr, "not a git repository") {
@@ -64,7 +68,11 @@ func Find(dir string) (*Repo, error) {
 		}
 		return nil, err
 	}
-	return &Repo{Root: strings.TrimSpace(string(out))}, nil
+	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	if len(lines) != 3 {
+		return nil, fmt.Errorf("git rev-parse: unexpected output %q", out)
+	}
+	return &Repo{Root: lines[0], gitDir: lines[1], commonDir: lines[2]}, nil
 }
 
 // Git runs git in the repo root and returns stdout.
@@ -87,11 +95,15 @@ func run(dir string, args ...string) ([]byte, error) {
 // GitDir returns the absolute git directory of this work tree (per
 // worktree, so `carbon env use` state is per worktree).
 func (r *Repo) GitDir() (string, error) {
+	if r.gitDir != "" {
+		return r.gitDir, nil
+	}
 	out, err := r.Git("rev-parse", "--absolute-git-dir")
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(string(out)), nil
+	r.gitDir = strings.TrimSpace(string(out))
+	return r.gitDir, nil
 }
 
 // RefExists reports whether ref names a commit.
@@ -436,4 +448,18 @@ func (r *Repo) RemoteDefault() (ref string, ok bool, err error) {
 		}
 	}
 	return "", false, nil
+}
+
+// CommonDir returns the absolute git common directory: shared by every
+// worktree of a clone (unlike GitDir, which is per worktree).
+func (r *Repo) CommonDir() (string, error) {
+	if r.commonDir != "" {
+		return r.commonDir, nil
+	}
+	out, err := r.Git("rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return "", err
+	}
+	r.commonDir = strings.TrimSpace(string(out))
+	return r.commonDir, nil
 }

@@ -45,8 +45,8 @@ inbox = "age1pq1…"
 inbox_sealed = "carbon1:…"
 
 [keys.k3f9q2.slots]
-"lin/laptop" = "age1:…"
-"machine:deploy-checkout" = "age1:…"
+"lin/laptop" = { to = "sha256:…", slot = "age1:…" }
+"machine:deploy-checkout" = { to = "sha256:…", slot = "age1:…" }
 
 [keys.k1a8c0]
 created = 2026-06-01T10:00:00Z
@@ -71,9 +71,17 @@ joined with `\n`, no trailing newline:
 
 Package is the package's `name` (not its path); env is the environment name.
 
-## Slot: `age1:<base64(age file)>`
+## Slot: `{ to = "sha256:<hex>", slot = "age1:<base64(age file)>" }`
 
-A binary age file with exactly one recipient stanza. Its plaintext is four
+Each slot line records `to`, the SHA-256 (hex, prefixed `sha256:`) of the
+recipient string the slot was wrapped to, exactly as written in the person's
+or machine's file, so a key change or a relabelled line is visible. `to` is
+not authenticated by cryptography: `carbon check` protects it against trunk
+(a slot on trunk's current key may not be removed or altered while `current`
+is unchanged, and a new slot's `to` must equal the hash of trunk policy's
+key for that device).
+
+`slot` is a binary age file with exactly one recipient stanza. Its plaintext is four
 lines, each ending in `\n`:
 
 ```
@@ -115,7 +123,7 @@ S=testdata/vectors/scope/.carbon/prod.secrets.toml
 ID=testdata/vectors/scope/identity-hybrid.txt
 
 # 1. Your slot -> the scope key.
-SLOT=$(sed -n 's|^"test/hybrid" = "\(.*\)"$|\1|p' $K)
+SLOT=$(sed -n 's|^"test/hybrid" = { to = "[^"]*", slot = "\(.*\)" }$|\1|p' $K)
 python3 tools/decrypt.py unwrap "$SLOT" | age -d -i $ID > slot.txt
 KID=$(sed -n 3p slot.txt); KEY=$(sed -n 4p slot.txt)
 

@@ -13,6 +13,7 @@ import (
 	"github.com/taylor1791/phosphorus/internal/agewrap"
 	"github.com/taylor1791/phosphorus/internal/config"
 	"github.com/taylor1791/phosphorus/internal/gitx"
+	"github.com/taylor1791/phosphorus/internal/pins"
 	"github.com/taylor1791/phosphorus/internal/policy"
 	"github.com/taylor1791/phosphorus/internal/scope"
 )
@@ -186,6 +187,7 @@ func (d *doctor) run() {
 	}
 	me := d.identity(w, wpol)
 	d.trunkIdentity(trunkPol, me)
+	d.pins(w)
 	env := d.environment(w)
 	if env != "" && wpol != nil {
 		d.scope(w, wpol, env, me)
@@ -484,4 +486,23 @@ func (d *doctor) drops(s *scope.Scope) {
 		d.add("drops", checkInfo, fmt.Sprintf("%s has unreviewed drops: %s", s.Name(), strings.Join(names, ", ")),
 			"Review them, then promote with:   carbon apply")
 	}
+}
+
+// pins checks the per-clone file of the last scope key each reader
+// verified. A corrupt file stops every reader command, so it is a failure.
+func (d *doctor) pins(w *Workspace) {
+	path, err := pins.Path(w.Repo)
+	if err != nil {
+		d.addErr("pins", err)
+		return
+	}
+	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
+		d.add("pins", checkInfo, "no pinned scope keys yet ("+path+"); each scope is pinned the first time you read it", "")
+		return
+	}
+	if _, err := d.c.LoadPins(w); err != nil {
+		d.addErr("pins", err)
+		return
+	}
+	d.add("pins", checkOK, path, "")
 }
