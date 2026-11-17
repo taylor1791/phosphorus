@@ -1,12 +1,264 @@
 Carbon
 ======
 
-Encrypted secrets for monorepos, stored in the repo, with access granted per
-package per environment. No server.
+Carbon keeps a monorepo's secrets encrypted inside the repository, next to
+the code that uses them. Access is granted per package per environment,
+written as plain TOML that is reviewed like code, and enforced by
+encryption: a person reads a scope only if its key is wrapped to one of
+their devices. There is no server: carbon is one Go binary plus git, and it
+works offline.
 
-**Status: design.** Nothing here is implemented yet. The design is in
+The design is in
 [Carbon 1.0: in-repo secrets for monorepos](https://claude.ai/artifact/B9zrmkcLN9zsZUHZGZu1TX).
 The proof of concept this replaces is [carbon 0.0.3](https://github.com/taylor1791/carbon).
+
+## Status
+
+**Pre-release. Carbon 1.0 has not been externally audited.** The format and
+the code have been reviewed only by the people who wrote them. Do not rely
+on it for secrets whose disclosure you could not survive until it has had
+an independent review.
+
+- Hardware and plugin identities (`age1yubikey1…`, `age1se1…`, TPM) are
+  accepted through the age plugin protocol but are **untested**.
+- There are no tagged releases, signed binaries, or Homebrew package yet.
+- The command line and the file format may still change before 1.0.
+
+## Install
+
+Carbon needs Go 1.25 or later to build, and git at runtime.
+
+```sh
+CGO_ENABLED=0 go install github.com/taylor1791/phosphorus/cmd/carbon@latest
+```
+
+From source:
+
+```sh
+git clone https://github.com/taylor1791/phosphorus
+cd phosphorus
+CGO_ENABLED=0 go build -o carbon ./cmd/carbon
+./carbon version
+```
+
+`CGO_ENABLED=0` gives a static binary and avoids needing a C compiler. With
+Nix: `nix build` builds it, and `nix develop` gives a shell with go, git,
+age and sops.
+
+## Quick start
+
+One person, a new repository, two environments. This is a real session,
+trimmed; your fingerprint and key ids will differ.
+
+```console
+$ git init -q -b main shop && cd shop
+$ carbon init --environments dev,prod
+Created carbon.toml
+Created .carbon/teams.toml
+Created .gitattributes entry for keys files
+
+Next: carbon join, then carbon init in each package that has secrets.
+
+$ carbon join --device laptop
+notice: this repository has no trunk yet (no remote and no carbon.trunk); reading policy from the working tree until carbon is on trunk.
+Created your identity   ~/.config/carbon/identity   (device: laptop)
+Added your public key   .carbon/people/ada.toml
+Joined team             @engineering   (first person in this workspace)
+Fingerprint             use-mosquito-poverty-else
+
+You read every environment those teams are granted, because carbon is not on trunk yet.
+Next: carbon init in each package directory, declare its secrets, then carbon set <name>.
+Commit the carbon files to trunk when ready; from then on access changes go through review.
+
+$ mkdir -p services/api && cd services/api
+$ carbon init
+Created services/api/carbon.toml
+```
+
+Declare the package's secrets and the environment its process gets, in
+`services/api/carbon.toml`:
+
+```toml
+name = "api"
+
+[secrets]
+db_password = { description = "Postgres password" }
+session_key = { description = "Cookie signing key", generate = "random:32" }
+
+[env]
+DATABASE_URL = "postgres://api:${db_password}@localhost:5432/api"
+SESSION_KEY  = "${session_key}"
+```
+
+Set the values. They come from a hidden prompt or stdin, never from an
+argument.
+
+```console
+$ printf %s "correct-horse" | carbon set db_password
+Created the key for api/dev, wrapped to the 1 device that policy names.
+Sealed. Commit services/api/.carbon/dev.keys.toml and services/api/.carbon/dev.secrets.toml
+
+$ carbon set session_key --generate
+Generated 32 random bytes for api/dev session_key. Nobody has seen it.
+Commit services/api/.carbon/dev.secrets.toml
+
+$ carbon ls
+api/dev
+
+NAME          STATE    SET                    KEY
+db_password   sealed   2026-11-17T04:37:36Z   kpvctg
+session_key   sealed   2026-11-17T04:37:36Z   kpvctg
+
+$ carbon run -- printenv DATABASE_URL
+postgres://api:correct-horse@localhost:5432/api
+```
+
+`check` is the CI gate. Before the repository has a trunk it needs
+`--bootstrap`, and it insists that every declared secret has a value in
+every environment:
+
+```console
+$ carbon check --bootstrap
+...
+error[secret.unset] api/prod: db_password is declared in services/api/carbon.toml but has no value in api/prod.
+    carbon set db_password --package api --env prod
+...
+check failed: 2 errors, 0 warnings.
+
+$ printf %s "prod-horse" | carbon set db_password --env prod
+$ carbon set session_key --generate --env prod
+```
+
+Commit, and tell this clone which branch is trunk (with a remote, the
+remote's default branch is used without this):
+
+```console
+$ cd ../.. && git add -A && git commit -qm "Adopt carbon"
+$ git config carbon.trunk main
+$ carbon check
+Compared with trunk: main (from git config carbon.trunk)
+
+check passed: 0 errors, 0 warnings.
+
+$ carbon status
+You are ada (laptop). Environment: dev.
+
+Readable   2 scopes in dev, prod
+```
+
+From here on, access changes go through pull requests, as below.
+
+## How access works
+
+A **scope** is one package in one environment, and has its own key.
+**Policy** says who may read each scope: the `[access]` table of the root
+`carbon.toml` (the default for every package) or of a package's
+`carbon.toml`, naming teams (`@payments`), people (`ada`) and machines
+(`machine:deploy-checkout`). People are files in `.carbon/people/` with a
+public key per device, written by `carbon join`; teams are
+`.carbon/teams.toml`.
+
+**Trunk** is the branch whose files have been reviewed: the remote default
+branch, or what `CARBON_TRUNK` or `git config carbon.trunk` name. Carbon
+reads policy and public keys from trunk, never from your working tree, when
+it grants access. A branch cannot grant itself anything.
+
+Access changes in two steps:
+
+1. Policy changes in a pull request: `carbon join` (a new person or
+   device), `carbon request <package> --env <env>` (ask for a scope),
+   `carbon remove <person>` (offboard). Code owners review and merge it.
+2. After it merges, any current reader of the scope runs **`carbon apply`**.
+   It wraps the scope key to new readers, rotates the key when someone was
+   removed or a device's key changed, and promotes drops. It commits
+   exactly the files it changed. That commit is reviewed too: `check`
+   lists it in its banner, and the reviewer confirms the author is a
+   current reader.
+
+Anyone can add a secret to a scope they cannot read: `carbon set` then
+writes a **drop**, encrypted to the scope's inbox key. Readers can use it at
+once; `check` lists it for review; the next `apply` seals it.
+
+## Commands
+
+| Command | Purpose | Needs read access |
+|---|---|---|
+| `carbon run -- <cmd>` | Run a command with the package's `[env]`, decrypted in memory | Yes |
+| `carbon set <name>` | Seal a secret, or drop one into the inbox | No |
+| `carbon get <name>` | Print a secret's value | Yes |
+| `carbon edit` | Bulk-edit a scope's secrets in `$EDITOR` | Yes |
+| `carbon ls` | List secret names and their state | No |
+| `carbon export` | Write resolved values to an ignored file (dotenv or JSON) | Yes |
+| `carbon env` / `env use <name>` | Show or pick the environment for this worktree | No |
+| `carbon status` | What you can read, grant, and should rotate | No |
+| `carbon join` | Create an identity and add its public key (`--machine` for CI) | No |
+| `carbon request <package>` | Propose yourself (or `--as` a reader) in policy | No |
+| `carbon apply` | Carry out merged policy: wrap, rotate, promote drops | Yes |
+| `carbon remove <who>` | Remove a person, device or machine from policy | No |
+| `carbon trust <package>` | Accept a scope key that replaced the one you verified | Yes |
+| `carbon check` | Validate graph, policy and keys without a key; the CI gate | No |
+| `carbon who <package>` / `access <who>` | Explain who reads what, and through which rule | No |
+| `carbon graph` | The package dependency graph, as DOT | No |
+| `carbon doctor` | Diagnose the local setup | No |
+| `carbon init` | Create a workspace or a package | No |
+| `carbon rename <old> <new>` | Rename a package, re-sealing its secrets | Yes |
+
+`carbon help` lists them with their exit codes; `carbon <command> --help`
+explains each. Every command takes `--json`.
+
+## CI and deploys
+
+Run `carbon check` on every pull request and push, with trunk fetched and
+named in `CARBON_TRUNK`. Deploy jobs use a machine identity
+(`carbon join --machine <name>`), supplied as `CARBON_IDENTITY`, and run
+`carbon run --env prod -- ./deploy`. [docs/ci.md](docs/ci.md) has a GitHub
+Actions example and explains the review banner, `--strict` and
+`--max-debt`.
+
+## Migrating from carbon 0.0.3
+
+`carbon` refuses a 0.0.3 repository and points at `carbon-migrate`, a
+separate tool that converts the files and re-seals every value through the
+`carbon` command line. See [migrate/README.md](migrate/README.md).
+
+## Security model
+
+Encryption protects secrets from everyone who cannot change trunk; review
+protects trunk. Values are sealed with XChaCha20-Poly1305 under a 32-byte
+key per scope, and each scope key is wrapped with age to each reader
+device, hybrid post-quantum (ML-KEM-768 with X25519) by default. CI checks
+everything it can without a key, and every reader command checks the
+scope's keys against trunk's and against the key it last verified in this
+clone (its pin) before using it.
+
+What carbon does not protect against, stated plainly:
+
+- **A keyless check cannot tell a reader's key change from a forged one.**
+  New scope keys, rotations and new slots pass `check` when well formed;
+  they are listed in a banner, and a person must confirm the author is a
+  current reader.
+- **A removed reader who kept the previous key can forge a rotation** that
+  passes `check` and the pins. Only review of the commit's author catches
+  it.
+- **A scope's first key is trusted on review.** Whoever made it can read
+  what is later set in the scope.
+- **Pins do not protect fresh clones or CI jobs**, which trust the first
+  key they see on trunk.
+- **Rotation does not un-share.** A removed person keeps what they could
+  read; carbon lists those secrets as rotation debt, to be changed at their
+  source.
+- **Names, readers and set times are not secret**, and git history is
+  permanent.
+
+[docs/threat-model.md](docs/threat-model.md) has the full adversary table
+and limits.
+
+## Recovering a secret without carbon
+
+Every secret can be decrypted with the stock `age` CLI (1.3 or later for
+hybrid keys) and a short Python script: [docs/format.md](docs/format.md)
+specifies the format, `tools/decrypt.py` is the reference decryptor, and
+`testdata/vectors/` has test vectors.
 
 ## FAQ
 
@@ -35,3 +287,68 @@ every key with age, so it uses the implementation that defines the format:
 Checked on 2026-11-15. The keys Carbon wraps are standard age files, so any
 age implementation that supports the recipient type can open them. For hybrid
 keys that excludes rage until the pull request above is released.
+
+### Why does carbon need to know trunk?
+
+Because a branch must not be able to grant itself access. If carbon read
+policy from your working tree, anyone could add their name to an access
+list on a branch and ask a reader to run `apply` there. So `apply` reads
+policy and public keys from trunk, `check` compares every keys file with
+trunk's, and readers refuse a key that does not descend from trunk's.
+
+Trunk is chosen by the clone, never by a commit: `CARBON_TRUNK`, else
+`git config carbon.trunk`, else the remote default branch. In CI, set
+`CARBON_TRUNK` and fetch that ref; if carbon cannot find trunk it stops
+rather than guess. A repository with no protected branch can set
+`carbon.trunk` to `worktree`, and `check` warns that nothing is then
+reviewed.
+
+### Why did my merge conflict after a rotation?
+
+When someone is removed, `apply` rotates the scope key and re-seals every
+value in the scope, so every line of the scope's secrets file changes. A
+branch that added or changed a secret in that scope then conflicts. Keep
+the rotated side's lines, then add back each line your branch added or
+changed, exactly as written there. Each line is self-contained: it still
+opens through the retired key, and the next `apply` lists it as unproven
+(see below). The error carbon prints for the conflicted file says the same.
+
+Two branches that both ran `apply` can also conflict: on a slot line (keep
+either, both wrap the same key) or, if both rotated, on `current` (keep one
+side's keys and secrets files and run `apply` again).
+
+### What is a drop?
+
+A value set by someone who cannot read the scope. `carbon set` encrypts it
+to the scope's inbox key, which only readers can open, and stores it marked
+as a drop. Readers can use it at once; `check` lists it in its review
+banner, because carbon cannot tell who wrote it; the next `carbon apply` by
+a reader seals it as an ordinary value. An environment can refuse drops with
+`drops = false` in its `[access]` entry.
+
+### What does "unproven" mean?
+
+A value stored under a retired scope key rather than the current one. It
+usually comes from a branch cut before a rotation. Writing it needed the
+retired key, which the person whose removal caused the rotation may still
+hold, so carbon cannot say a current reader wrote it. `ls` and `status` mark
+it, `check` lists it in the banner, and `apply` leaves it as it is unless
+you pass `--reseal-unproven`, which re-seals it under the current key and so
+vouches for it. Carbon also refuses to seal a new value under a key trunk
+has retired: merge trunk first.
+
+### What is the pin, and what does `carbon trust` do?
+
+Each clone remembers, per identity, the last key it verified for each scope
+(in `.git/carbon/pins.toml`, outside the work tree). If a scope's key is
+later replaced by one that does not follow from the pinned key (for example
+a forged key that was merged), reader commands refuse it. A legitimate
+rotation is followed automatically, because the new key carries the old one
+sealed inside it.
+
+`carbon trust <package> --env <env>` shows the pinned and current keys and
+the commit that last changed the keys file, asks for confirmation, and pins
+the current key. Use it only when you know why the key changed (for example
+a scope was deliberately re-created), or to accept a new scope's key on a
+branch before it merges. Pins do not help a fresh clone or a CI job, which
+have none.
