@@ -100,3 +100,41 @@ Each entry says what differs from `docs/implementation.md` and why.
   which a removed reader still may. Readers can still open it (old branches
   must merge), `ls` marks it "author unproven", and `apply` should list such
   values for confirmation before re-sealing them.
+
+## carbon-migrate
+
+Where the design's migration table (design.md, "Migration from 0.0.3 and
+rollout") was not enough. Details are in `migrate/README.md`.
+
+1. **`{{pull.x}}` becomes the pull's reference, not `${x}`.** The table maps
+   `{{pull.x}}` to `${x}`, but in 1.0 `${x}` is this package's secret or var
+   and `[env]` entries cannot reference each other, so a derive gets the
+   pull's target: `{{pull.db_password}}` becomes `${db.password}`.
+2. **`registry_pattern` keeps 0.0.3's precedence**, which is not
+   first-match-wins: exactly one matching pattern wins, otherwise the single
+   variant without a pattern, and two matches is an error in 0.0.3 (so that
+   environment gets no value and the item is listed). Patterns are matched
+   against the old registry name, `""` for the default registry.
+3. **A push key with a `command` in any variant is a secret** in every
+   environment; its values come from the registries. A key whose variants are
+   all static values is a var.
+4. **Derives whose variants are plain text become a var** per environment plus
+   `[env] X = "${X}"`; variants with templates cannot vary by environment in
+   1.0 and are listed for a manual choice.
+5. **Access is per key: a recipient of the registry that is still in its
+   creation rule.** A key that requested access but was never rekeyed gets a
+   person file and no access; a recipient removed from the creation rule (a
+   pending 0.0.3 removal) gets none unless `--keep-recipient` names it. Keys
+   sharing a `users` name are one person only when they read the same
+   environments, otherwise `alice`, `alice-2`, ... A final check blocks any
+   plan that would let a device read an environment whose registry was not
+   encrypted to it.
+6. **Values are piped to `carbon set` and must round-trip `carbon get` before
+   anything old is deleted**; the identity is installed before verification
+   so the check also proves the moved key works.
+7. **Package discovery still skips dot-directories.** A 0.0.3 service under
+   one (`.carbon/svc` was 0.0.3's own example) is a blocker that asks the user
+   to `git mv` it. Walking other dot-directories in the working tree would
+   reach ignored caches (`.venv`, `.direnv`, `.cache`) whose stray
+   `carbon.toml` would break every command, and the trunk side, which sees only
+   tracked files, would disagree with the working tree.

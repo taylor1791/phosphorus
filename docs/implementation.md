@@ -281,10 +281,14 @@ is an error whose hint is `git remote set-head origin -a`, `git fetch`, or
 
 Two documented exceptions read policy from the working tree:
 
-1. **Bootstrap.** The chosen ref resolves but has no root `carbon.toml`, or no
-   ref can be chosen because the repository has no remote-tracking refs and no
-   override (a brand-new local repository). The command prints a one-line
-   notice.
+1. **Bootstrap.** The chosen ref resolves but has no root `carbon.toml`, or its
+   root `carbon.toml` parses and has no `workspace` key at all (a carbon 0.0.3
+   service: carbon 1.0 is not adopted on trunk yet, the carbon-migrate cutover
+   branch; a root with `[workspace]` is loaded as usual, so a stray `[push]` or
+   `[pull]` there is still the legacy error), or no ref can be chosen
+   because the repository has no remote-tracking refs and no override (a
+   brand-new local repository). The command prints a one-line notice. A 0.0.3
+   file in the working tree is still the error that points at carbon-migrate.
 2. **No protected trunk.** `worktree` from `CARBON_TRUNK` or git config reads
    policy from the working tree always. `check` reports this as a warning.
 
@@ -426,7 +430,8 @@ referenced scopes, debt) are in the design under CI.
   and without `--yes` they exit 7.
 - `run` replaces the carbon process with the command (`execve`), with no shell.
 - `set` reads the value from a hidden prompt on a terminal, otherwise from
-  stdin (one trailing newline is stripped). Never from an argument.
+  stdin (one trailing newline is stripped). Never from an argument. An empty
+  value is refused unless `--allow-empty` is given.
 - `export` writes mode 0600 and refuses a path git does not ignore; `-` means
   stdout. Formats: `dotenv`, `json`.
 - `apply` writes its changes and commits exactly the files it changed, with a
