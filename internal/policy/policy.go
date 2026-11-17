@@ -105,6 +105,10 @@ type Device struct {
 // Hybrid reports whether the device's key is post-quantum hybrid.
 func (d Device) Hybrid() bool { return d.Kind == agewrap.KindHybrid }
 
+// RecipientHash is the `to` a slot for this device must carry
+// (agewrap.RecipientHash of its recipient).
+func (d Device) RecipientHash() string { return agewrap.RecipientHash(d.Recipient) }
+
 // PersonDevices returns a person's devices sorted by id.
 func (p *Policy) PersonDevices(person string) []Device {
 	pr, ok := p.People[person]

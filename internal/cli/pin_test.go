@@ -50,10 +50,11 @@ func forgeKeys(t *testing.T, w *clitest.World, value string) string {
 	secret, inbox, _ := agewrap.GenerateIdentity(agewrap.KindHybrid)
 	ad, _ := seal.InboxAD("checkout", "prod", newID)
 	inboxSealed, _ := seal.Seal(key, []byte(secret), ad)
-	rec := &store.Key{Created: now, Inbox: inbox, InboxSealed: inboxSealed, Slots: map[string]string{}}
+	rec := &store.Key{Created: now, Inbox: inbox, InboxSealed: inboxSealed, Slots: map[string]string{}, SlotTo: map[string]string{}}
 	for _, d := range sa.Devices {
 		r, _ := agewrap.ParseRecipient(d.Recipient)
-		rec.Slots[d.ID], _ = agewrap.WrapSlot(r, "checkout/prod", newID, key)
+		slot, _ := agewrap.WrapSlot(r, "checkout/prod", newID, key)
+		rec.SetSlot(d.ID, d.RecipientHash(), slot)
 	}
 	var fake [32]byte
 	rand.Read(fake[:])

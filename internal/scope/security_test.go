@@ -265,3 +265,49 @@ func TestTamperedRetiredInboxIsReported(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// Slots record the recipient they were wrapped to, so DiffSlots catches a
+// device re-added with a new key, and a removed reader who relabels his own
+// slot line as another device's.
+func TestDiffSlotsByRecipient(t *testing.T) {
+	lin := newPerson(t, "lin/laptop", agewrap.KindHybrid)
+	sam := newPerson(t, "sam/laptop", agewrap.KindHybrid)
+	o := mustCreate(t, t.TempDir(), "checkout", "prod", lin, sam)
+	cur := o.Keys.CurrentKey()
+	if cur.SlotTo["lin/laptop"] != lin.dev.RecipientHash() || cur.SlotTo["lin/laptop"] != agewrap.RecipientHash(lin.dev.Recipient) {
+		t.Fatalf("to = %q", cur.SlotTo["lin/laptop"])
+	}
+	if d := o.DiffSlots(devices(lin, sam)); len(d.Missing)+len(d.Extra)+len(d.Rekeyed) != 0 {
+		t.Fatalf("clean diff: %+v", d)
+	}
+
+	// sam's laptop is re-added with a new key under the same device id.
+	sam2 := newPerson(t, "sam/laptop", agewrap.KindHybrid)
+	d := o.DiffSlots(devices(lin, sam2))
+	if len(d.Rekeyed) != 1 || d.Rekeyed[0].ID != "sam/laptop" ||
+		len(d.Missing) != 1 || d.Missing[0].ID != "sam/laptop" ||
+		len(d.Extra) != 1 || d.Extra[0] != "sam/laptop" {
+		t.Fatalf("rekeyed: %+v", d)
+	}
+	// AddSlots does not paper over it; only a rotation does.
+	if added, _ := o.AddSlots(devices(lin, sam2)); len(added) != 0 {
+		t.Fatalf("AddSlots replaced a rekeyed slot: %v", added)
+	}
+	if _, err := o.Rotate(devices(lin, sam2), "removed sam/laptop", t0.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if d := o.DiffSlots(devices(lin, sam2)); len(d.Missing)+len(d.Extra)+len(d.Rekeyed) != 0 {
+		t.Fatalf("after rotation: %+v", d)
+	}
+
+	// Removed sam relabels his slot as lin's: the recorded `to` gives him away.
+	o2 := mustCreate(t, t.TempDir(), "checkout", "prod", lin, sam)
+	k := o2.Keys.CurrentKey()
+	k.Slots["lin/laptop"], k.SlotTo["lin/laptop"] = k.Slots["sam/laptop"], k.SlotTo["sam/laptop"]
+	delete(k.Slots, "sam/laptop")
+	delete(k.SlotTo, "sam/laptop")
+	d = o2.DiffSlots(devices(lin))
+	if len(d.Rekeyed) != 1 || len(d.Extra) != 1 || d.Extra[0] != "lin/laptop" {
+		t.Fatalf("relabelled slot: %+v", d)
+	}
+}

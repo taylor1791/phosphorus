@@ -156,7 +156,7 @@ func TestSingleUserBootstrap(t *testing.T) {
 		t.Fatalf("ls --json = %+v", ls)
 	}
 	// Keys file is marked generated, files are deterministic text.
-	contains(t, "keys", r.Read("api/.carbon/dev.keys.toml"), "scope = \"api/dev\"\ncurrent = \"k", "[keys.k", "\"ada/laptop\" = \"age1:")
+	contains(t, "keys", r.Read("api/.carbon/dev.keys.toml"), "scope = \"api/dev\"\ncurrent = \"k", "[keys.k", "\"ada/laptop\" = { to = \"sha256:")
 }
 
 func TestReadersAndNonReaders(t *testing.T) {
@@ -167,7 +167,7 @@ func TestReadersAndNonReaders(t *testing.T) {
 	res := w.Lin.In(co).Stdin("sk_live_1").Must("set", "stripe_api_key", "--env", "prod")
 	contains(t, "stdout", res.Stdout, "Created the key for checkout/prod, wrapped to 2 device(s)")
 	keys := w.Read(co + "/.carbon/prod.keys.toml")
-	contains(t, "keys", keys, `"lin/laptop" = "age1:`, `"machine:deploy-checkout" = "age1:`)
+	contains(t, "keys", keys, `"lin/laptop" = { to = "sha256:`, `"machine:deploy-checkout" = { to = "sha256:`)
 	if strings.Contains(keys, "ada/laptop") || strings.Contains(keys, "sam/laptop") {
 		t.Fatalf("non-readers got slots:\n%s", keys)
 	}
