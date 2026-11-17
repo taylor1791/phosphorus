@@ -1,7 +1,9 @@
 # Contributing to carbon
 
-Read `docs/design.md` (what and why), `docs/implementation.md` (the contract),
-`docs/deviations.md` (where the code differs), and `docs/format.md`.
+Read `docs/design.md` (what and why; partly out of date), `docs/implementation.md` (the contract),
+`docs/deviations.md` (where the code differs, decisions, limits), `docs/format.md`,
+`docs/threat-model.md` and `docs/ci.md`. With Nix, `nix develop` gives a shell with
+the tools below.
 
 ## Toolchain
 
@@ -48,7 +50,8 @@ import "flag"
 func init() {
 	Register(&Command{
 		Name:    "who",              // or "env use" for a subcommand
-		Usage:   "<package> [--env <env>]",
+		Group:   GroupInspection,    // where `carbon help` lists it: GroupDaily, GroupAccess, GroupInspection, GroupSetup
+		Usage:   "<package> [--env <env>] [--all]", // name every flag of the command; a test checks
 		Summary: "Explain who reads a package, and through which rule",
 		Help:    "Longer text for `carbon help who`.",
 		MinArgs: 1, MaxArgs: 1,      // the zero value accepts no positionals; MaxArgs -1 = unlimited
@@ -87,7 +90,7 @@ was (for `run`).
 | `TrunkKeys(w, pol, pkg, env)` | A scope's keys file at trunk (or the working tree under the exceptions) |
 | `Identities(required)` | The caller's identities (`CARBON_IDENTITY`, `CARBON_IDENTITY_FILE`, XDG path; exit 6) |
 | `LoadScope(w, pkg, env)` / `OpenScope(w, pkg, s)` | Load a scope; open it, turning "not a reader" into the design's exit-3 error, then `VerifyTrunk` |
-| `VerifyTrunk(w, pkg, opened)` | Check an opened scope against trunk's keys file, then the reader's pin (`CheckPin`; refusal points at `carbon trust`); call it on every path that opens a scope without `OpenScope` |
+| `VerifyTrunk(w, pkg, opened)` | Check an opened scope against trunk's keys file, then the reader's pin (`CheckPin`; refusal points at `carbon trust`); call it on every path that opens a scope without `OpenScope`. A command that seals (set, edit) sets `c.sealing = true` first: then a key trunk has retired, or a key only on this branch that the caller has not pinned, is refused |
 | `NoAccessErr(pol, pkg, env, me, slots)` | The "you cannot read X in Y" error with readers and the next command |
 | `RecordPin(w, opened, ids)` | Pin the current key for the caller; call after `Scope.Save` when you created or rotated the key (`apply`) |
 | `RenamePins(w, oldScope, newScope)` / `LoadPins(w)` | Move pins for `rename`; load the pins file (corrupt file → error with the fix) |
