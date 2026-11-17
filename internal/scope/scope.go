@@ -168,7 +168,13 @@ type Opened struct {
 	// inboxErrs records retired inbox_sealed fields that failed to open:
 	// drops under them report tampering.
 	inboxErrs map[string]error
+	// ids are the identities Open was called with (nil after Create).
+	ids []agewrap.Identity
 }
+
+// Identities returns the identities the scope was opened with (nil for a
+// scope just created). pins.ReaderID keys pins by them.
+func (o *Opened) Identities() []agewrap.Identity { return o.ids }
 
 // Close zeroes the keys held in memory.
 func (o *Opened) Close() {
@@ -266,6 +272,7 @@ func (s *Scope) Open(ids []agewrap.Identity, prefer ...string) (*Opened, error) 
 	}
 	cur := s.Keys.CurrentKey()
 	o := &Opened{Scope: s, keys: map[string]*seal.Key{}, inboxes: map[string]agewrap.Identity{}, keyErrs: map[string]error{}}
+	o.ids = ids
 
 	var soft []agewrap.Identity
 	for _, id := range ids {

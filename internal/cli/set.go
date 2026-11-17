@@ -181,6 +181,11 @@ func runSet(c *Context) error {
 	if err != nil {
 		return err
 	}
+	if res.CreatedKey {
+		if err := c.RecordPin(w, opened, ids); err != nil {
+			return err
+		}
+	}
 	for _, f := range written {
 		if f == s.KeysPath() && !res.CreatedKey {
 			continue

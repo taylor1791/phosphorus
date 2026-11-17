@@ -294,6 +294,35 @@ and has one (`scope.Opened.VerifyTrunk`):
   descend from trunk's (fix: `git checkout <trunk> -- <keys file>`, or merge
   trunk).
 
+**Readers pin the key they verified.** Once a forged keys file is merged,
+trunk equals the forgery and the trunk check passes vacuously. So each clone
+remembers, per reader identity, the last key it verified for each scope, in
+`<git common dir>/carbon/pins.toml` (shared by the clone's worktrees, never in
+the work tree, mode 0600):
+
+```toml
+[readers.<first 16 bytes of SHA-256 over the reader's sorted public keys, hex>]
+"checkout/prod" = { key = "k3f9q2", fingerprint = "<hex SHA-256 of "carbon/v1/pin\n" || key>" }
+```
+
+After the trunk check, on every reader path (`scope.Opened.CheckPin`):
+
+- no pin: pin the current key (trust on first use);
+- pinned id is the current id: the fingerprints must match;
+- pinned id is a retired key that opened through the chain: its fingerprint
+  must match the pin, then the pin moves to the current key;
+- pinned id not in the chain: accepted, pin unchanged, only when trunk lists
+  the working tree's current key as retired (the branch is behind);
+- otherwise refuse (exit 1): the key was replaced by someone who did not hold
+  the previous key, or the pin is stale. Fixes: `git log -p -- <keys file>`,
+  or `carbon trust <package> --env <env>`, which shows the pinned and current
+  keys and the last commit to the keys file, asks for confirmation, and
+  re-pins.
+
+A key the caller creates (`set`) or rotates (`apply`, after saving) is pinned
+by the caller. `rename` moves pins to the new scope name. A corrupt pins file
+is an error that names the file; deleting it re-pins on next use.
+
 The drop path of `set` also refuses when the working tree lists trunk's
 current key as retired (the local trunk ref is behind: `git fetch`).
 

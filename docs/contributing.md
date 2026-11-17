@@ -85,8 +85,10 @@ was (for `run`).
 | `TrunkKeys(w, pol, pkg, env)` | A scope's keys file at trunk (or the working tree under the exceptions) |
 | `Identities(required)` | The caller's identities (`CARBON_IDENTITY`, `CARBON_IDENTITY_FILE`, XDG path; exit 6) |
 | `LoadScope(w, pkg, env)` / `OpenScope(w, pkg, s)` | Load a scope; open it, turning "not a reader" into the design's exit-3 error, then `VerifyTrunk` |
-| `VerifyTrunk(w, pkg, opened)` | Check an opened scope against trunk's keys file; call it on every path that opens a scope without `OpenScope` |
+| `VerifyTrunk(w, pkg, opened)` | Check an opened scope against trunk's keys file, then the reader's pin (`CheckPin`; refusal points at `carbon trust`); call it on every path that opens a scope without `OpenScope` |
 | `NoAccessErr(pol, pkg, env, me, slots)` | The "you cannot read X in Y" error with readers and the next command |
+| `RecordPin(w, opened, ids)` | Pin the current key for the caller; call after `Scope.Save` when you created or rotated the key (`apply`) |
+| `RenamePins(w, oldScope, newScope)` / `LoadPins(w)` | Move pins for `rename`; load the pins file (corrupt file → error with the fix) |
 | `Me(pol, ids)`, `DeviceIDs(ds)` | Which devices the caller's identities are |
 | `Confirm(question)` | y/N on the terminal; `--yes` skips; no terminal → exit 7. Print the plan first |
 | `ReadSecret(prompt)` | Hidden prompt on a terminal, else stdin minus one trailing newline |
