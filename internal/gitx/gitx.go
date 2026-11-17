@@ -350,3 +350,13 @@ func (r *Repo) RemoteDefault() (ref string, ok bool, err error) {
 	}
 	return "", false, nil
 }
+
+// CommonDir returns the absolute git common directory: shared by every
+// worktree of a clone (unlike GitDir, which is per worktree).
+func (r *Repo) CommonDir() (string, error) {
+	out, err := r.Git("rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}

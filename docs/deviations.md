@@ -90,6 +90,12 @@ Each entry says what differs from `docs/implementation.md` and why.
   only as trustworthy as the review that merged it. A new keys file in a pull
   request is a trusted act to review, like a drop; `check` lists new scope
   keys.
+- **Pins protect only readers who opened the scope before in this clone.**
+  A new clone, or a CI job with a fresh checkout (machines usually are), has
+  no pins and trusts the first key it sees. A pin also cannot detect a forged
+  rotation by a removed reader who still holds the previous key: that key is
+  in the chain and matches the pin. For that, key-changing commits must be
+  authored by a current reader, which `check` flags for review.
 - **A value under a retired key** proves only that its writer held that key,
   which a removed reader still may. Readers can still open it (old branches
   must merge), `ls` marks it "author unproven", and `apply` lists each such
