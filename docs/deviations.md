@@ -74,3 +74,22 @@ Each entry says what differs from `docs/implementation.md` and why.
 13. **`DirSource.Find` skips** directories whose name starts with `.` and
     `node_modules` when looking for package files, in the working tree and at
     a ref alike.
+14. **`export -o` outside the repository** is allowed: git cannot commit
+    it, which is what the "not ignored" rule protects against (deploys
+    write to paths such as `/run/secrets`). Inside the work tree the path
+    must be ignored by `git check-ignore`; a tracked file never is.
+15. **dotenv quoting** in `export`: a value of only `[A-Za-z0-9_./:@%+,=-]`
+    is bare; anything else is double-quoted with `\\ \" \$`, backquote,
+    `\n \r \t` escaped. A value with a NUL byte is refused by `run` and
+    `export` alike (no process environment can hold it).
+16. **Resolution errors** (`run`, `export`): an unknown package, undeclared
+    name or unset secret exits 5; a reference to another package's
+    `private = true` secret exits 3; an unset `${env:NAME}`, a var with no
+    value for the environment, or a name that is both secret and var exits
+    1. A scope with no key yet makes its references "not set" (exit 5).
+    `run`'s "command not found" exits 1.
+17. **`edit`** lists declared secrets only; removing a line deletes
+    nothing; an empty value is refused for a set secret and ignored for an
+    unset one; values that are not UTF-8 are shown as a comment and cannot
+    be edited there. A drop that is not changed stays a drop.
+18. **`env use --clear`** removes the stored environment.
