@@ -38,6 +38,12 @@ own. Each section is numbered from 1.
    config `carbon.trunk`, then the remote default branch. A workspace file
    that still has `trunk` is an error. `carbon init --trunk <ref>` runs
    `git config carbon.trunk <ref>` for that clone and says so.
+8. **Keys files are not marked generated** (now in the contract). The
+   contract first had `init` add `**/.carbon/*.keys.toml linguist-generated`
+   to `.gitattributes`. That collapsed keys files in review tools and hid
+   which key and slot lines changed, which is exactly what a reviewer must
+   see. `init` and `carbon-migrate` no longer write the line, and `doctor`
+   no longer asks for it. A repository that already has it should delete it.
 
 ## Decisions
 
@@ -78,35 +84,61 @@ own. Each section is numbered from 1.
    comments between inline elements. Every operation is all or nothing,
    and inserted lines use the file's own line ending (CRLF files stay
    CRLF).
+10. **Trunk is a branch and a commit, never a tag.** git resolves a short
+    name through `refs/tags/` before `refs/heads/` and `refs/remotes/`, and
+    CI fetches tags, so a pushed tag named `main` or `origin/main` stood in
+    for trunk and `apply` granted from the tag's policy. Trunk is now
+    resolved once per command to a full branch refname and its commit
+    (`policy.ResolveTrunk`, `gitx.Repo.ResolveBranchRef`; rules in the
+    contract's Trunk section). A short name is looked up only as
+    `refs/remotes/<name>` and `refs/heads/<name>`; when both exist carbon
+    asks for the full ref rather than guess which one is trunk.
+    `refs/tags/...` and every other `refs/` namespace are refused.
+    Reads use the resolved commit (`Policy.At()`), so a fetch that moves the
+    ref during a command cannot mix two trunks in one run. Output shows the
+    full ref and the short commit (`refs/remotes/origin/main at 3f9c2a1`) so
+    a reviewer of a CI log can see exactly what was compared.
+11. **Symbolic links are refused.** A package whose `.carbon` directory was
+    a symbolic link made `set` write the scope's key files outside the
+    repository, and a symlinked `carbon.toml` or keys file was read from
+    wherever it pointed. Every command now refuses a link in the path of a
+    working-tree `carbon.toml`, the root `.carbon` policy files, a package's
+    `.carbon` directory and the scope files in it, with an error naming the
+    path (`config.NoSymlinks`, `config.NoSymlinkFile`). Only components
+    below the workspace root are checked; the root itself may be reached
+    through a link. `check` reads with `DirSource.SkipSymlinks`, reports
+    each link as `file.symlink` (error) and judges the rest; a symlinked
+    root `carbon.toml` leaves no workspace to judge, so `check` stops with
+    the error.
 
 ### Scope keys, sealing and pins
 
-10. **Scope creation** (only by a reader, as the contract says) wraps the new
+12. **Scope creation** (only by a reader, as the contract says) wraps the new
     key to the devices policy names, skipping non-hybrid devices under
     `require_pq` and access entries that name no team, person or machine,
     each with a warning. With no device left it refuses. The reason for the
     reader-only rule: a non-reader could otherwise make a key and seal values
     no reader wrote.
-11. **Branch and trunk out of step.** `set` refuses to create a key when
+13. **Branch and trunk out of step.** `set` refuses to create a key when
     trunk already has one for the scope ("merge trunk first"), and a
     non-reader cannot drop into a scope whose key exists only on the branch,
     or when the branch has already retired trunk's current key (local trunk
     is stale: `git fetch`).
-12. **No sealing under a key trunk retired.** `set` and `edit` refuse (exit
+14. **No sealing under a key trunk retired.** `set` and `edit` refuse (exit
     1) when trunk lists the working tree's current key as retired: the branch
     is behind trunk, or reverted a rotation. A value sealed under a retired
     key is readable by whoever it was retired from. The fix is to merge
     trunk. Reading is unchanged (`VerifyTrunk` with `Context.sealing`).
-13. **No trust on first use for a key that exists only on this branch.**
+15. **No trust on first use for a key that exists only on this branch.**
     When trunk is a reviewed ref and has no keys file for the scope, a reader
     with no pin for it may read, but nothing is pinned, and `set` and `edit`
     refuse to seal: whoever created the key could read what is set. The
     reader who created the key pinned it at creation and can seal; anyone
     else needs `carbon trust` (after checking who committed the keys file)
     or the key merged to trunk (`checkPin`).
-14. **Promotion clamps `set`.** A drop's set time is chosen by its writer; at
+16. **Promotion clamps `set`.** A drop's set time is chosen by its writer; at
     promotion a set time later than now becomes now (`PromoteAt`).
-15. **Rotation debt** reads retired keys from the working tree and trunk
+17. **Rotation debt** reads retired keys from the working tree and trunk
     together, trunk's record winning, so editing or deleting a retired key on
     a branch does not hide debt. A retired key's reason counts if it names a
     removal or a re-key, in every form `apply` writes (`removed sam`,
@@ -116,16 +148,18 @@ own. Each section is numbered from 1.
     after the value was set. A value whose set time equals the retirement
     time counts (set <= retired): set times are whole seconds, so a value set
     in the same second as the rotation may have been readable with the old
-    key.
+    key. A line whose ciphertext is unchanged from trunk's takes trunk's set
+    time for debt, so re-dating it on a branch hides nothing (`check` also
+    reports it as `secret.redated`).
 
 ### set, get, edit, run, export
 
-16. **`set` needs a declaration** in `[secrets]` (exit 5) and refuses an empty
+18. **`set` needs a declaration** in `[secrets]` (exit 5) and refuses an empty
     value unless `--allow-empty` is given; a name that is a var is a usage
     error. A stored empty value is set for `run`, `export` and `check`.
-17. **`get`** writes the raw value, with a trailing newline only when stdout is
+19. **`get`** writes the raw value, with a trailing newline only when stdout is
     a terminal.
-18. **`edit`** lists declared secrets only; removing a line deletes nothing.
+20. **`edit`** lists declared secrets only; removing a line deletes nothing.
     `--allow-empty` means what it means for `set`: without it, emptying a set
     value saves nothing and names the flag, and an uncommented `name = ""`
     for an unset secret is ignored; with it, both store the empty value.
@@ -137,7 +171,7 @@ own. Each section is numbered from 1.
     another writer changed one of the edited names meanwhile, nothing is
     saved. ^C goes to the editor and carbon judges by its exit status;
     SIGTERM and SIGHUP stop the editor and clean up.
-19. **`export -o` outside the repository** is allowed: git cannot commit
+21. **`export -o` outside the repository** is allowed: git cannot commit
     it, which is what the "not ignored" rule protects against (deploys
     write to paths such as `/run/secrets`). Inside the work tree the path
     must be ignored by `git check-ignore`; a tracked file never is. The
@@ -146,7 +180,7 @@ own. Each section is numbered from 1.
     through it; across filesystems the target is written directly, 0600,
     never through a symlink. `export --format json` refuses a value that is
     not UTF-8.
-20. **dotenv quoting** in `export` targets Node dotenv (v16+) and
+22. **dotenv quoting** in `export` targets Node dotenv (v16+) and
     python-dotenv: a value of only `[A-Za-z0-9_./:@%+,=-]` is bare; a value
     with no single quote, newline or carriage return that does not end in a
     backslash is single-quoted (literal in both); anything else is
@@ -155,7 +189,7 @@ own. Each section is numbered from 1.
     and `\\` inside double quotes as written; python-dotenv interpolates
     `${NAME}` unless loaded with `interpolate=False`. A value with a NUL byte
     is refused by `run` and `export` alike.
-21. **Resolution errors** (`run`, `export`): an unknown package, undeclared
+23. **Resolution errors** (`run`, `export`): an unknown package, undeclared
     name or unset secret exits 5; a reference to another package's
     `private = true` secret exits 3; an unset `${env:NAME}`, a var with no
     value for the environment, or a name that is both secret and var exits
@@ -164,21 +198,21 @@ own. Each section is numbered from 1.
     (`check` reports them as `graph.forbidden-env`). A scope with no key yet
     makes its references "not set" (exit 5). `run`'s "command not found"
     exits 1.
-22. **`run` stops reading its own flags at the command**: everything from
+24. **`run` stops reading its own flags at the command**: everything from
     the first positional argument on (or after `--`) is the command line,
     so `carbon run make -C build` passes `-C build` to make. The command
     starts in the `-C` directory. PATH lookup skips relative and empty
     entries and says so when that is the only place the command is.
-23. **`env use --clear`** removes the stored environment.
+25. **`env use --clear`** removes the stored environment.
 
 ### init, join, help
 
-24. **`init`** writes every environment as readable by `@engineering` and an
+26. **`init`** writes every environment as readable by `@engineering` and an
     empty `engineering` team. The first person to `join` a workspace with no
     people joins every empty team, so one developer can `init`, `join`, `set`,
     but only while carbon is not adopted on trunk (bootstrap); afterwards team
     membership is a reviewed change.
-25. **`join`** reuses an existing identity (one per device) and is idempotent.
+27. **`join`** reuses an existing identity (one per device) and is idempotent.
     `--passphrase` reads the passphrase from stdin when there is no terminal.
     A passphrase-protected identity cannot be used without a terminal (exit 6;
     CI should use `CARBON_IDENTITY`). It prints a next step that fits the
@@ -187,7 +221,7 @@ own. Each section is numbered from 1.
     (for example on a new device) is told to open a pull request and wait for
     a reader's `apply`; a newcomer is told to ask to be added to a team or
     run `carbon request`.
-26. **`carbon help`** groups commands (Daily use, Access, Inspection, Setup)
+28. **`carbon help`** groups commands (Daily use, Access, Inspection, Setup)
     by the `Group` field each command registers, shows each command's own
     flags apart from the global flags, and prints the exit-code table. An
     unknown command suggests the nearest command name. `carbon version` and
@@ -196,45 +230,55 @@ own. Each section is numbered from 1.
 
 ### check and status
 
-27. **`check`: which environments count.** A declared secret with no value
+29. **`check`: which environments count.** A declared secret with no value
     in any workspace environment is an error (`secret.unset`): `run`
     resolves the same `[env]` table in every environment. A referenced var
     with no value and no `default` for an environment is an error too. A
     stored empty value is set.
-28. **`check` without a reviewed trunk.** Under bootstrap and `worktree`
+30. **`check` without a reviewed trunk.** Under bootstrap and `worktree`
     trunk the working tree is the baseline: an unnamed slot is a pending
     revocation, never an unbacked grant, and key changes are not compared.
-    `check` refuses to run at all when no trunk ref can be chosen (no
-    remote-tracking refs, no override; a CI checkout of one commit looks
-    like that) unless `--bootstrap` is given; a resolved trunk ref without a
-    `carbon.toml` stays an automatic bootstrap. With remotes but no
-    resolvable trunk, `check` fails (exit 1) with what CI must set; `status`
-    carries on.
-29. **`check`: the shape of a key change.** The contract excuses a changed
+    `check` never bootstraps by itself: it exits 1 unless `--bootstrap` is
+    given when no trunk ref can be chosen (no remote-tracking refs, no
+    override; a CI checkout of one commit looks like that), when the trunk
+    ref has no root `carbon.toml`, and when trunk's root `carbon.toml` is a
+    carbon 0.0.3 file (the carbon-migrate cutover). Before, a resolved trunk
+    without a carbon 1.0 `carbon.toml` was an automatic bootstrap, so
+    pointing `CARBON_TRUNK` at the wrong branch, or one without carbon, made
+    `check` compare a branch with itself and pass any forged key. Other
+    commands keep the automatic bootstrap and print its notice. With remotes but no resolvable trunk, `check` fails (exit
+    1) with what CI must set; `status` carries on.
+31. **`check`: the shape of a key change.** The contract excuses a changed
     `current` or `inbox` when trunk's key had a pending revocation. `check`
     reads that as excusing a rotation exactly as `apply` writes it; the
     resulting rules are now in the contract (`key.changed`,
     `key.retired-changed`, `key.unverified`, `key.behind-trunk`). A pending
     revocation includes a slot whose `to` no longer matches its device's
     trunk policy key (a re-keyed device, `hasPendingRevocation`); before
-    that, `apply`'s re-key rotation failed `check` with `key.changed`.
-30. **`check`: scopes across trunk and the working tree.** Scopes are the
+    that, `apply`'s re-key rotation failed `check` with `key.changed`. The
+    retired record's `reason` feeds rotation debt, so `check` no longer
+    accepts any text there: the code that builds it moved from `apply` to
+    `scope.RotationReason`, and `check` recomputes it from trunk's key and
+    trunk policy and requires the record to say exactly that
+    (`key.changed` otherwise), so a rotation cannot name the wrong person
+    and leave the real removal without debt.
+32. **`check`: scopes across trunk and the working tree.** Scopes are the
     union of both sides (rules in the contract: `key.new`, `key.removed`,
     `scope.removed`, `store.orphan`). The reason for `key.removed`: removing
     an environment while keeping forged keys for it fails, and re-adding it
     later meets the new-environment rule (every slot unbacked until its
     policy merges), so the two-pull-request trick reduces to `key.new`,
     which is in the banner.
-31. **`check`: proposed policy changes.** `policy.grant-proposed` and
+33. **`check`: proposed policy changes.** `policy.grant-proposed` and
     `policy.revoke-proposed` (info, never raised by `--strict`) list what the
     working tree's policy adds, or removes or re-keys, relative to trunk's
     for a scope that has a key, so a `request` or `remove` pull request shows
     the grant or rotation it leads to. A device that is already a pending
     grant or revocation against trunk is not repeated.
-32. **`check`: `graph.forbidden-env`** (error) is an `[env]` template that
+34. **`check`: `graph.forbidden-env`** (error) is an `[env]` template that
     references `${env:CARBON_IDENTITY}` or `${env:CARBON_IDENTITY_FILE}`,
-    which `run` and `export` refuse anyway (21).
-33. **`status`** lists, besides readable scopes, waits, grants, revocations,
+    which `run` and `export` refuse anyway (23).
+35. **`status`** lists, besides readable scopes, waits, grants, revocations,
     drops, new scope keys and rotation debt:
     - "Refused": scopes the caller holds a slot in that readers would refuse.
       Keys that do not follow from trunk's are judged keylessly (inbox
@@ -248,21 +292,48 @@ own. Each section is numbered from 1.
 
     It does not decrypt a passphrase-protected identity unless `--unlock` is
     given; a wrong passphrase is "no usable identity", not an abort.
+36. **`check`: re-dated and future-dated lines.** A line's set time is
+    chosen by its writer and is what rotation debt counts from. Changing
+    it while keeping the ciphertext hid the value's debt and passed `check`
+    silently. Now a value with trunk's ciphertext and a different set time
+    is `secret.redated` (error), any entry set more than 10 minutes in the
+    future is `secret.future` (error; the allowance, `audit.ClockSkew`, is
+    for clocks that disagree between machines), and debt uses trunk's set
+    time for a line whose ciphertext is trunk's (17).
+37. **`check`: a rename.** A rename done as documented (51) failed
+    `check` with `key.removed`, `key.new` and `trunk.unreadable`. `check` now
+    recognises the case readers accept: the package keeps its directory,
+    its new name is not on trunk, and trunk's keys file there names the old
+    package (`audit/rename.go`). Every value and slot was re-sealed under
+    the new name and `check` holds no key, so it compares structure only
+    (rules in the contract) and reports one `scope.renamed` banner item per
+    scope; any other difference is `key.changed`. A rename and a move in
+    one change is not recognised and fails as before.
+38. **`check`: changed device keys and new devices.** Replacing the public
+    key of an existing person device or machine, or adding a device to an
+    existing person, gives that key access once a reader applies, but
+    `check` listed neither: a reviewer saw only a changed line in a people
+    file. Both are now banner items, `policy.device-key-changed` and
+    `policy.device-added` (info, never raised by `--strict`, since both are
+    routine), with the new key's four-word fingerprint, which the reviewer
+    confirms with the device's owner over another channel. A new person is
+    a new file; once access names them, `policy.grant-proposed` lists them.
 
 ### User management (apply, request, remove, rename)
 
-34. **`apply` creates keys** for scopes whose package declares secrets and
+39. **`apply` creates keys** for scopes whose package declares secrets and
     that have no key on the branch or on trunk, wrapped to the eligible
     devices trunk policy names, but only when the caller is one of those
     devices (as for `set`). Otherwise the scope is reported as waiting for
     one of them. Two branches that both create the same scope conflict on
     its keys file.
-35. **`apply` scope filters** are `--package` and `--env` only (both global
+40. **`apply` scope filters** are `--package` and `--env` only (both global
     flags); `CARBON_ENV` and `carbon env use` do not narrow it. `--dry-run`
     prints the plan and changes nothing. The plan header says where policy
-    came from: `main (git config carbon.trunk)`, `origin/main (remote
-    default)`, or the working tree.
-36. **`apply` exit codes.** Nothing to do: 0. Work done, other scopes left
+    came from: the full trunk ref and short commit with its source
+    (`refs/remotes/origin/main at 3f9c2a1 (remote default)`), or the
+    working tree.
+41. **`apply` exit codes.** Nothing to do: 0. Work done, other scopes left
     for someone else: 0, with the rest reported. A scope that is refused or
     blocked for a reason that could be tampering (marked `suspect` in
     `--json`: a key not from trunk, a key not on trunk, a rotation from
@@ -271,7 +342,7 @@ own. Each section is numbered from 1.
     nothing the caller could do but work pending: 3 if any scope needs a
     reader, else 1. A scope that fails is left untouched, the others are
     committed, and the exit is 1.
-37. **`apply` and git.** Without `--no-commit`, it refuses (before asking)
+42. **`apply` and git.** Without `--no-commit`, it refuses (before asking)
     when a keys or secrets file of a scope it would change has uncommitted
     changes, since its commit would include them, and refuses on a detached
     HEAD (such a commit belongs to no branch and is easily lost). It commits
@@ -281,7 +352,7 @@ own. Each section is numbered from 1.
     else's branch must not run hook code that branch configured
     (`gitx.Repo.Commit`). The commit is reviewed like any access change;
     `carbon check` lists its key changes for the reviewer.
-38. **`apply` against trunk, one rule.** For each scope with a key, when
+43. **`apply` against trunk, one rule.** For each scope with a key, when
     trunk is a ref:
     - trunk has a key and the branch has none: *blocked* (merge trunk);
     - trunk has no keys file but the branch does: *blocked*, suspect ("not
@@ -302,11 +373,21 @@ own. Each section is numbered from 1.
       on the branch under the still-current key could come from the reader
       being removed, and the rotation would re-seal it as trusted. Grants
       and drop promotion without a rotation are unaffected.
-39. **Drops that do not open** are never fatal: rotation uses
+44. **Drops that do not open** are never fatal: rotation uses
     `RotateSkippingBadDrops`, promotion skips them, and each is named in the
     plan ("leaves drop") and the commit message. Promotion uses `PromoteAt`
-    (14).
-40. **Unproven values.** Every entry under a retired key is listed by name
+    (16).
+45. **`apply` promotes only drops that trunk has, line for line.** `apply`
+    on an unmerged branch promoted a drop that existed only there, which
+    turned an unreviewed value into a sealed one and took it out of
+    `check`'s banner. When trunk is a ref, a drop is promoted only when
+    trunk's secrets file has the identical line (same name, key, set time
+    and drop); every other drop is left as a drop and listed in the plan as
+    "not on trunk yet; left as a drop" (`DropsNotOnTrunk`). A drop that
+    `rename` re-sealed differs from trunk's line, so it stays a drop until
+    the rename merges. Under bootstrap and `worktree` trunk there is no
+    reviewed line to compare with, and drops are promoted as before.
+46. **Unproven values.** Every entry under a retired key is listed by name
     in the plan, with its key and set time, and marked when its set time is
     after its key was retired (advisory only: a forger can back-date). By
     default, with or without `--yes`, they and stale drops are left as they
@@ -314,11 +395,11 @@ own. Each section is numbered from 1.
     opens them). `--reseal-unproven` re-seals them under the current key,
     which vouches for them; they are then listed as "re-seals as trusted"
     in the plan being confirmed.
-41. **`require_pq`.** Non-hybrid devices are never wrapped to; they are
+47. **`require_pq`.** Non-hybrid devices are never wrapped to; they are
     reported. An existing non-hybrid slot is not rotated away by itself (it
     is reported as a `check` failure), but a rotation for another reason
     wraps only to hybrid devices.
-42. **Rotation reason.** `removed <who>` names a person when all of their
+48. **Rotation reason.** `removed <who>` names a person when all of their
     slots go and the scope no longer names any of their devices, else each
     device (`ada/laptop`), and machines as `machine:<name>`. A device whose
     slot records (`to`) a different public key than trunk lists for it now
@@ -326,19 +407,19 @@ own. Each section is numbered from 1.
     id) is rotated too: the plan says "<device>'s key changed" with the new
     key's fingerprint and the old slot's short hash, and the reason adds
     `rekeyed <device>` (`removed sam, rekeyed ada/laptop`, or `rekeyed
-    ada/laptop` alone). Rotation debt counts both (15), and `check` accepts
-    both as justifying the rotation (29). "Can finish it" lists only current
+    ada/laptop` alone). Rotation debt counts both (17), and `check` accepts
+    both as justifying the rotation (31). "Can finish it" lists only current
     readers who stay readers. After a rotation or creation is saved, apply
     records the caller's pin for the new key (`RecordPin`); a scope the pin
     check refuses is a refused scope (exit 1).
-43. **`request`** refuses the root package (its `[access]` is the default
+49. **`request`** refuses the root package (its `[access]` is the default
     for every package). It proposes the caller's person, or
     `machine:<name>` for a machine identity, and reports "already reads"
     when the reader is named or reaches the scope through a team. A missing
     entry is created from the workspace default plus the reader.
-44. **`remove`** refuses to remove a person's only device (that would leave
+50. **`remove`** refuses to remove a person's only device (that would leave
     a person in every list who reads nothing); remove the person instead.
-45. **`rename`** needs a reader of every environment that has a key,
+51. **`rename`** needs a reader of every environment that has a key,
     re-wraps each slot to the public key trunk policy has for that device id
     (refusing if trunk has none: run `apply` first), keeps values under the
     key they were sealed with, and does not commit. It prepares every file
@@ -358,7 +439,9 @@ own. Each section is numbered from 1.
     - `apply` takes the scope's access from the old name's trunk entry, not
       the workspace default that an unknown package name would get;
     - non-readers cannot drop into it (trunk's inbox is bound to the old
-      name);
+      name), and a drop `rename` re-sealed stays a drop (45);
+    - `check` reports each scope as `scope.renamed` in the banner when its
+      structure matches trunk's under the old name (37);
     - moving the directory in the same change would leave nothing on trunk
       to verify against, so `rename` tells people to move it separately.
 
@@ -409,9 +492,9 @@ the defence for most of them.
    `check` opens nothing, so a rotation or a new scope key made by a reader
    looks the same as one made by someone else with public keys only. It
    enforces every structural rule a legitimate `apply` commit satisfies, and
-   lists every key change (new key, rotation, new slot, removed scope), every
-   drop, and every value under a retired or older key in a banner so none
-   passes silently. A passing check on a change to keys files is not "safe
+   lists every key change (new key, rotation, new slot, renamed or removed
+   scope), every changed device key and new device, every drop, and every
+   value under a retired or older key in a banner so none passes silently. A passing check on a change to keys files is not "safe
    to merge without review", and neither is an `apply` commit: the author of
    every key-changing commit must be a current reader of the scope.
 2. **A forged rotation by a removed reader is not detected.** A reader
@@ -425,7 +508,7 @@ the defence for most of them.
    with this identity.** Pins are per clone and per reader identity. A fresh
    clone, or a CI job with a fresh checkout (machines usually are), has no
    pins and trusts the first key it sees (trust on first use, unless the key
-   exists only on the branch; see Decisions 13). A second identity in the
+   exists only on the branch; see Decisions 15). A second identity in the
    same clone, or the same person in another clone, has its own pins.
 4. **A scope's first key is trusted on review.** carbon cannot prove that a
    reader created it. A keys file is only as trustworthy as the review that
@@ -435,11 +518,19 @@ the defence for most of them.
    which a removed reader still may. Readers can still open it (old branches
    must merge), `ls` marks it "author unproven", `status` lists it under
    "Unproven", and `apply` lists it and leaves it as it is unless
-   `--reseal-unproven` is given (Decisions 40). Its set time is chosen by
-   its writer, so the "set after its key was retired" mark is advisory.
+   `--reseal-unproven` is given (Decisions 46). Its set time is chosen by
+   its writer, so the "set after its key was retired" mark is advisory:
+   `check` refuses only a set time more than 10 minutes in the future
+   (`secret.future`) and a re-dated trunk line (`secret.redated`).
 6. **Slot `to` hashes are not authenticated by cryptography.** `check`
    protects them structurally (the contract's slot rules); a reader's
    `apply` treats a mismatch as a re-key and rotates.
+7. **`check` is only as strong as the CI that runs it.** On trunk itself
+   `check` compares trunk with itself, so a direct push to trunk bypasses
+   it. The workflow that runs `check` is the pull request's own copy, so a
+   contributor who can edit it in their pull request can skip `check`. Both
+   are repository settings carbon cannot see; what to protect is in
+   `docs/threat-model.md` ("The root of trust") and `docs/ci.md`.
 
 ## Known merge limits
 
@@ -458,7 +549,7 @@ the defence for most of them.
    and re-seals it only with `--reseal-unproven` (or set it again). The
    conflict-marker error for a secrets file prints this resolution.
    Since `set` and `edit` refuse to seal on a branch whose current key trunk
-   has retired (Decisions 12), a branch that has not merged the rotation
+   has retired (Decisions 14), a branch that has not merged the rotation
    must merge trunk before it can set or edit secrets in that scope.
 2. **Two concurrent applies can conflict on a slot line or on `current`.**
    Two branches that grant different devices merge cleanly when their new

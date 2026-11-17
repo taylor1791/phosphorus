@@ -121,7 +121,8 @@ A team lists people only. A person reader means all of that person's devices.
 
 Written by a deterministic writer: keys sorted, one logical item per line, LF
 endings, a trailing newline. Read back strictly (unknown keys are errors).
-`init` adds `**/.carbon/*.keys.toml linguist-generated` to `.gitattributes`.
+Nothing marks keys files as generated (no `linguist-generated` line in
+`.gitattributes`): review tools must show which key and slot lines changed.
 
 ### `<package dir>/.carbon/<env>.secrets.toml`
 
@@ -159,8 +160,25 @@ A retired key keeps no slots and no `inbox`; it may keep `inbox_sealed` so
 that drops written to its inbox on older branches still open. `reason` is
 what `apply` rotated for: `removed <who>` for a removal, `rekeyed <device>`
 for a device whose public key changed, or both (`removed sam, rekeyed
-ada/laptop`), each list comma-separated when several; any other reason is
-free text.
+ada/laptop`), each list comma-separated when several. The code that builds
+it is `scope.RotationReason`, shared by `apply` and `check`; `check`
+requires a rotation's reason to be exactly what it computes from trunk's
+key and trunk policy.
+
+## Symbolic links
+
+carbon never reads or writes its files through a symbolic link: one
+committed to the repository could point anywhere on the machine of whoever
+runs carbon. Every command refuses, with an error that names the path, a
+symbolic link anywhere in the path of a `carbon.toml` read from the working
+tree (`config.DirSource`, `config.NoSymlinks`: each component under the
+workspace root is checked with `lstat`), of the root `.carbon/` policy files
+(people, machines, teams), of a package's `.carbon/` directory, and of the
+scope files in it (for a keys or secrets file, the file and its `.carbon`
+directory; `config.NoSymlinkFile`, on read and on write). `check` reports
+each such link as `file.symlink` (**error**) and does not read through it;
+a symlinked root `carbon.toml` stops `check` with an error, since there is
+no workspace to judge.
 
 ## Encodings
 
@@ -257,17 +275,18 @@ fails loudly if it differs from `inbox`.
 ## Trunk
 
 Policy (workspace and package `[access]`, people, machines, teams) and inbox
-public keys are read from the trunk ref with `git ls-tree` and
+public keys are read from the trunk commit with `git ls-tree` and
 `git cat-file`, never from the working tree, in these commands: `apply`, the
 drop path of `set`, scope creation, the trunk check every reader runs (below),
 and the slot checks in `check`.
 
 **Choosing the ref.** Nothing a commit can change chooses the trunk. In order:
 
-1. the environment variable `CARBON_TRUNK` (a ref, or `worktree`);
-2. the clone's local git config `carbon.trunk` (a ref, or `worktree`);
+1. the environment variable `CARBON_TRUNK` (a branch ref, or `worktree`);
+2. the clone's local git config `carbon.trunk` (a branch ref, or `worktree`);
 3. the remote default branch: the target of `refs/remotes/origin/HEAD`, else
-   `origin/main`, else `origin/master`, whichever exists first.
+   `refs/remotes/origin/main`, else `refs/remotes/origin/master`, whichever
+   exists first, always as the full ref.
 
 carbon never writes git config itself (`carbon init --trunk <ref>` runs
 `git config carbon.trunk <ref>` because the user asked). A ref name must
@@ -275,13 +294,37 @@ match `[A-Za-z0-9][A-Za-z0-9._/-]*`, must not be `HEAD`, must not contain
 `@`, `:` or `..`, and must not end in `/` or `.lock`; `worktree` is the one
 special word. `[workspace] trunk` no longer exists: a workspace file that has
 it is an error telling the user to delete it and use git config or
-`CARBON_TRUNK`. `policy.Trunk` records the ref and where it came from (env,
-git config, remote default, none) for `doctor`, `status` and `check`.
+`CARBON_TRUNK`.
 
-**Errors, never fallbacks.** An override (1 or 2) that does not resolve is an
-error. A remote default that points nowhere is an error. If the repository
-has remote-tracking refs but none of rule 3's candidates and no override, that
-is an error whose hint is `git remote set-head origin -a`, `git fetch`, or
+**Resolving the ref: a branch and a commit, never a tag.** Once per command,
+trunk is resolved to a full branch refname and the commit it points to
+(`policy.ResolveTrunk`, `gitx.Repo.ResolveBranchRef`, one git process).
+git's own lookup tries `refs/tags/<x>` before `refs/heads/<x>` and
+`refs/remotes/<x>`, and CI usually fetches tags, so a pushed tag named
+`main` or `origin/main` would otherwise stand in for trunk. A configured
+value (1 or 2) is either:
+
+- a full ref under `refs/remotes/` or `refs/heads/`, used as is; or
+- a short name, looked up as exactly `refs/remotes/<name>` and
+  `refs/heads/<name>`. If both exist it is an error asking for the full ref.
+
+A value under `refs/tags/` or any other `refs/` namespace is refused. A ref
+that does not point at a commit does not resolve. Every read of trunk in the
+command uses the resolved commit (`Trunk.Commit`, `Policy.At()`), not the
+ref name. `policy.Trunk` records the full ref, the name as configured, the
+commit and where it came from (env, git config, remote default, none).
+`check`'s first line, `apply`'s plan header, `doctor` and `status` show
+trunk as the full ref and the short commit:
+`refs/remotes/origin/main at 3f9c2a1`. `check --json` reports it as
+`trunk.ref` and `trunk.commit`. CI should set
+`CARBON_TRUNK=refs/remotes/origin/main` (the full ref of its protected
+branch) and fetch it.
+
+**Errors, never fallbacks.** An override (1 or 2) that does not resolve, or
+that is ambiguous, is an error. A remote default that points nowhere is an
+error. If the repository has remote-tracking refs but none of rule 3's
+candidates and no override, that is an error whose hint is
+`git remote set-head origin -a`, `git fetch`, or
 `git config carbon.trunk <ref>`.
 
 Two documented exceptions read policy from the working tree:
@@ -292,8 +335,11 @@ Two documented exceptions read policy from the working tree:
    branch; a root with `[workspace]` is loaded as usual, so a stray `[push]` or
    `[pull]` there is still the legacy error), or no ref can be chosen
    because the repository has no remote-tracking refs and no override (a
-   brand-new local repository). The command prints a one-line notice. A 0.0.3
-   file in the working tree is still the error that points at carbon-migrate.
+   brand-new local repository). Every command except `check` then reads
+   policy from the working tree and prints a one-line notice. `check` never
+   bootstraps by itself: in each of these cases it exits 1 unless
+   `--bootstrap` is given (see the `check` rules). A 0.0.3 file in the
+   working tree is still the error that points at carbon-migrate.
 2. **No protected trunk.** `worktree` from `CARBON_TRUNK` or git config reads
    policy from the working tree always. `check` reports this as a warning.
 
@@ -386,8 +432,16 @@ checks) reads the working tree.
   slot still opens the key before the rotation.
 - **Drops.** `set` by a non-reader writes a drop to the trunk inbox key.
   Readers open drops transparently in `get`, `run`, `export`. `apply` promotes
-  each drop to a sealed value, keeping its `set` time unless that is later
-  than now (a dropper chooses it), in which case it becomes now.
+  a drop to a sealed value, keeping its `set` time unless that is later
+  than now (a dropper chooses it), in which case it becomes now. When trunk
+  is a ref, `apply` promotes only a drop whose line is on trunk: trunk's
+  secrets file for the scope has the identical entry (same name, `key`,
+  `set` and `drop`). Any other drop has not been reviewed; promoting it
+  would take it out of `check`'s banner, so `apply` leaves it as a drop and
+  lists it in the plan as "not on trunk yet; left as a drop"
+  (`DropsNotOnTrunk`). A drop that `carbon rename` re-sealed differs from
+  trunk's line, so it stays a drop until the rename merges. Under bootstrap
+  and `worktree` trunk every drop that opens is promoted.
 - **Old keys (the chain rule).** A value whose `key` is a retired id is opened
   by walking the retired chain from the current key: each retired key is
   unsealed by its `successor`, which must itself be the current key or an
@@ -404,7 +458,10 @@ checks) reads the working tree.
   key whose reason names a removal or a re-key, in any form `apply` writes
   (`audit.Exposed`), or when it is older than its `rotate_after`. Retired
   records are read from trunk and the working tree together, trunk's record
-  winning. Debt clears when a new value is set.
+  winning. An entry whose ciphertext (`value` or `drop`) is unchanged from
+  trunk's line for the same name is trunk's value: its debt uses trunk's
+  `set` time, whatever the line claims, so re-dating a line cannot hide
+  debt. Debt clears when a new value is set.
 - **Conflicts.** If a keys or secrets file contains git conflict markers,
   every command stops with an error that names the file and the fix.
 
@@ -418,8 +475,14 @@ to merge without review": its author must be a current reader. No commit
 that changes a keys file, `apply`'s included, is exempt from review. What
 this leaves open is in `docs/deviations.md` under Limits.
 
-Trunk: as chosen in the Trunk section. With no trunk ref at all (no remote
-refs, no override) `check` fails unless `--bootstrap` is given.
+Trunk: as chosen and resolved in the Trunk section; `check` compares with
+the resolved commit. `check` never bootstraps without `--bootstrap`: with
+no trunk ref at all (no remote refs, no override), with a trunk ref that has
+no root `carbon.toml`, or with a trunk whose root `carbon.toml` is a carbon
+0.0.3 file (the carbon-migrate cutover), it exits 1 with what to set,
+unless `--bootstrap` is given. Without that rule a trunk pointed at the
+wrong branch would make `check` judge every keys file by itself and pass a
+forged key.
 
 Scopes are the union of trunk's and the working tree's packages ×
 environments. For each scope it compares the working tree with trunk:
@@ -443,6 +506,13 @@ environments. For each scope it compares the working tree with trunk:
   `policy.revoke-proposed`. Both are info, never raised by `--strict`, so a
   `request` or `remove` pull request shows the grant or rotation it leads
   to. Policy on a branch grants nothing until it is on trunk.
+- When trunk is a reviewed ref, the working tree's people and machine files
+  against trunk's: a changed public key for an existing person device or
+  machine is `policy.device-key-changed`, and a new device for an existing
+  person is `policy.device-added`. Both are info, in the banner with the new
+  key's four-word fingerprint (to confirm with its owner), and never raised
+  by `--strict`. Once merged, `apply` rotates for the changed key and wraps
+  scope keys to the new one or to the new device.
 - Same `current` as trunk: `inbox` and `inbox_sealed` must equal trunk's, and
   every slot of trunk's current key must be present and identical
   (`slot.removed`): slots are append-only until a rotation. **errors**.
@@ -452,7 +522,9 @@ environments. For each scope it compares the working tree with trunk:
   names, or a slot whose `to` no longer matches its device's trunk policy
   key: a re-keyed device); trunk's current key is kept as a retired
   record (successor, reason, sealed, trunk's `created` and `inbox_sealed`)
-  whose successors reach the new current key; the new key's slots are only
+  whose successors reach the new current key; that record's `reason` is
+  exactly what `apply` writes, recomputed from trunk's key and trunk policy
+  (`scope.RotationReason`); the new key's slots are only
   for devices trunk policy grants, each `to` that device's key hash; it has an
   inbox; and every value trunk has is still present with trunk's `set` time.
   Otherwise **error** (`key.changed`).
@@ -468,6 +540,19 @@ environments. For each scope it compares the working tree with trunk:
   environment was removed: **error** (`key.removed`); removed together with
   its scope: `scope.removed`, banner. A keys or secrets file that belongs to
   no working-tree scope: **error** (`store.orphan`).
+- A rename, as `carbon rename` writes it (`audit/rename.go`): the package
+  keeps its directory, the working tree's package name is not on trunk, and
+  trunk's keys file in that directory names the old package. Every value,
+  drop and slot was re-sealed under the new name, so `check` compares the
+  scope with trunk's under the old name structurally: the same `current`
+  id; the same key ids with unchanged `created`, `retired`, `reason` and
+  `successor`; for each key the same slot devices with the same `to`; the
+  same secret names, each with the same `key`, `set` time and kind (value or
+  drop). A match is one `scope.renamed` per scope (info, banner, never
+  raised by `--strict`) in place of `key.removed`, `key.new` and
+  `trunk.unreadable`; any structural difference is **error**
+  (`key.changed`). A renamed scope skips the other comparisons with trunk
+  in this list.
 - A slot whose age file does not parse or has a recipient-stanza count other
   than one: **error**. `require_pq` scopes: a slot whose stanza type is not the
   hybrid type, a named device whose public key is not hybrid, or an inbox key
@@ -477,6 +562,13 @@ environments. For each scope it compares the working tree with trunk:
   banner (`secret.older-than-trunk`). Under a retired key: warning, banner
   (`secret.stale-key`, or `secret.stale-after-retirement` when set after the
   retirement).
+- A value with trunk's ciphertext for the same name but a different `set`
+  time: **error** (`secret.redated`). The line was re-dated, not set again;
+  it no longer opens (the set time is in its associated data), and the new
+  time would hide its rotation debt.
+- Any entry, value or drop, whose `set` time is more than 10 minutes
+  (`audit.ClockSkew`) after now: **error** (`secret.future`). Set times are
+  chosen by their writer, and a future one hides rotation debt.
 - A drop in an environment where drops are off (in trunk's policy or the
   working tree's): **error**. Any other drop: listed in the banner, not a
   failure.
@@ -489,6 +581,8 @@ referenced scopes, debt) are in the design under CI, with these additions:
   and `export` refuse it too.
 - A stored empty value counts as set (`secret.unset` does not fire), as it
   does for `run` and `export`.
+- A symbolic link at a `carbon.toml`, a `.carbon` directory, or a file in
+  one: **error** (`file.symlink`), not read through (see Symbolic links).
 - Rotation debt (`debt.removal`, `debt.rotate-after`) follows the rule in
   Scope lifecycle.
 
