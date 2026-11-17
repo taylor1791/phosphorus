@@ -11,7 +11,7 @@ The design rests on seven decisions:
 - **One static binary, written in Go.** No sops, nushell, or Nix at runtime. `carbon run` decrypts in-process.
 - **Boring cryptography.** age wraps keys and XChaCha20-Poly1305 seals values. Nothing is novel, and every secret is recoverable with stock tools and a short script.
 - **A scope is one package in one environment.** Each scope has its own key, so reading `payments` in `prod` implies nothing about `search` in `dev`.
-- **Policy is plain TOML, enforced by encryption.** Reviewers read a one-line diff. CI proves the wrapped keys match it without holding a key.
+- **Policy is plain TOML, enforced by encryption.** Reviewers read a one-line diff. CI checks the wrapped keys against it without holding a key.
 - **Built for branches.** One line per secret, one line per reader device, and no file-wide MAC, so independent changes merge.
 - **Anyone can add a secret; only readers can read one.** A contributor without access drops a value into the scope's inbox, so credentials never travel over chat.
 - **Honest offboarding.** Removing someone rotates keys and lists every credential they could read, because revocation cannot un-share a secret.
@@ -188,13 +188,14 @@ Access policy lives with the package it governs, so a monorepo's existing CODEOW
 format = 1
 environments = ["dev", "staging", "prod"]
 default_environment = "dev"
-trunk = "origin/main"
 
 [access]                       # default readers for every package
 dev     = ["@engineering"]
 staging = ["@engineering"]
-prod    = ["@sre"]
+prod    = { readers = ["@sre"], require_pq = true }
 ```
+
+The file does not say which branch is trunk. A branch could edit that line and so choose its own policy. Trunk is `CARBON_TRUNK` if set, then `git config carbon.trunk`, then the remote's default branch, none of which a commit can change.
 
 ### Package: `services/checkout/carbon.toml`
 
@@ -255,18 +256,22 @@ scope   = "checkout/prod"
 current = "k3f9q2"
 
 [keys.k3f9q2]
-inbox        = "age1x7c4..."            # public: anyone can drop a value to it
+created      = 2026-11-02T17:04:11Z
+inbox        = "age1pq1x7c4..."         # public: anyone can drop a value to it
 inbox_sealed = "carbon1:Rb1v..."        # its private half, sealed under the scope key
 
-[keys.k3f9q2.slots]
-"lin/laptop"              = "age1:YWdlLWVuY3J5cHRpb24..."
-"lin/yubikey"             = "age1:YWdlLWVuY3J5cHRpb24..."
-"machine:deploy-checkout" = "age1:YWdlLWVuY3J5cHRpb24..."
+[keys.k3f9q2.slots]                     # to: hash of the public key the slot was wrapped to
+"lin/laptop"              = { to = "sha256:9f2c...", slot = "age1:YWdlLWVuY3J5cHRpb24..." }
+"lin/yubikey"             = { to = "sha256:41ab...", slot = "age1:YWdlLWVuY3J5cHRpb24..." }
+"machine:deploy-checkout" = { to = "sha256:c07e...", slot = "age1:YWdlLWVuY3J5cHRpb24..." }
 
 [keys.k1a8c0]                  # retired, kept so older branches still decrypt
-retired = 2026-11-02T17:04:11Z
-reason  = "removed sam"
-sealed  = "carbon1:Zk2p..."     # the old key, sealed under k3f9q2
+created      = 2026-06-01T10:00:00Z
+retired      = 2026-11-02T17:04:11Z
+reason       = "removed sam"
+successor    = "k3f9q2"
+sealed       = "carbon1:Zk2p..."     # the old key, sealed under k3f9q2
+inbox_sealed = "carbon1:Qm9t..."     # kept so drops made on older branches still open
 ```
 
 The environment for a command resolves in this order: `--env`, then `CARBON_ENV`, then `carbon env use` (stored under `.git/`, so it is per worktree and cannot be committed), then `default_environment`.
@@ -291,10 +296,10 @@ A device reaches a secret only through a slot that wraps the scope key to it. Li
 
 The construction gives six properties:
 
-- **A sealed value proves a reader wrote it.** Sealing needs the scope key, so a contributor without access cannot forge or alter one.
+- **A sealed value proves a key holder wrote it.** Sealing needs the scope key, so a contributor who never had access cannot forge or alter one. A person removed since still holds the keys they had, so a value under a retired key is marked unproven until a reader confirms it.
 - **A drop proves nothing about its author, and says so.** It sits under a different field, and `check` and `status` flag it until a reader promotes it. Review decides whether it is welcome.
 - **Ciphertext cannot be moved.** Renaming a sealed value, or copying it to another package or environment, fails authentication. Drops and slots carry their destination inside the payload and are checked the same way.
-- **Only a reader can extend access.** Wrapping a scope key requires having it. This is a property of envelope encryption, not a rule the tool could forget to enforce.
+- **Only a key holder can extend access to an existing key.** Wrapping a scope key requires having it. Replacing a key needs no key, because public keys are public, so that case is covered by the trunk checks under User management, not by encryption.
 - **Branches need no coordination.** Random 192-bit nonces are safe to generate independently on any machine or branch.
 - **No lock-in.** Stock `age -d` opens a slot or a drop. The sealed-value format is specified in one page, with test vectors and a reference decryptor of about 40 lines of Python.
 
@@ -324,6 +329,12 @@ Access changes in two steps that cannot be confused: policy is reviewed and merg
 
 `carbon apply` reads policy from the trunk ref, never from the working tree. A reader therefore cannot be tricked into granting access from an unreviewed branch.
 
+Three checks protect readers from a key that someone swapped in:
+
+- **Only a reader creates a scope's first key.** `carbon set` and `carbon apply` refuse to create one for a caller that trunk policy does not name.
+- **A branch's key must descend from trunk's.** Every reader command (`get`, `set`, `run`, `export`, `edit`, `apply`) refuses a scope whose key is neither trunk's nor a rotation that provably held trunk's key.
+- **Each clone pins the last key it verified.** A key replaced by someone who never held the previous one is refused the next time a reader opens the scope. `carbon trust` re-pins after showing what changed.
+
 ### People, devices, teams, machines
 
 - **A person** is a file in `.carbon/people/` with one public key per device. Running `carbon join` on a second device adds a key to the same person.
@@ -336,7 +347,7 @@ Access changes in two steps that cannot be confused: policy is reviewed and merg
 1. The requester runs `carbon join` for a new person or device, or `carbon request checkout --env prod` for more access. Both edit policy files only.
 2. Code owners review and merge the diff. `carbon join` prints a four-word fingerprint, which the reviewer confirms with the requester over a channel they trust.
 3. Any current reader of the affected scopes runs `carbon apply`. It lists what it will wrap, asks for confirmation, and writes one commit that touches only `keys.toml` files.
-4. `carbon check` proves that commit matches merged policy exactly, so it is safe to merge without human review.
+4. `carbon check` verifies that commit's structure against merged policy and lists every key change at the top of its output. It holds no key, so it cannot prove a reader made the change; the reviewer confirms the author is one.
 
 `carbon apply` does what the person running it can do and reports the rest, naming who can finish it. In 1.0 a person runs it. A machine identity can run it from CI, but a maintained bot workflow is on the backlog, not in this release.
 
@@ -393,8 +404,8 @@ The file formats are chosen so that git's ordinary three-way merge is correct fo
 | --- | --- |
 | Two branches set different secrets in one package | Different lines change. Git merges them. |
 | Two branches set the same secret | An ordinary one-line conflict. Either side is a valid value or drop, so keep one. |
-| Two branches grant access to different people | Different slot lines change. Git merges them. |
-| A branch cut before a key rotation adds a secret | It merges and still decrypts through the retired key. `carbon check` warns, and the next `carbon apply` re-seals it. |
+| Two branches grant access to different people | Different slot lines change. Git merges them. Two applies that wrap the same new device at once conflict on that line; either side is valid. |
+| A branch cut before a key rotation adds a secret | The value still decrypts through the retired key and is marked unproven until `carbon apply --reseal-unproven`. Git reports a conflict where the rotation re-sealed neighbouring lines; keep trunk's lines plus the new one. |
 | Two branches rotate the same scope key | A conflict on the `current` line. `carbon apply` resolves it by rotating once more. |
 | A package directory moves | `git mv` is enough. Values are bound to the package name, not its path. |
 | A package is renamed | `carbon rename` re-seals its values under the new name. |
@@ -412,6 +423,8 @@ The file formats are chosen so that git's ordinary three-way merge is correct fo
 - rotation debt exceeds the configured age.
 
 Two states are reported without failing. Missing slots are pending grants, the normal state between a policy merge and the next apply. Drops are listed by name so a reviewer cannot miss one.
+
+Everything a reviewer must look at is listed in a banner at the top of the output: new scope keys, rotations, new slots, drops, and unproven values. CI sets `CARBON_TRUNK` and fetches that ref. With no trunk to compare against, `carbon check` fails instead of passing on nothing.
 
 ### Deploys
 
@@ -438,12 +451,16 @@ The trunk branch is the root of trust: encryption protects secrets from everyone
 | Malware running as the developer | Whatever the developer can read | Out of scope. `run` passes secrets only to the child process and writes nothing to disk |
 | A tampered `carbon` binary | Everything the user decrypts with it | Signed releases, reproducible builds, and a small dependency set. The format can be audited without the binary |
 
-Four limits are worth stating outright:
+These limits are worth stating outright:
 
-- **`carbon check` cannot prove which key a slot is wrapped to.** age recipients are opaque by design. A mislabelled slot can only be created by a reader, who could leak the key directly, so the check loses nothing an attacker could not already do.
+- **A slot's recipient is recorded, not proven.** age recipients are opaque, so each slot records a hash of the public key it was wrapped to. `carbon check` keeps those records append-only and matches new ones against trunk policy, and `carbon apply` rotates when a device's key no longer matches its slot.
 - **A drop's author is whoever git says.** The drop box trades the guarantee that every value came from a reader for the ability to add secrets without one. The marker and review are the compensating control.
 - **Withholding is possible.** Anyone who can merge can delete a value or a slot. That is a visible diff and a broken build, not a disclosure.
 - **Git history is permanent.** Ciphertext committed today can be attacked with tomorrow's tools, which is why the post-quantum status above matters.
+
+* **A check without a key cannot tell a reader's key change from a forged one.** `carbon check` enforces the structure a real `apply` commit has and lists every key change for review. The pin and the trunk check stop a forgery by someone who never held the key. A removed reader who still holds the previous key can forge a rotation that verifies, so commits that change key files must come from a current reader. Signed key changes, on the backlog, close this.
+* **A scope's first key is trusted on review.** Nothing proves who generated it. `carbon check` lists every new scope key.
+* **The pin protects only clones that opened the scope before.** A fresh clone or a CI job has no pin.
 
 ## Alternatives considered
 
@@ -523,6 +540,9 @@ These are designed for but not in 1.0.
 - **Team keys.** Wrap scope keys to a team key to stop slot growth in large organisations. Hybrid keys make this matter sooner.
 - **OS keychain storage for identities.** 1.0 uses a file, a passphrase, or a hardware plugin.
 
+* **Signed key changes, opt-in per environment.** Each device gets an Ed25519 signing key, and slots and rotations carry a signature that `carbon check` verifies against trunk policy. This closes the forged-rotation limit for about 90 characters per slot line. `require_signed = true` under `[access]` turns it on.
+* **Rotation that leaves old values in place.** A removed reader has already seen every existing value, so re-sealing them protects nothing. Leaving the secrets file untouched on rotation would remove the merge conflict with branches that add a secret.
+
 ## Decisions made
 
 | Question | Decision |
@@ -540,6 +560,20 @@ These are designed for but not in 1.0.
 | Apply bot | Backlog |
 | Migrating 0.0.3 repos | An external tool, not a command |
 | Version and cutover | 1.0, cut over in place on one branch. `format = 1` tells the two versions apart |
+
+## What implementation review changed
+
+The build was reviewed adversarially, one independent reviewer per part. The findings that changed this design, not only the code, share one cause: the design treated "you need the key to do that" as proof of who did it.
+
+| Finding | Change to the design |
+| --- | --- |
+| A branch could edit the `trunk` line and choose its own policy | The setting is gone. Trunk comes from the environment, local git config, or the remote default |
+| Anyone can generate a fresh key and wrap it to every reader's public key | Only readers create scope keys; reader commands require a key that descends from trunk's; each clone pins the last key it verified |
+| A removed reader holds the key until `apply` runs, and could relabel a slot or write values in that window | Slots record the key they were wrapped to; `set` refuses a caller policy no longer names; rotation runs only on files that match trunk |
+| A removed reader can forge values under a key they kept | Values under a retired key are unproven and are re-sealed only with `--reseal-unproven` |
+| `carbon check` passed forged rotations and rollbacks | Rotations must retire trunk's key, retired records are append-only, and every key change is in the review banner |
+| A passing `carbon check` was described as safe to merge without review | Withdrawn. It cannot prove who made a key change |
+| Rotation re-seals every line, so a branch that adds a secret conflicts | Documented as a merge limit; the fix is on the backlog |
 
 ## Open questions
 
