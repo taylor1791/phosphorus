@@ -5,7 +5,8 @@
 // Policy is loaded from a [config.Source]. [LoadTrunk] implements the trunk
 // rules from docs/implementation.md: read the trunk ref, fall back to the
 // working tree when carbon is not on trunk yet (bootstrap), and read the
-// working tree always when the workspace says trunk = "worktree".
+// working tree always when the trunk is "worktree" (CARBON_TRUNK or git
+// config carbon.trunk; see ResolveTrunk).
 package policy
 
 import (

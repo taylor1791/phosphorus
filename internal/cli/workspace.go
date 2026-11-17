@@ -185,7 +185,8 @@ func (c *Context) Environment(w *Workspace) (string, error) {
 }
 
 // TrunkPolicy reads policy from trunk, with the bootstrap and
-// trunk = "worktree" exceptions, and prints the bootstrap notice on stderr.
+// "worktree"-trunk exceptions (CARBON_TRUNK or git config carbon.trunk
+// set to worktree), and prints the bootstrap notice on stderr.
 // Use it for anything that wraps keys or writes drops. It is loaded once per
 // command (trunk cannot change while a command runs), so the notice is
 // printed once however many scopes a command touches.
@@ -560,7 +561,7 @@ func joinAnd(xs []string) string {
 
 // TrunkKeys reads a scope's keys file from trunk when pol came from trunk,
 // using the package's directory at trunk if it moved. For bootstrap and
-// trunk = "worktree" policies it returns the working tree's file instead,
+// "worktree"-trunk policies it returns the working tree's file instead,
 // as the contract's exceptions say. It returns nil when there is none.
 func (c *Context) TrunkKeys(w *Workspace, pol *policy.Policy, p *config.Package, env string) (*store.Keys, error) {
 	if pol.Origin != policy.OriginTrunk {

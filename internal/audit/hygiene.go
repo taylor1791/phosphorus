@@ -8,7 +8,7 @@ import (
 
 // hygieneFindings checks the working tree's policy files on their own:
 // access entries that name nobody, team members and people without files or
-// devices, and the trunk setting.
+// devices.
 func (s *State) hygieneFindings() []Finding {
 	var out []Finding
 	pol := s.Worktree
