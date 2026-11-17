@@ -610,7 +610,7 @@ func (d *Doc) SetKey(table []string, key string, value any) error {
 		}
 	}
 	if sec == nil {
-		return d.refuse("[" + strings.Join(table, ".") + "] is defined by dotted keys or an inline table, not a header", manual)
+		return d.refuse("["+strings.Join(table, ".")+"] is defined by dotted keys or an inline table, not a header", manual)
 	}
 	at := sec.lastEnd
 	if at < 0 {

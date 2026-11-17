@@ -243,7 +243,7 @@ func (s *scanner) literalString() {
 
 func (s *scanner) hasPrefix(p string) bool { return strings.HasPrefix(string(s.src[s.pos:]), p) }
 
-// multiline skips a """ or ''' string; q is the quote character.
+// multiline skips a """ or ”' string; q is the quote character.
 func (s *scanner) multiline(q byte) {
 	s.pos += 3
 	for s.pos < len(s.src) {
