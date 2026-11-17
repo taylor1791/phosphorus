@@ -39,6 +39,18 @@ var ErrTrunkSettingRemoved = errors.New(`[workspace] trunk was removed: delete t
 // that reads policy from the working tree always.
 const TrunkWorktree = "worktree"
 
+// IsLegacy reports whether data parses as a carbon 0.0.3 carbon.toml (it
+// has a [push] or [pull] table).
+func IsLegacy(data []byte) bool {
+	var loose map[string]any
+	if toml.Unmarshal(data, &loose) != nil {
+		return false
+	}
+	_, push := loose["push"]
+	_, pull := loose["pull"]
+	return push || pull
+}
+
 // LegacyError means a carbon.toml is a carbon 0.0.3 file.
 type LegacyError struct{ Path string }
 
