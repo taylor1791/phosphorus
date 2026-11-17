@@ -109,35 +109,57 @@ Each entry says what differs from `docs/implementation.md` and why.
     came from: `main (git config carbon.trunk)`, `origin/main (remote
     default)`, or the working tree.
 18. **`apply` exit codes.** Nothing to do: 0. Work done, other scopes left
-    for someone else: 0, with the rest reported. Nothing the caller could do
-    but work pending: 3 if any scope needs a reader, else 1. A scope that
-    fails is left untouched, the others are committed, and the exit is 1.
-19. **`apply` and uncommitted files.** Without `--no-commit`, it refuses
-    (before asking) when a keys or secrets file of a scope it would change
-    has uncommitted changes, since its commit would include them. It commits
-    with `git commit -- <paths>`, so other staged changes stay staged.
+    for someone else: 0, with the rest reported. A scope that is refused or
+    blocked for a reason that could be tampering (marked `suspect` in
+    `--json`: a key not from trunk, a key not on trunk, a rotation from
+    files that differ from trunk's, a rename plus move) makes the command
+    exit 1 whatever else it applied, `--dry-run` included. Otherwise,
+    nothing the caller could do but work pending: 3 if any scope needs a
+    reader, else 1. A scope that fails is left untouched, the others are
+    committed, and the exit is 1.
+19. **`apply` and git.** Without `--no-commit`, it refuses (before asking)
+    when a keys or secrets file of a scope it would change has uncommitted
+    changes, since its commit would include them, and refuses on a detached
+    HEAD (such a commit belongs to no branch and is easily lost). It commits
+    with `git --literal-pathspecs commit --no-verify -- <paths>` and
+    `-c core.hooksPath=/dev/null`, so other staged changes stay staged,
+    paths are never globs, and no hook runs: a reader applying on someone
+    else's branch must not run hook code that branch configured
+    (`gitx.Repo.Commit`). The commit is reviewed like any access change;
+    `carbon check` lists its key changes for the reviewer.
 20. **`apply` against trunk, one rule.** For each scope with a key, when
-    trunk has a keys file:
+    trunk is a ref:
     - trunk has a key and the branch has none: *blocked* (merge trunk);
+    - trunk has no keys file but the branch does: *blocked*, suspect ("not
+      on trunk yet; merge the change that created it first"). When neither
+      the package name nor its directory is on trunk (a new package, or a
+      rename and a move in one change) the message says so and asks to
+      split the rename and the move. Keys created by the same apply run are
+      the only exception;
     - the caller can open the scope: `VerifyTrunk` runs before anything
       else. A key that does not descend from trunk's is *refused* (fix:
       restore the keys file from trunk). A key that descends from trunk's
       but whose `current` differs (this branch rotated, or trunk rotated and
       this branch has not merged it) is *blocked* as out of step: apply does
       not rotate on top of a key trunk does not use;
-    - the caller cannot open it and `current` differs: *blocked*.
-    A key that exists only on the branch is applied to.
+    - the caller cannot open it and `current` differs: *blocked*;
+    - a rotation runs only when the scope's keys and secrets files are
+      byte-identical to trunk's; otherwise *blocked*, suspect: a value added
+      on the branch under the still-current key could come from the reader
+      being removed, and the rotation would re-seal it as trusted. Grants
+      and drop promotion without a rotation are unaffected.
 21. **Drops that do not open** are never fatal: rotation uses
     `RotateSkippingBadDrops`, promotion skips them, and each is named in the
     plan ("leaves drop") and the commit message. Promotion uses `PromoteAt`,
     so a future set time becomes now.
 22. **Unproven values.** Every entry under a retired key is listed by name
-    in the plan ("re-seals as trusted"), with its key and set time, and
-    flagged when its set time is after its key was retired. Confirming (or
-    `--yes`) re-seals them under the current key, including during a
-    rotation. `--skip-unproven` leaves them, and stale drops, as they are
-    (a rotation keeps them under their old key ids; the chain still opens
-    them).
+    in the plan, with its key and set time, and marked when its set time is
+    after its key was retired (advisory only: a forger can back-date). By
+    default, with or without `--yes`, they and stale drops are left as they
+    are (a rotation keeps them under their old key ids; the chain still
+    opens them). `--reseal-unproven` re-seals them under the current key,
+    which vouches for them; they are then listed as "re-seals as trusted"
+    in the plan being confirmed.
 23. **`require_pq`.** Non-hybrid devices are never wrapped to; they are
     reported. An existing non-hybrid slot is not rotated away by itself (it
     is reported as a `check` failure), but a rotation for another reason
@@ -156,7 +178,9 @@ Each entry says what differs from `docs/implementation.md` and why.
 27. **`rename`** needs a reader of every environment that has a key,
     re-wraps each slot to the public key trunk policy has for that device id
     (refusing if trunk has none: run `apply` first), keeps values under the
-    key they were sealed with, and does not commit. Until it merges:
+    key they were sealed with, and does not commit. It prepares every file
+    in memory and writes them all or none (a failed write restores the
+    files already written). Until it merges:
     - readers verify the branch's keys against trunk's file in the same
       directory, which still names the old package. `VerifyTrunk` accepts a
       different package name only when the opened keys unseal trunk's
@@ -171,7 +195,9 @@ Each entry says what differs from `docs/implementation.md` and why.
 28. **tomledit** appends to lists (it does not sort), deletes a list
     element's whole line when it has one, and refuses, with what to edit by
     hand, inline tables it would have to restructure, arrays of tables, and
-    comments between inline elements.
+    comments between inline elements. Every operation is all or nothing,
+    and inserted lines use the file's own line ending (CRLF files stay
+    CRLF).
 
 ## Known merge limits
 

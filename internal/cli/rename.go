@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -207,16 +206,15 @@ func runRename(c *Context) error {
 		return err
 	}
 
-	var files []string
+	// Everything is ready in memory; write it all, or restore what was
+	// written and leave the workspace as it was.
+	var pending []pendingFile
+	owner := map[string]*renameScope{}
 	for _, rs := range res.Scopes {
-		written, err := writeScopeFiles(rs.opened.Scope)
-		if err != nil {
-			return err
+		for _, f := range scopeFiles(rs.opened.Scope) {
+			pending = append(pending, f)
+			owner[f.path] = rs
 		}
-		for _, f := range written {
-			rs.Files = append(rs.Files, w.Rel(f))
-		}
-		files = append(files, rs.Files...)
 	}
 	var editFiles []string
 	for f := range edits {
@@ -224,10 +222,20 @@ func runRename(c *Context) error {
 	}
 	sort.Strings(editFiles)
 	for _, f := range editFiles {
-		if err := os.WriteFile(filepath.Join(w.Root, filepath.FromSlash(f)), edits[f].Bytes(), 0o644); err != nil {
-			return err
+		pending = append(pending, pendingFile{filepath.Join(w.Root, filepath.FromSlash(f)), edits[f].Bytes()})
+	}
+	written, err := writeFilesAtomic(pending)
+	if err != nil {
+		return &Error{Code: ExitError, Message: "rename could not write its files; nothing was changed", Err: err,
+			Details: []string{err.Error()}, Hint: "Fix the problem above and run the rename again."}
+	}
+	var files []string
+	for _, f := range written {
+		rel := w.Rel(f)
+		if rs := owner[f]; rs != nil {
+			rs.Files = append(rs.Files, rel)
 		}
-		files = append(files, f)
+		files = append(files, rel)
 	}
 	res.Files = files
 	return c.Output(res, func(out io.Writer) {

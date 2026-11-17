@@ -311,18 +311,23 @@ func TestApplyOffboardingDrill(t *testing.T) {
 	}
 
 	// The plan lists it as unproven, flagged as set after its key retired.
-	res = w.Lin.Must("apply", "--dry-run", "--env", "dev")
-	contains(t, "unproven", res.Stdout, "re-seals as trusted", "session_key", "SET AFTER ITS KEY WAS RETIRED")
+	// --yes does not vouch for it: it is listed and left alone.
 	head := umHead(w)
-	res = w.Lin.Must("apply", "--yes", "--skip-unproven", "--env", "dev")
-	contains(t, "skip", res.Stdout, "leaves unproven", "session_key")
-	if umHead(w) != head {
-		t.Fatal("--skip-unproven committed")
+	res = w.Lin.Must("apply", "--yes", "--env", "dev")
+	contains(t, "unproven", res.Stdout, "leaves unproven", "session_key",
+		"set after its key was retired (advisory: a forger can back-date)", "--reseal-unproven")
+	if umHead(w) != head || !strings.Contains(w.Read(dev), "session_key = { key = \"") {
+		t.Fatal("--yes re-sealed an unproven value")
 	}
-	// Confirming re-seals it under the current key.
-	res = w.Lin.Must("apply", "--yes")
-	contains(t, "re-seal", res.Stdout, "re-seals as trusted", "session_key")
+	res = w.Lin.Must("apply", "--reseal-unproven", "--dry-run", "--env", "dev")
+	contains(t, "reseal plan", res.Stdout, "re-seals as trusted", "session_key")
+	// Asking for it explicitly re-seals it under the current key.
+	res = w.Lin.Must("apply", "--yes", "--reseal-unproven")
+	contains(t, "re-seal", res.Stdout, "re-seals as trusted", "session_key", "Committed")
 	contains(t, "after re-seal", w.Lin.Must("apply").Stdout, "Nothing to do")
+	if strings.Contains(w.Lin.Must("apply").Stdout, "unproven") {
+		t.Fatal("still unproven")
+	}
 	if v, _ := umGet(t, w.Lin, "checkout", "dev", "session_key"); v != "sess_from_sam" {
 		t.Fatal(v)
 	}

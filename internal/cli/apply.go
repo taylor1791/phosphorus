@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"bytes"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"sort"
 	"strings"
 	"time"
@@ -36,10 +38,12 @@ branch cannot grant itself access. For each scope it:
     names: a new key and inbox, every value re-sealed keeping its set time,
     the old key retired with reason "removed <who>";
   - promotes drops to sealed values;
-  - re-seals values under retired keys. Whoever wrote those held a retired
-    key, which a removed reader may still hold, so the plan lists each one
-    (marking any whose set time is after its key was retired); re-sealing
-    vouches for them. --skip-unproven leaves them as they are.
+  - lists values under retired keys and leaves them as they are. Whoever
+    wrote those held a retired key, which a removed reader may still hold,
+    so their author is unproven. --reseal-unproven re-seals them under the
+    current key, which vouches for them; they are listed in the plan you
+    confirm. The "set after its key was retired" mark is advisory: a forger
+    can back-date a set time.
 
 Every scope's key is checked against trunk's before anything is done to it.
 Drops that do not open are left as they are and reported.
@@ -51,7 +55,7 @@ the files it changed. --no-commit leaves them uncommitted.`,
 		Flags: func(fs *flag.FlagSet) {
 			fs.Bool("no-commit", false, "write the changes but do not commit them")
 			fs.Bool("dry-run", false, "print the plan and change nothing")
-			fs.Bool("skip-unproven", false, "leave values under retired keys as they are instead of re-sealing them")
+			fs.Bool("reseal-unproven", false, "re-seal values under retired keys under the current key, vouching for them")
 		},
 		Run: runApply,
 	})
@@ -80,7 +84,11 @@ type applyScope struct {
 	// Status: "planned" (you can do it), "applied", "needs-reader" (someone
 	// else must), "blocked" (out of step or broken), "failed", or "ok"
 	// (nothing to do, but something to report).
-	Status  string         `json:"status"`
+	Status string `json:"status"`
+	// Suspect: refused or blocked for a reason that could be tampering (a
+	// key not from trunk, a key not on trunk, a rotation from files that
+	// differ from trunk's). The command exits 1.
+	Suspect bool           `json:"suspect,omitempty"`
 	Create  bool           `json:"create,omitempty"`
 	Grant   []applyGrant   `json:"grant,omitempty"`
 	Revoke  []string       `json:"revoke,omitempty"`
@@ -88,9 +96,9 @@ type applyScope struct {
 	Promote []string       `json:"promote,omitempty"`
 	// Unproven are entries under retired keys: whoever wrote them held that
 	// key, which a removed reader may still. apply re-seals them under the
-	// current key (vouching for them) unless SkipUnproven.
+	// current key (vouching for them) only with --reseal-unproven; otherwise SkipUnproven.
 	Unproven     []applyStale `json:"unproven,omitempty"`
-	SkipUnproven bool         `json:"skip_unproven,omitempty"`
+	SkipUnproven bool         `json:"unproven_left_alone"`
 	// BadDrops are drops that do not open; they are left exactly as they are.
 	BadDrops  []string `json:"bad_drops,omitempty"`
 	SkippedPQ []string `json:"skipped_pq,omitempty"`
@@ -219,7 +227,8 @@ func runApply(c *Context) error {
 		if len(doable) == 0 && len(pending) > 0 && !res.DryRun {
 			return applyNothingDoneErr(c, pending)
 		}
-		return nil
+		// A dry run still fails on what could be tampering.
+		return applySuspectErr(c, res.Scopes)
 	}
 
 	noCommit := c.Bool("no-commit")
@@ -227,6 +236,15 @@ func runApply(c *Context) error {
 		printApply(c.Stdout, &res)
 	}
 	if !noCommit {
+		detached, err := w.Repo.Detached()
+		if err != nil {
+			return err
+		}
+		if detached {
+			return &Error{Code: ExitError, Message: "HEAD is detached, so apply will not commit",
+				Details: []string{"A commit on a detached HEAD belongs to no branch: it is easy to lose, and nobody can open a pull request from it."},
+				Hint:    "Check out a branch first (git switch -c <name>), or write without committing:   carbon apply --no-commit"}
+		}
 		if err := applyCheckClean(w, doable); err != nil {
 			return err
 		}
@@ -272,10 +290,30 @@ func runApply(c *Context) error {
 	if err := c.Output(res, func(out io.Writer) { printApplyOutcome(out, &res, noCommit) }); err != nil {
 		return err
 	}
+	if err := applySuspectErr(c, res.Scopes); err != nil {
+		return err
+	}
 	if failed > 0 {
 		return &Error{Code: ExitError, Message: fmt.Sprintf("%d scope(s) could not be applied; they were left unchanged", failed), silent: c.JSON()}
 	}
 	return nil
+}
+
+// applySuspectErr is the exit-1 error when any scope was refused or blocked
+// for a reason that could be tampering, whatever else was applied.
+func applySuspectErr(c *Context, ps []*applyScope) error {
+	var names []string
+	for _, p := range ps {
+		if p.Suspect {
+			names = append(names, p.Scope)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	return &Error{Code: ExitError, silent: c.JSON(),
+		Message: "carbon refused to touch " + joinAnd(names) + "; see the problem and fix above",
+		Details: []string{"Its keys or secrets on this branch could not be tied to trunk's. Find out who changed them before merging this branch."}}
 }
 
 func firstLineOf(s string) string { l, _, _ := strings.Cut(s, "\n"); return l }
@@ -310,18 +348,31 @@ func (c *Context) planApplyScope(w *Workspace, pol *policy.Policy, pkg *config.P
 		p.Status, p.Problem, p.Fix = "blocked", problem, fix
 		return p
 	}
+	// suspect blocks for a reason that could be tampering; the command
+	// then exits 1 whatever else it applied.
+	suspect := func(problem, fix string) *applyScope {
+		p.Suspect = true
+		return block(problem, fix)
+	}
 	// Trunk's keys file for the scope, and the name trunk policy knows the
 	// package by: a package renamed on this branch is still the old name on
 	// trunk, and its access is the old name's, not the workspace default.
 	var tk *store.Keys
 	policyName := pkg.Name
+	trunkDir := pkg.Dir
+	_, knownName := pol.Packages[pkg.Name]
+	knownDir := false
 	if pol.Origin == policy.OriginTrunk {
-		dir := pkg.Dir
 		if tp, ok := pol.Packages[pkg.Name]; ok {
-			dir = tp.Dir
+			trunkDir = tp.Dir
+		}
+		for _, tp := range pol.Packages {
+			if tp.Dir == pkg.Dir {
+				knownDir = true
+			}
 		}
 		var err error
-		tk, err = scope.ReadKeysAt(w.Repo.Source(pol.Ref), dir, env)
+		tk, err = scope.ReadKeysAt(w.Repo.Source(pol.Ref), trunkDir, env)
 		if err != nil {
 			e := AsError(err)
 			return block("cannot read the keys file on trunk: "+e.Message, "")
@@ -353,9 +404,17 @@ func (c *Context) planApplyScope(w *Workspace, pol *policy.Policy, pkg *config.P
 	}
 	p.s = s
 
-	var outOfStep, outFix string
+	var outOfStep, outFix, rotateProblem, rotateFix string
 	if pol.Origin == policy.OriginTrunk {
 		switch {
+		case tk == nil && s.Keys != nil && !knownName && !knownDir:
+			// Neither the name nor the directory is on trunk: a new
+			// package, or a rename and a directory move in one change.
+			return suspect(fmt.Sprintf("carbon cannot find %s's key on trunk to compare with: neither the package name %s nor its directory %s is on trunk %s", p.Scope, pkg.Name, pkg.Dir, pol.Ref),
+				"Merge the change that created this key first. If this branch renames and moves the package, split the rename and the directory move into separate pull requests.")
+		case tk == nil && s.Keys != nil:
+			return suspect(fmt.Sprintf("this scope's key is not on trunk %s yet", pol.Ref),
+				"Merge the change that created it first, then run `carbon apply` on a branch that has it from trunk.")
 		case tk != nil && s.Keys == nil:
 			return block(fmt.Sprintf("trunk %s has a key for %s that this branch does not have", pol.Ref, p.Scope),
 				fmt.Sprintf("Bring this branch up to date first:   git merge %s", pol.Ref))
@@ -414,7 +473,7 @@ func (c *Context) planApplyScope(w *Workspace, pol *policy.Policy, pkg *config.P
 			p.Promote = append(p.Promote, name)
 		}
 	}
-	p.SkipUnproven = c.Bool("skip-unproven")
+	p.SkipUnproven = !c.Bool("reseal-unproven")
 	for _, st := range s.StaleEntries() {
 		p.Unproven = append(p.Unproven, applyStale{Name: st.Name, Key: st.KeyID, Set: seal.FormatTime(st.Set),
 			Drop: st.Drop, SetAfterRetired: st.SetAfterRetired})
@@ -436,6 +495,22 @@ func (c *Context) planApplyScope(w *Workspace, pol *policy.Policy, pkg *config.P
 			return block(fmt.Sprintf("%s must rotate (%s), but trunk policy names nobody who could hold the new key", p.Scope, p.Rotate.Reason),
 				"Name at least one reader for "+p.Scope+" in policy, merge it, and run `carbon apply` again.")
 		}
+		// A rotation re-seals every value as the rotator's own. It may only
+		// start from exactly trunk's files: anything this branch added under
+		// the still-current key could have been written by the reader being
+		// removed.
+		if pol.Origin == policy.OriginTrunk {
+			same, err := applySameAsTrunk(w, pol, s, trunkDir)
+			if err != nil {
+				return block(AsError(err).Message, "")
+			}
+			if !same {
+				// Reported after the trunk check below, which explains a
+				// forged key better when the caller can open the scope.
+				rotateProblem = fmt.Sprintf("%s must rotate (%s), but its keys or secrets file here differs from trunk %s's; a rotation starts from trunk's files exactly, because a value added here under the current key could come from the reader being removed", p.Scope, p.Rotate.Reason, pol.Ref)
+				rotateFix = fmt.Sprintf("Merge your changes to trunk first, or run `carbon apply` on an up-to-date checkout of trunk (git checkout %s).", pol.Ref)
+			}
+		}
 	}
 	if !p.hasWork() && outOfStep == "" {
 		if len(p.Warnings) == 0 && len(p.SkippedPQ) == 0 && len(p.Unproven) == 0 {
@@ -446,6 +521,8 @@ func (c *Context) planApplyScope(w *Workspace, pol *policy.Policy, pkg *config.P
 
 	o, err := s.Open(ids, prefer...)
 	switch {
+	case errors.Is(err, scope.ErrNotReader) && rotateProblem != "":
+		return suspect(rotateProblem, rotateFix)
 	case errors.Is(err, scope.ErrNotReader) && outOfStep != "":
 		return block(outOfStep, outFix)
 	case errors.Is(err, scope.ErrNotReader):
@@ -468,7 +545,7 @@ func (c *Context) planApplyScope(w *Workspace, pol *policy.Policy, pkg *config.P
 	if pol.Origin == policy.OriginTrunk {
 		if err := c.VerifyTrunk(w, pkg, o); err != nil {
 			e := AsError(err)
-			p.Status, p.Problem, p.Fix = "refused", e.Message, e.Hint
+			p.Status, p.Problem, p.Fix, p.Suspect = "refused", e.Message, e.Hint, true
 			if len(e.Details) > 0 {
 				p.Problem += " (" + e.Details[0] + ")"
 			}
@@ -477,6 +554,9 @@ func (c *Context) planApplyScope(w *Workspace, pol *policy.Policy, pkg *config.P
 	}
 	if outOfStep != "" {
 		return block(outOfStep, outFix)
+	}
+	if rotateProblem != "" {
+		return suspect(rotateProblem, rotateFix)
 	}
 	// Drops that do not open are left alone and reported, never fatal.
 	var good []string
@@ -505,6 +585,30 @@ func (c *Context) planApplyScope(w *Workspace, pol *policy.Policy, pkg *config.P
 	}
 	p.Status = "planned"
 	return p
+}
+
+// applySameAsTrunk reports whether a scope's keys and secrets files in the
+// working tree are byte-identical to trunk's (a file missing on both sides
+// counts as identical).
+func applySameAsTrunk(w *Workspace, pol *policy.Policy, s *scope.Scope, trunkDir string) (bool, error) {
+	src := w.Repo.Source(pol.Ref)
+	for _, f := range []struct{ local, base string }{
+		{s.KeysPath(), s.Env + ".keys.toml"},
+		{s.SecretsPath(), s.Env + ".secrets.toml"},
+	} {
+		local, lerr := os.ReadFile(f.local)
+		if lerr != nil && !errors.Is(lerr, fs.ErrNotExist) {
+			return false, lerr
+		}
+		trunk, terr := src.ReadFile(path.Join(trunkDir, config.CarbonDir, f.base))
+		if terr != nil && !errors.Is(terr, fs.ErrNotExist) {
+			return false, terr
+		}
+		if (lerr == nil) != (terr == nil) || !bytes.Equal(local, trunk) {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func applyReadersFrom(sa *policy.ScopeAccess) string {
@@ -597,7 +701,7 @@ func applyCheckClean(w *Workspace, ps []*applyScope) error {
 	for _, p := range ps {
 		paths = append(paths, w.Rel(p.s.KeysPath()), w.Rel(p.s.SecretsPath()))
 	}
-	out, err := w.Repo.Git(append([]string{"status", "--porcelain", "--untracked-files=all", "--"}, paths...)...)
+	out, err := w.Repo.Git(append([]string{"--literal-pathspecs", "status", "--porcelain", "--untracked-files=all", "--"}, paths...)...)
 	if err != nil {
 		return err
 	}
@@ -630,7 +734,7 @@ func executeApplyScope(w *Workspace, p *applyScope, now time.Time) ([]string, []
 		lines = append(lines, fmt.Sprintf("%s: create key %s for %s", p.Scope, o.CurrentID(), strings.Join(DeviceIDs(p.eligible), ", ")))
 	case p.Rotate != nil:
 		from := o.CurrentID()
-		// --skip-unproven: entries under retired keys stay as they are; the
+		// Without --reseal-unproven: entries under retired keys stay as they are; the
 		// retired chain still opens them after the rotation.
 		held := map[string]store.Entry{}
 		if p.SkipUnproven {
@@ -719,41 +823,57 @@ func executeApplyScope(w *Workspace, p *applyScope, now time.Time) ([]string, []
 	return files, lines, nil
 }
 
+// pendingFile is a file to write: its path and full new content.
+type pendingFile struct {
+	path string
+	data []byte
+}
+
+// scopeFiles returns a scope's keys and secrets files as they should be
+// written.
+func scopeFiles(s *scope.Scope) []pendingFile {
+	files := []pendingFile{{s.KeysPath(), s.Keys.Marshal()}}
+	if _, err := os.Stat(s.SecretsPath()); len(s.Secrets.Entries) > 0 || err == nil {
+		files = append(files, pendingFile{s.SecretsPath(), s.Secrets.Marshal()})
+	}
+	return files
+}
+
 // writeScopeFiles writes a scope's keys and secrets files, restoring the
 // keys file if the secrets file cannot be written. It returns the paths
 // whose content changed.
-func writeScopeFiles(s *scope.Scope) ([]string, error) {
-	type file struct {
-		path string
-		data []byte
-	}
-	var files []file
-	files = append(files, file{s.KeysPath(), s.Keys.Marshal()})
-	if _, err := os.Stat(s.SecretsPath()); len(s.Secrets.Entries) > 0 || err == nil {
-		files = append(files, file{s.SecretsPath(), s.Secrets.Marshal()})
-	}
+func writeScopeFiles(s *scope.Scope) ([]string, error) { return writeFilesAtomic(scopeFiles(s)) }
+
+// writeFilesAtomic writes each file, skipping those whose content is
+// unchanged. If any write fails, every file already written is restored
+// (or removed, if it did not exist) and nothing is left changed. It
+// returns the paths written.
+func writeFilesAtomic(files []pendingFile) ([]string, error) {
 	var written []string
 	var undo []func()
 	for _, f := range files {
 		old, err := os.ReadFile(f.path)
 		existed := err == nil
-		if err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return nil, err
-		}
-		if existed && string(old) == string(f.data) {
-			continue
-		}
-		if err := store.WriteFile(f.path, f.data); err != nil {
+		rollback := func(err error) ([]string, error) {
 			for i := len(undo) - 1; i >= 0; i-- {
 				undo[i]()
 			}
 			return nil, err
 		}
-		path := f.path
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return rollback(err)
+		}
+		if existed && string(old) == string(f.data) {
+			continue
+		}
+		if err := store.WriteFile(f.path, f.data); err != nil {
+			return rollback(err)
+		}
+		p := f.path
 		if existed {
-			undo = append(undo, func() { store.WriteFile(path, old) })
+			undo = append(undo, func() { store.WriteFile(p, old) })
 		} else {
-			undo = append(undo, func() { os.Remove(path) })
+			undo = append(undo, func() { os.Remove(p) })
 		}
 		written = append(written, f.path)
 	}
@@ -793,6 +913,9 @@ func applyCommitMessage(ps []*applyScope, log []string) string {
 }
 
 func applyNothingDoneErr(c *Context, pending []*applyScope) error {
+	if err := applySuspectErr(c, pending); err != nil {
+		return err
+	}
 	needReader := false
 	for _, p := range pending {
 		if p.Status == "needs-reader" {
@@ -869,7 +992,10 @@ func printApplyScope(out io.Writer, p *applyScope) {
 		}
 		note := fmt.Sprintf("under retired key %s, set %s; author unproven", u.Key, u.Set)
 		if u.SetAfterRetired {
-			note += "; SET AFTER ITS KEY WAS RETIRED"
+			note += "; set after its key was retired (advisory: a forger can back-date)"
+		}
+		if p.SkipUnproven {
+			note += "; --reseal-unproven to vouch for it"
 		}
 		if u.Drop {
 			note = "drop " + note
@@ -911,7 +1037,7 @@ func printApplyOutcome(out io.Writer, res *applyResult, noCommit bool) {
 	switch {
 	case applied > 0 && res.Commit != "":
 		fmt.Fprintf(out, "Applied %d scope(s). Committed %s: %s\n", applied, res.Commit, strings.Join(res.Files, ", "))
-		fmt.Fprintln(out, "Next: push the commit and open a pull request; `carbon check` verifies it against trunk policy.")
+		fmt.Fprintln(out, "Next: push the commit and open a pull request; reviewers check it like any change to access; `carbon check` lists the key changes for them.")
 	case applied > 0 && noCommit:
 		fmt.Fprintf(out, "Applied %d scope(s). Not committed: %s\n", applied, strings.Join(res.Files, ", "))
 	case applied > 0:
