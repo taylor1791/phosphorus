@@ -13,6 +13,7 @@ import (
 
 	"github.com/taylor1791/phosphorus/internal/agewrap"
 	"github.com/taylor1791/phosphorus/internal/config"
+	"github.com/taylor1791/phosphorus/internal/policy"
 	"github.com/taylor1791/phosphorus/internal/store"
 )
 
@@ -161,9 +162,19 @@ func runJoin(c *Context) error {
 	res.Person, res.Device, res.PublicFile = person, device, file
 	res.Fingerprint = agewrap.Fingerprint(res.Recipient)
 
-	// 3. The first person in a new workspace joins every team, so that
-	// a single developer can init, join and set.
+	// 3. The first person in a new workspace joins every empty team, so
+	// that a single developer can init, join and set. Only while carbon is
+	// not adopted on trunk (bootstrap): afterwards team membership is a
+	// reviewed change, never a side effect of joining.
+	bootstrap := false
 	if firstPerson && len(pol.Teams) > 0 {
+		tp, err := c.TrunkPolicy(w)
+		if err != nil {
+			return err
+		}
+		bootstrap = tp.Origin == policy.OriginBootstrap
+	}
+	if bootstrap {
 		var joined []string
 		for t, members := range pol.Teams {
 			if len(members) == 0 {

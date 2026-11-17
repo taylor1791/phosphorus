@@ -30,7 +30,13 @@ const (
 // Format is the only workspace format this binary understands.
 const Format = 1
 
-// TrunkWorktree is the trunk value that reads policy from the working tree.
+// ErrTrunkSettingRemoved is returned for a workspace file that still has
+// [workspace] trunk. The trunk ref is chosen per clone (CARBON_TRUNK, git
+// config carbon.trunk, or the remote default branch), never by a commit.
+var ErrTrunkSettingRemoved = errors.New(`[workspace] trunk was removed: delete the line, and if this clone needs a trunk other than the remote default branch, run "git config carbon.trunk <ref>" or set CARBON_TRUNK`)
+
+// TrunkWorktree is the trunk value (from CARBON_TRUNK or git config only)
+// that reads policy from the working tree always.
 const TrunkWorktree = "worktree"
 
 // LegacyError means a carbon.toml is a carbon 0.0.3 file.
@@ -82,7 +88,6 @@ type Workspace struct {
 	Format             int
 	Environments       []string
 	DefaultEnvironment string
-	Trunk              string
 	Access             map[string]Access
 	// Package is set when the root file is also a package.
 	Package *Package
@@ -97,10 +102,6 @@ func (w *Workspace) HasEnvironment(env string) bool {
 	}
 	return false
 }
-
-// TrunkIsWorktree reports whether policy is read from the working tree
-// always (trunk = "worktree").
-func (w *Workspace) TrunkIsWorktree() bool { return w.Trunk == TrunkWorktree }
 
 // Resolved is the effective access for one package in one environment.
 type Resolved struct {
@@ -147,7 +148,9 @@ type workspaceTOML struct {
 	Format             *int     `toml:"format"`
 	Environments       []string `toml:"environments"`
 	DefaultEnvironment string   `toml:"default_environment"`
-	Trunk              string   `toml:"trunk"`
+	// Trunk was removed: the trunk ref never comes from a commit. It is
+	// decoded only to explain the error.
+	Trunk *string `toml:"trunk"`
 }
 
 type fileTOML struct {
@@ -241,7 +244,6 @@ func buildWorkspace(f fileTOML) (*Workspace, error) {
 		Format:             *wt.Format,
 		Environments:       wt.Environments,
 		DefaultEnvironment: wt.DefaultEnvironment,
-		Trunk:              wt.Trunk,
 	}
 	if ws.DefaultEnvironment == "" {
 		ws.DefaultEnvironment = ws.Environments[0]
@@ -249,8 +251,8 @@ func buildWorkspace(f fileTOML) (*Workspace, error) {
 	if !ws.HasEnvironment(ws.DefaultEnvironment) {
 		return nil, fmt.Errorf("default_environment %q is not in environments", ws.DefaultEnvironment)
 	}
-	if ws.Trunk == "" {
-		return nil, errors.New(`[workspace] needs trunk = "<git ref>" (or "worktree")`)
+	if wt.Trunk != nil {
+		return nil, ErrTrunkSettingRemoved
 	}
 	acc, err := parseAccess(f.Access)
 	if err != nil {

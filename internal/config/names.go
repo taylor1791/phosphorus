@@ -79,3 +79,20 @@ func ValidDeviceID(s string) bool {
 	p, d, ok := strings.Cut(s, "/")
 	return ok && ValidName(p) && ValidName(d)
 }
+
+var trunkRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]*$`)
+
+// CheckTrunk validates a trunk value: TrunkWorktree, or a git ref name that
+// matches [A-Za-z0-9][A-Za-z0-9._/-]*, is not HEAD, and contains no "@",
+// ":" or "..". The rule keeps a trunk name from being read as a git option,
+// a revision expression, or the current branch.
+func CheckTrunk(s string) error {
+	if s == TrunkWorktree {
+		return nil
+	}
+	if !trunkRe.MatchString(s) || s == "HEAD" || strings.Contains(s, "..") ||
+		strings.ContainsAny(s, "@:") || strings.HasSuffix(s, "/") || strings.HasSuffix(s, ".lock") {
+		return fmt.Errorf("trunk %q is not a plain git ref name (like origin/main) or %q", s, TrunkWorktree)
+	}
+	return nil
+}

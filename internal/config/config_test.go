@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,7 +17,6 @@ const wsFile = `
 format = 1
 environments = ["dev", "staging", "prod"]
 default_environment = "dev"
-trunk = "origin/main"
 
 [access]
 dev  = ["@engineering"]
@@ -48,7 +48,7 @@ func TestParseWorkspaceAndPackage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pkg != nil || ws.Trunk != "origin/main" || ws.DefaultEnvironment != "dev" || len(ws.Environments) != 3 {
+	if pkg != nil || ws.DefaultEnvironment != "dev" || len(ws.Environments) != 3 {
 		t.Fatalf("ws = %+v pkg = %+v", ws, pkg)
 	}
 	if *ws.Access["prod"].RequirePQ != true || *ws.Access["prod"].Drops != false || ws.Access["dev"].Drops != nil {
@@ -123,14 +123,13 @@ func TestParseErrors(t *testing.T) {
 		"bad access key":      "name = \"a\"\n[access]\ndev = { readers = [], colour = 1 }\n",
 		"bad template":        "name = \"a\"\n[env]\nX = \"$HOME\"\n",
 		"no name":             "[secrets]\nx = {}\n",
-		"no format":           "[workspace]\nenvironments=[\"dev\"]\ntrunk=\"main\"\n",
-		"wrong format":        "[workspace]\nformat=2\nenvironments=[\"dev\"]\ntrunk=\"main\"\n",
-		"no trunk":            "[workspace]\nformat=1\nenvironments=[\"dev\"]\n",
-		"bad default env":     "[workspace]\nformat=1\nenvironments=[\"dev\"]\ndefault_environment=\"prod\"\ntrunk=\"main\"\n",
-		"unknown access env":  "[workspace]\nformat=1\nenvironments=[\"dev\"]\ntrunk=\"main\"\n[access]\nprod=[]\n",
+		"no format":           "[workspace]\nenvironments=[\"dev\"]\n",
+		"wrong format":        "[workspace]\nformat=2\nenvironments=[\"dev\"]\n",
+		"bad default env":     "[workspace]\nformat=1\nenvironments=[\"dev\"]\ndefault_environment=\"prod\"\n",
+		"unknown access env":  "[workspace]\nformat=1\nenvironments=[\"dev\"]\n[access]\nprod=[]\n",
 		"not toml":            "name = ",
-		"default env":         "[workspace]\nformat=1\nenvironments=[\"default\"]\ntrunk=\"main\"\n",
-		"duplicate env":       "[workspace]\nformat=1\nenvironments=[\"dev\",\"dev\"]\ntrunk=\"main\"\n",
+		"default env":         "[workspace]\nformat=1\nenvironments=[\"default\"]\n",
+		"duplicate env":       "[workspace]\nformat=1\nenvironments=[\"dev\",\"dev\"]\n",
 		"long form no reader": "name = \"a\"\n[access]\ndev = { drops = false }\n",
 	}
 	for name, src := range cases {
@@ -301,5 +300,25 @@ func TestNames(t *testing.T) {
 	}
 	if Quote("a\"b\\c\n\x01") != `"a\"b\\c\n\u0001"` {
 		t.Error(Quote("a\"b\\c\n\x01"))
+	}
+}
+
+// Nothing a commit can change chooses the trunk: the setting is gone, and a
+// file that still has it is an error that says what to do.
+func TestTrunkSettingRemoved(t *testing.T) {
+	src := "[workspace]\nformat = 1\nenvironments = [\"dev\"]\ntrunk = \"origin/main\"\n"
+	_, _, err := ParseFile("carbon.toml", []byte(src))
+	if !errors.Is(err, ErrTrunkSettingRemoved) || !strings.Contains(err.Error(), "git config carbon.trunk") {
+		t.Fatalf("err = %v", err)
+	}
+	for _, ok := range []string{"main", "origin/main", "worktree", "release-1.2/x"} {
+		if err := CheckTrunk(ok); err != nil {
+			t.Errorf("CheckTrunk(%q) = %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "HEAD", "--all", "-h", "main:carbon.toml", "@{-1}", "a..b", "main@{1}", "x/", "a.lock", "a b"} {
+		if err := CheckTrunk(bad); err == nil {
+			t.Errorf("CheckTrunk(%q) accepted", bad)
+		}
 	}
 }
