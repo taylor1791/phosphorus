@@ -307,6 +307,8 @@ func bannerText(f Finding) string {
 		return "NEW SLOT for " + f.Device + ": confirm the author is a current reader of " + f.Scope
 	case RuleScopeRemoved:
 		return "SCOPE REMOVED with its keys"
+	case RuleKeyRotated:
+		return "KEY ROTATED: confirm the author is a current reader of " + f.Scope
 	}
 	return f.Rule
 }

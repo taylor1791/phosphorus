@@ -99,7 +99,7 @@ needs a key and `check` holds none:
 |---|---|
 | `DROP` | Someone, possibly not a reader, put this value in the scope. Is it wanted? |
 | `NEW SCOPE KEY` | A scope got its first key. Only a reader of that scope should have made it: check who committed the keys file against `carbon who <package> --env <env>`. Whoever made it can read everything later set in the scope. |
-| `key.rotated` | The scope key changed. This is what `carbon apply` writes after a removal or a re-key, but someone who still holds the previous key (including the person just removed) can write the same thing. Confirm the author is a current reader. |
+| `KEY ROTATED` | The scope key changed. This is what `carbon apply` writes after a removal or a re-key, but someone who still holds the previous key (including the person just removed) can write the same thing. Confirm the author is a current reader. |
 | `NEW SLOT for <device>` | A device was given the scope key. Policy on trunk names it; confirm a current reader wrapped it (`carbon apply`). |
 | `UNDER A RETIRED KEY` / `SUSPECT` | A value sealed under a retired key: whoever wrote it held that key, which a removed reader may still hold. |
 | `OLDER VALUE` | A value was replaced by an older line. |
