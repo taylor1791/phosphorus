@@ -1,0 +1,441 @@
+package audit
+
+import (
+	"errors"
+	"fmt"
+	"io/fs"
+	"path"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"github.com/pelletier/go-toml/v2"
+
+	"github.com/taylor1791/phosphorus/internal/config"
+	"github.com/taylor1791/phosphorus/internal/gitx"
+	"github.com/taylor1791/phosphorus/internal/policy"
+	"github.com/taylor1791/phosphorus/internal/scope"
+	"github.com/taylor1791/phosphorus/internal/store"
+)
+
+// State is everything the audit reads, loaded once: the working tree's
+// policy (loaded tolerantly, so one broken file is a finding rather than the
+// end of the run), trunk's policy, and every scope's files in the working
+// tree and at trunk.
+type State struct {
+	Root      string
+	Repo      *gitx.Repo
+	Workspace *config.Workspace
+	// Worktree is the working tree's policy. Files that did not parse are
+	// left out and reported.
+	Worktree *policy.Policy
+	// Trunk is the policy the slot rules use: trunk's, or the working
+	// tree's under the bootstrap and trunk = "worktree" exceptions (see
+	// Origin). Nil when trunk could not be read.
+	Trunk *policy.Policy
+	// Scopes is every working-tree package in every workspace environment,
+	// ordered by package name, then environment in workspace order.
+	Scopes []*ScopeFiles
+
+	// trunkWorkspace is the workspace file at the ref the working tree
+	// names, when that ref has one.
+	trunkWorkspace *config.Workspace
+	trunkSrc       *gitx.RefSource
+	loadFindings   []Finding
+}
+
+// ScopeFiles is one scope's keys and secrets files.
+type ScopeFiles struct {
+	Package *config.Package
+	Env     string
+	// Keys is the working tree's keys file; nil when there is none (or it
+	// did not parse: BadKeys).
+	Keys *store.Keys
+	// Secrets is the working tree's secrets file, empty when missing (or
+	// when it did not parse: BadSecrets).
+	Secrets *store.Secrets
+	// TrunkKeys is the keys file at trunk, when policy came from trunk and
+	// the file exists there.
+	TrunkKeys  *store.Keys
+	KeysFile   string // slash path relative to the root
+	SecretFile string
+
+	BadKeys, BadSecrets bool
+}
+
+// Name is "<package>/<env>".
+func (sf *ScopeFiles) Name() string { return config.ScopeName(sf.Package.Name, sf.Env) }
+
+// Scope returns the files for one scope, or nil.
+func (s *State) Scope(pkg, env string) *ScopeFiles {
+	for _, sf := range s.Scopes {
+		if sf.Package.Name == pkg && sf.Env == env {
+			return sf
+		}
+	}
+	return nil
+}
+
+// TrunkIsReviewed reports whether slot rules compare with a reviewed trunk
+// ref (false under bootstrap and trunk = "worktree", or when trunk could not
+// be read).
+func (s *State) TrunkIsReviewed() bool {
+	return s.Trunk != nil && s.Trunk.Origin == policy.OriginTrunk
+}
+
+// Load reads the workspace at repo's root. Only an unreadable root
+// carbon.toml (or a failing git) is an error; every other problem becomes a
+// finding returned by [State.Check].
+func Load(repo *gitx.Repo) (*State, error) {
+	src := config.DirSource{Root: repo.Root}
+	ws, err := config.LoadWorkspace(src)
+	if err != nil {
+		return nil, err
+	}
+	st := &State{Root: repo.Root, Repo: repo, Workspace: ws}
+	pkgs, err := st.loadPackages(src, ws)
+	if err != nil {
+		return nil, err
+	}
+	people, machines, teams, err := st.loadPrincipals(src)
+	if err != nil {
+		return nil, err
+	}
+	st.Worktree = &policy.Policy{Origin: policy.OriginWorktree, Workspace: ws,
+		Packages: pkgs, People: people, Machines: machines, Teams: teams}
+	if err := st.loadTrunk(); err != nil {
+		return nil, err
+	}
+	st.loadScopes()
+	return st, nil
+}
+
+func (s *State) add(f Finding) { s.loadFindings = append(s.loadFindings, f) }
+
+// rel turns paths under the root inside a message into relative ones.
+func (s *State) rel(msg string) string {
+	return strings.ReplaceAll(msg, s.Root+string(filepath.Separator), "")
+}
+
+func (s *State) loadPackages(src config.DirSource, ws *config.Workspace) (map[string]*config.Package, error) {
+	files, err := src.Find(config.FileName)
+	if err != nil {
+		return nil, err
+	}
+	pkgs := map[string]*config.Package{}
+	for _, f := range files {
+		data, err := src.ReadFile(f)
+		if err != nil {
+			return nil, err
+		}
+		fws, p, err := config.ParseFile(f, data)
+		if err != nil {
+			s.fileError(f, data, err)
+			continue
+		}
+		if fws != nil && f != config.FileName {
+			s.add(Finding{Severity: Error, Rule: RuleConfigInvalid, File: f,
+				Message: f + " has a [workspace] table; only the root carbon.toml may have one.",
+				Hint:    "Remove the [workspace] table from " + f + "."})
+			continue
+		}
+		if p == nil {
+			continue
+		}
+		if err := ws.ValidatePackage(p); err != nil {
+			s.add(Finding{Severity: Error, Rule: RuleConfigInvalid, File: f, Package: p.Name,
+				Message: f + ": " + err.Error(), Hint: "Fix " + f + "."})
+			continue
+		}
+		if prev, ok := pkgs[p.Name]; ok {
+			s.add(Finding{Severity: Error, Rule: RuleDuplicatePackage, File: f, Package: p.Name,
+				Message: fmt.Sprintf("%s and %s both name a package %q; package names must be unique.", prev.File, f, p.Name),
+				Hint:    "Rename one of them (carbon rename re-seals its values under the new name)."})
+			continue
+		}
+		pkgs[p.Name] = p
+	}
+	return pkgs, nil
+}
+
+// fileError turns a carbon.toml parse error into findings, naming bad names
+// specifically when it can.
+func (s *State) fileError(file string, data []byte, err error) {
+	var legacy *config.LegacyError
+	var conflict *config.ConflictError
+	switch {
+	case errors.As(err, &legacy):
+		s.add(Finding{Severity: Error, Rule: RuleConfigLegacy, File: file,
+			Message: file + " is a carbon 0.0.3 file (it has a [push] or [pull] table); carbon 1.0 cannot read it.",
+			Hint:    "Migrate it with carbon-migrate, which converts the files and re-seals every secret."})
+		return
+	case errors.As(err, &conflict):
+		s.add(Finding{Severity: Error, Rule: RuleConfigInvalid, File: file,
+			Message: file + " has unresolved git conflict markers.",
+			Hint:    "Resolve the conflict by keeping one side of each conflicting line."})
+		return
+	}
+	if names := nameFindings(file, data); len(names) > 0 {
+		s.loadFindings = append(s.loadFindings, names...)
+		return
+	}
+	s.add(Finding{Severity: Error, Rule: RuleConfigInvalid, File: file,
+		Message: s.rel(err.Error()), Hint: "Fix " + file + "; every command refuses it until then."})
+}
+
+// nameFindings reports invalid and reserved names in a carbon.toml that the
+// strict parser rejected.
+func nameFindings(file string, data []byte) []Finding {
+	var loose map[string]any
+	if toml.Unmarshal(data, &loose) != nil {
+		return nil
+	}
+	var out []Finding
+	bad := func(rule, msg string) {
+		out = append(out, Finding{Severity: Error, Rule: rule, File: file, Message: file + ": " + msg,
+			Hint: "Rename it in " + file + "."})
+	}
+	if name, ok := loose["name"].(string); ok {
+		for _, r := range config.ReservedPackageNames {
+			if name == r {
+				bad(RuleNameReserved, fmt.Sprintf("package name %q is reserved (%s are reserved).", name, strings.Join(config.ReservedPackageNames, " and ")))
+			}
+		}
+		if !config.ValidName(name) {
+			bad(RuleNameInvalid, fmt.Sprintf("package name %q is invalid: use lower-case letters, digits, '-' and '_', starting with a letter or digit.", name))
+		}
+	}
+	for _, table := range []string{"secrets", "vars", "env"} {
+		m, ok := loose[table].(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, k := range sortedKeys(m) {
+			if !config.ValidSecretName(k) {
+				bad(RuleNameInvalid, fmt.Sprintf("[%s] name %q is invalid: use letters, digits and '_', not starting with a digit.", table, k))
+			}
+		}
+	}
+	return out
+}
+
+func (s *State) loadPrincipals(src config.DirSource) (map[string]*config.Person, map[string]*config.Machine, config.Teams, error) {
+	people := map[string]*config.Person{}
+	machines := map[string]*config.Machine{}
+	each := func(dir, kind string, fn func(file, id string, data []byte) error) error {
+		names, err := src.ReadDir(dir)
+		if err != nil {
+			return err
+		}
+		for _, n := range names {
+			id, ok := strings.CutSuffix(n, ".toml")
+			if !ok {
+				continue
+			}
+			file := path.Join(dir, n)
+			data, err := src.ReadFile(file)
+			if err != nil {
+				return err
+			}
+			if perr := fn(file, id, data); perr != nil {
+				rule := RuleConfigInvalid
+				if !config.ValidName(id) {
+					rule = RuleNameInvalid
+				}
+				s.add(Finding{Severity: Error, Rule: rule, File: file, Message: s.rel(perr.Error()),
+					Hint: fmt.Sprintf("Fix %s; this %s is ignored until then.", file, kind)})
+			}
+		}
+		return nil
+	}
+	err := each(config.PeopleDir, "person", func(file, id string, data []byte) error {
+		p, err := config.ParsePerson(file, id, data)
+		if err == nil {
+			people[id] = p
+		}
+		return err
+	})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	err = each(config.MachinesDir, "machine", func(file, id string, data []byte) error {
+		m, err := config.ParseMachine(file, id, data)
+		if err == nil {
+			machines[id] = m
+		}
+		return err
+	})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	teams := config.Teams{}
+	data, err := src.ReadFile(config.TeamsFile)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+	case err != nil:
+		return nil, nil, nil, err
+	default:
+		t, perr := config.ParseTeams(config.TeamsFile, data)
+		if perr != nil {
+			s.add(Finding{Severity: Error, Rule: RuleConfigInvalid, File: config.TeamsFile, Message: s.rel(perr.Error()),
+				Hint: "Fix " + config.TeamsFile + "; teams are ignored until then."})
+		} else {
+			teams = t
+		}
+	}
+	return people, machines, teams, nil
+}
+
+// loadTrunk applies the trunk rules of docs/implementation.md, the same way
+// policy.LoadTrunk does, but keeps the tolerant working-tree policy for the
+// exceptions and reports an unreadable trunk as a finding.
+func (s *State) loadTrunk() error {
+	ws := s.Workspace
+	fromWorktree := func(origin policy.Origin, ref, notice string) {
+		c := *s.Worktree
+		c.Origin, c.Ref, c.Notice = origin, ref, notice
+		s.Trunk = &c
+	}
+	if ws.TrunkIsWorktree() {
+		fromWorktree(policy.OriginWorktreeTrunk, "", "")
+		return nil
+	}
+	ref := ws.Trunk
+	if !safeRef(ref) {
+		s.add(Finding{Severity: Error, Rule: RuleTrunkUnreadable, File: config.FileName,
+			Message: fmt.Sprintf("trunk = %q is not a git ref carbon will pass to git. Slot and key rules were skipped.", ref),
+			Hint:    `Set trunk = "<ref>" in carbon.toml, for example "origin/main".`})
+		return nil
+	}
+	ok, err := s.Repo.RefExists(ref)
+	if err != nil {
+		return err
+	}
+	bootstrap := func(why string) {
+		notice := why + "; policy is read from the working tree until carbon is on trunk."
+		fromWorktree(policy.OriginBootstrap, ref, notice)
+		s.add(Finding{Severity: Info, Rule: RuleTrunkBootstrap, File: config.FileName,
+			Message: "Carbon is not on trunk yet: " + notice + " Slots are compared with the working tree's policy.",
+			Hint:    "Merge the carbon workspace to " + ref + "."})
+	}
+	if !ok {
+		bootstrap(fmt.Sprintf("trunk %s does not exist", ref))
+		return nil
+	}
+	s.trunkSrc = s.Repo.Source(ref)
+	if _, err := s.trunkSrc.ReadFile(config.FileName); errors.Is(err, fs.ErrNotExist) {
+		bootstrap(fmt.Sprintf("trunk %s has no %s", ref, config.FileName))
+		return nil
+	} else if err != nil {
+		return err
+	}
+	tws, err := config.LoadWorkspace(s.trunkSrc)
+	if err != nil {
+		s.add(Finding{Severity: Error, Rule: RuleTrunkUnreadable, File: ref + ":" + config.FileName,
+			Message: fmt.Sprintf("Policy on trunk %s cannot be read: %v. Slot and key rules were skipped.", ref, err),
+			Hint:    "Fix the workspace file on trunk."})
+		return nil
+	}
+	s.trunkWorkspace = tws
+	if tws.TrunkIsWorktree() {
+		fromWorktree(policy.OriginWorktreeTrunk, "", "")
+		return nil
+	}
+	p, err := policy.Load(s.trunkSrc)
+	if err != nil {
+		s.add(Finding{Severity: Error, Rule: RuleTrunkUnreadable, File: ref,
+			Message: fmt.Sprintf("Policy on trunk %s cannot be read: %v. Slot and key rules were skipped.", ref, err),
+			Hint:    "Fix the policy files on trunk; until then nobody can run `carbon apply`."})
+		return nil
+	}
+	p.Origin, p.Ref = policy.OriginTrunk, ref
+	s.Trunk = p
+	return nil
+}
+
+func (s *State) loadScopes() {
+	for _, name := range sortedKeys(s.Worktree.Packages) {
+		p := s.Worktree.Packages[name]
+		dir := scope.PackageDir(s.Root, p.Dir)
+		for _, env := range s.Workspace.Environments {
+			sf := &ScopeFiles{Package: p, Env: env, Secrets: store.NewSecrets(),
+				KeysFile:   path.Join(p.Dir, config.CarbonDir, env+".keys.toml"),
+				SecretFile: path.Join(p.Dir, config.CarbonDir, env+".secrets.toml")}
+			sf.KeysFile, sf.SecretFile = path.Clean(sf.KeysFile), path.Clean(sf.SecretFile)
+			if k, err := store.ReadKeys(store.KeysPath(dir, env)); err != nil {
+				sf.BadKeys = true
+				s.storeError(sf, sf.KeysFile, err)
+			} else if k != nil && k.Scope != sf.Name() {
+				sf.BadKeys = true
+				s.add(Finding{Severity: Error, Rule: RuleStoreInvalid, Scope: sf.Name(), Package: p.Name, Env: env, File: sf.KeysFile,
+					Message: fmt.Sprintf("%s says scope = %q, but it is %s's keys file: it was copied or moved.", sf.KeysFile, k.Scope, sf.Name()),
+					Hint:    "Restore it from git history."})
+			} else {
+				sf.Keys = k
+			}
+			if sec, err := store.ReadSecrets(store.SecretsPath(dir, env)); err != nil {
+				sf.BadSecrets = true
+				s.storeError(sf, sf.SecretFile, err)
+			} else {
+				sf.Secrets = sec
+			}
+			if s.TrunkIsReviewed() && s.trunkSrc != nil {
+				at := p.Dir
+				if tp, ok := s.Trunk.Packages[p.Name]; ok {
+					at = tp.Dir
+				}
+				tk, err := scope.ReadKeysAt(s.trunkSrc, at, env)
+				switch {
+				case err != nil:
+					s.add(Finding{Severity: Error, Rule: RuleTrunkUnreadable, Scope: sf.Name(), Package: p.Name, Env: env,
+						Message: fmt.Sprintf("The keys file of %s on trunk cannot be read: %v. Key changes in %s were not checked.", sf.Name(), err, sf.Name()),
+						Hint:    "Fix the keys file on trunk."})
+				case tk != nil && tk.Scope != sf.Name():
+					s.add(Finding{Severity: Error, Rule: RuleTrunkUnreadable, Scope: sf.Name(), Package: p.Name, Env: env,
+						Message: fmt.Sprintf("The keys file of %s on trunk says scope = %q.", sf.Name(), tk.Scope),
+						Hint:    "Fix the keys file on trunk."})
+				default:
+					sf.TrunkKeys = tk
+				}
+			}
+			s.Scopes = append(s.Scopes, sf)
+		}
+	}
+}
+
+func (s *State) storeError(sf *ScopeFiles, file string, err error) {
+	var conflict *config.ConflictError
+	f := Finding{Severity: Error, Rule: RuleStoreInvalid, Scope: sf.Name(), Package: sf.Package.Name, Env: sf.Env, File: file}
+	if errors.As(err, &conflict) {
+		f.Message = file + " has unresolved git conflict markers."
+		f.Hint = "Keep one side of each conflicting line; if both sides rotated the key, keep either and run `carbon apply`."
+	} else {
+		f.Message = s.rel(err.Error())
+		f.Hint = "Restore " + file + " from git history; carbon writes it and it is not edited by hand."
+	}
+	s.add(f)
+}
+
+// safeRef reports whether a ref read from a file is safe to put on a git
+// command line: not empty, not an option, no whitespace, colon or control
+// characters.
+func safeRef(ref string) bool {
+	if ref == "" || strings.HasPrefix(ref, "-") {
+		return false
+	}
+	for _, r := range ref {
+		if r <= ' ' || r == 0x7f || r == ':' {
+			return false
+		}
+	}
+	return true
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
