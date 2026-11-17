@@ -48,13 +48,13 @@ func newWorld() *world {
 		scopes: map[string]*fakeScope{},
 		denied: map[string]error{},
 		opens:  map[string]int{},
-		env:    map[string]string{"AWS_PROFILE": "dev-profile", "EMPTY": ""},
+		env:    map[string]string{"AWS_PROFILE": "dev-profile", "EMPTY": "", "CARBON_IDENTITY": "AGE-SECRET-KEY-" + secretMarker},
 	}
 	w.pkgs["checkout"] = &config.Package{
 		Name: "checkout", File: "services/checkout/carbon.toml",
 		Secrets: map[string]config.Secret{
 			"session_key": {}, "stripe_api_key": {}, "unset_one": {}, "own_private": {Private: true},
-			"both": {}, "nul": {}, "broken": {},
+			"both": {}, "nul": {}, "broken": {}, "literal": {},
 		},
 		Vars: map[string]map[string]string{
 			"public_url": {"dev": "http://localhost:3000", "prod": "https://checkout.example.com"},
@@ -73,6 +73,7 @@ func newWorld() *world {
 	w.scopes["checkout"] = &fakeScope{pkg: "checkout", values: map[string]string{
 		"session_key": secretMarker + "-session", "stripe_api_key": secretMarker + "-stripe",
 		"own_private": secretMarker + "-private", "nul": "a\x00b",
+		"literal": "${db.password}$${env:AWS_PROFILE}$$",
 	}, drops: map[string]bool{"stripe_api_key": true}, stale: map[string]bool{"session_key": true},
 		err: map[string]error{"broken": fmt.Errorf("checkout/dev broken: value %w: it was edited", scope.ErrTampered)}}
 	w.scopes["db"] = &fakeScope{pkg: "db", values: map[string]string{
@@ -124,6 +125,8 @@ func TestTemplateForms(t *testing.T) {
 		{"dev", "cost: $$5 in ${carbon.env}", "cost: $5 in dev"},
 		{"dev", "${checkout.session_key}", secretMarker + "-session"},
 		{"dev", "${own_private}", secretMarker + "-private"},
+		// A value is data: references inside it are not expanded again.
+		{"dev", "<${literal}>", "<${db.password}$${env:AWS_PROFILE}$$>"},
 		{"dev", "${checkout.own_private}", secretMarker + "-private"},
 	}
 	for _, c := range cases {
@@ -158,6 +161,8 @@ func TestErrors(t *testing.T) {
 		{"${db.root_password}", ErrPrivate, "db.root_password is private to db"},
 		{"${env:NOT_SET}", ErrEnvUnset, "NOT_SET is not set"},
 		{"${nul}", ErrNUL, "NUL byte"},
+		{"${env:CARBON_IDENTITY}", ErrForbiddenEnv, "CARBON_IDENTITY holds carbon's private key material"},
+		{"x${env:CARBON_IDENTITY_FILE}", ErrForbiddenEnv, "CARBON_IDENTITY_FILE holds"},
 		{"${broken}", ErrReveal, "failed authentication"},
 	}
 	for _, c := range cases {

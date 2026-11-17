@@ -68,7 +68,14 @@ const (
 	// ErrNUL: the resolved value contains a NUL byte, which no process
 	// environment can hold.
 	ErrNUL
+	// ErrForbiddenEnv: ${env:NAME} names one of carbon's identity
+	// variables, which never leave carbon (whether set or not).
+	ErrForbiddenEnv
 )
+
+// forbiddenEnv are the variables that carry carbon's identity. They match
+// gitx's scrub list: neither a subprocess nor a template may receive them.
+var forbiddenEnv = map[string]bool{"CARBON_IDENTITY": true, "CARBON_IDENTITY_FILE": true}
 
 // Error is a resolution failure, naming the [env] entry and the reference.
 type Error struct {
@@ -233,6 +240,12 @@ func (r *Resolver) resolveOne(pkg *config.Package, varName, tmpl string, used ma
 		case config.RefCarbonEnv:
 			out = append(out, r.Env...)
 		case config.RefEnv:
+			if forbiddenEnv[ref.Name] {
+				return fail(&Error{Kind: ErrForbiddenEnv, Ref: refString(ref), Name: ref.Name,
+					Msg: fmt.Sprintf("%s holds carbon's private key material and cannot be passed on", ref.Name),
+					Hint: fmt.Sprintf("Remove %s from the [env] table in %s. A process that needs secrets should get them "+
+						"through [env], not carbon's identity.", refString(ref), pkg.File)})
+			}
 			v, ok := "", false
 			if r.Getenv != nil {
 				v, ok = r.Getenv(ref.Name)
