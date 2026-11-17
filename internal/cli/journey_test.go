@@ -184,7 +184,7 @@ API_TOKEN    = "${token}"
 	res = ada.Must("init", "--trunk", "main")
 	mustContain(t, "init --trunk", res.Stdout, "git config carbon.trunk main")
 	cj = ci(t, r, 0)
-	if cj.Trunk.Mode != "trunk" || cj.Trunk.Ref != "main" {
+	if cj.Trunk.Mode != "trunk" || cj.Trunk.Ref != "refs/heads/main" {
 		t.Fatalf("trunk %+v\n%s", cj.Trunk, cj)
 	}
 	cj.clean(t)
@@ -637,7 +637,7 @@ func TestJourneyAttacks(t *testing.T) {
 		cj.has(t, "key.changed", "error checkout/dev")
 		// A reader on that branch will not seal under the key sam holds.
 		res := w.Lin.In(co).Stdin("sk_new").Fails(1, "set", "stripe_api_key", "--env", "dev")
-		mustContain(t, "set", res.Stderr, "trunk retired", "git merge main")
+		mustContain(t, "set", res.Stderr, "trunk retired", "git merge refs/heads/main")
 		res = w.Lin.Fails(1, "apply", "--yes")
 		mustContain(t, "apply", res.Stdout, "checkout/dev")
 	})
@@ -689,8 +689,8 @@ func TestJourneyCIShapes(t *testing.T) {
 
 	// The documented recipe: fetch the default branch and name it.
 	w.Git("-C", ciDir, "fetch", "-q", "--no-tags", "origin", "main:refs/remotes/origin/main")
-	res = anyone.In("../ci").With("CARBON_TRUNK=origin/main").Must("check")
-	mustContain(t, "check in CI", res.Stdout, "Compared with trunk: origin/main (from CARBON_TRUNK)", "TO REVIEW", "webhook_secret", "check passed")
+	res = anyone.In("../ci").With("CARBON_TRUNK=refs/remotes/origin/main").Must("check")
+	mustContain(t, "check in CI", res.Stdout, "Compared with trunk: refs/remotes/origin/main at ", "(from CARBON_TRUNK)", "TO REVIEW", "webhook_secret", "check passed")
 	// Drops are for review, not failures, even under --strict.
 	anyone.In("../ci").With("CARBON_TRUNK=origin/main").Must("check", "--strict", "--max-debt", "1d")
 	// Without the variable, the fetched origin/main is the remote default.

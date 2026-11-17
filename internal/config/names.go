@@ -94,5 +94,8 @@ func CheckTrunk(s string) error {
 		strings.ContainsAny(s, "@:") || strings.HasSuffix(s, "/") || strings.HasSuffix(s, ".lock") {
 		return fmt.Errorf("trunk %q is not a plain git ref name (like origin/main) or %q", s, TrunkWorktree)
 	}
+	if strings.HasPrefix(s, "refs/") && !strings.HasPrefix(s, "refs/remotes/") && !strings.HasPrefix(s, "refs/heads/") {
+		return fmt.Errorf("trunk %q is not a branch: a full trunk ref must be under refs/remotes/ or refs/heads/ (never a tag)", s)
+	}
 	return nil
 }

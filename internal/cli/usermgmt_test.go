@@ -146,7 +146,7 @@ func TestApplyIgnoresBranchPolicyAdversarially(t *testing.T) {
 	// granted, because trunk's policy is what counts.
 	for _, p := range []*clitest.Person{w.Lin, w.Deploy} {
 		res := p.Must("apply", "--yes")
-		contains(t, "apply on evil branch", res.Stdout, "Policy from main (git config carbon.trunk)", "Nothing to do")
+		contains(t, "apply on evil branch", res.Stdout, "Policy from refs/heads/main at ", "Nothing to do")
 	}
 	unchanged := func() {
 		t.Helper()
@@ -205,7 +205,7 @@ func TestApplyIgnoresBranchPolicyAdversarially(t *testing.T) {
 	w.Commit("rotate prod")
 	forgedKeys := w.Read(co + "/.carbon/prod.keys.toml")
 	res = w.Lin.Fails(1, "apply", "--yes", "--env", "prod")
-	contains(t, "forged key", res.Stdout, "checkout/prod", "refused", "does not descend from trunk", "git checkout main -- "+co+"/.carbon/prod.keys.toml")
+	contains(t, "forged key", res.Stdout, "checkout/prod", "refused", "does not descend from trunk", "git checkout refs/heads/main -- "+co+"/.carbon/prod.keys.toml")
 	if w.Read(co+"/.carbon/prod.keys.toml") != forgedKeys {
 		t.Fatal("apply touched a refused scope")
 	}
@@ -514,7 +514,7 @@ func TestApplyStopsWhenKeysAreOutOfStep(t *testing.T) {
 	w.Checkout("behind")
 	keys := w.Read(co + "/.carbon/dev.keys.toml")
 	res := w.Lin.Fails(1, "apply", "--yes")
-	contains(t, "out of step", res.Stdout, "checkout/dev", "blocked", "differs from trunk", "git merge main")
+	contains(t, "out of step", res.Stdout, "checkout/dev", "blocked", "differs from trunk", "git merge refs/heads/main")
 	if w.Read(co+"/.carbon/dev.keys.toml") != keys {
 		t.Fatal("keys changed")
 	}

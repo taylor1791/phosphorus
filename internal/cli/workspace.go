@@ -571,5 +571,5 @@ func (c *Context) TrunkKeys(w *Workspace, pol *policy.Policy, p *config.Package,
 	if tp, ok := pol.Packages[p.Name]; ok {
 		dir = tp.Dir
 	}
-	return scope.ReadKeysAt(w.Repo.Source(pol.Ref), dir, env)
+	return scope.ReadKeysAt(w.Repo.Source(pol.At()), dir, env)
 }

@@ -145,7 +145,7 @@ func TestReaderRefusesKeyNotFromTrunk(t *testing.T) {
 	w.Commit("refresh keys")
 
 	res := w.Lin.Stdin("sk_live_rotated").In(w.PkgDir).Fails(1, "set", "stripe_api_key", "--env", "prod")
-	contains(t, "stderr", res.Stderr, "does not descend from trunk", "git checkout main -- services/checkout/.carbon/prod.keys.toml")
+	contains(t, "stderr", res.Stderr, "does not descend from trunk", "git checkout refs/heads/main -- services/checkout/.carbon/prod.keys.toml")
 	res = w.Lin.In(w.PkgDir).Fails(1, "get", "stripe_api_key", "--env", "prod")
 	contains(t, "stderr", res.Stderr, "does not descend from trunk")
 	if g := w.Ada.In(w.PkgDir).Run("get", "stripe_api_key", "--env", "prod"); strings.Contains(g.Stdout, "sk_live_rotated") {

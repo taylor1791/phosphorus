@@ -45,7 +45,7 @@ func TestApplyLeavesKeysThatAreNotOnTrunk(t *testing.T) {
 	keys := w.Read(co + "/.carbon/prod.keys.toml")
 
 	res := w.Lin.Fails(1, "apply", "--yes")
-	contains(t, "apply", res.Stdout, "checkout/prod   (blocked)", "not on trunk main yet", "Merge the change that created it first", "Applied")
+	contains(t, "apply", res.Stdout, "checkout/prod   (blocked)", "not on trunk refs/heads/main yet", "Merge the change that created it first", "Applied")
 	if w.Read(co+"/.carbon/prod.keys.toml") != keys {
 		t.Fatal("extended a key that is not on trunk")
 	}
@@ -79,7 +79,7 @@ func TestApplyRotatesOnlyFromTrunksFiles(t *testing.T) {
 
 	head := umHead(w)
 	res := w.Lin.Fails(1, "apply", "--yes", "--env", "dev")
-	contains(t, "apply", res.Stdout, "checkout/dev   (blocked)", "differs from trunk main", "git checkout main")
+	contains(t, "apply", res.Stdout, "checkout/dev   (blocked)", "differs from trunk refs/heads/main", "git checkout refs/heads/main")
 	if umHead(w) != head || w.Read(co+"/.carbon/dev.keys.toml") != keys || w.Read(co+"/.carbon/dev.secrets.toml") != secrets {
 		t.Fatal("rotated from a branch's files")
 	}

@@ -450,17 +450,18 @@ func (r *Repo) HasRemoteRefs() (bool, error) {
 	return strings.TrimSpace(string(out)) != "", nil
 }
 
-// RemoteDefault returns the remote default branch as a short ref, trying
-// refs/remotes/origin/HEAD, then origin/main, then origin/master. ok is false
+// RemoteDefault returns the remote default branch as a full ref, trying
+// the target of refs/remotes/origin/HEAD, then refs/remotes/origin/main,
+// then refs/remotes/origin/master. ok is false
 // when none exists.
 func (r *Repo) RemoteDefault() (ref string, ok bool, err error) {
-	if out, err := r.Git("symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"); err == nil {
-		if s := strings.TrimSpace(string(out)); s != "" {
+	if out, err := r.Git("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"); err == nil {
+		if s := strings.TrimSpace(string(out)); strings.HasPrefix(s, "refs/remotes/") {
 			return s, true, nil
 		}
 	}
-	for _, c := range []string{"origin/main", "origin/master"} {
-		ok, err := r.RefExists("refs/remotes/" + c)
+	for _, c := range []string{"refs/remotes/origin/main", "refs/remotes/origin/master"} {
+		ok, err := r.RefExists(c)
 		if err != nil {
 			return "", false, err
 		}
@@ -483,4 +484,52 @@ func (r *Repo) CommonDir() (string, error) {
 	}
 	r.commonDir = strings.TrimSpace(string(out))
 	return r.commonDir, nil
+}
+
+// ErrTrunkAmbiguous means a short trunk name is both a remote-tracking
+// branch and a local branch.
+var ErrTrunkAmbiguous = errors.New("ambiguous trunk name")
+
+// ResolveBranchRef resolves a trunk name to a full branch refname and its
+// commit id, never to a tag or any other kind of ref (git's own lookup
+// prefers refs/tags/<name> over refs/remotes/<name>, so a pushed tag
+// named "origin/main" would otherwise stand in for trunk). A full name
+// must be under refs/remotes/ or refs/heads/. A short name is looked up as
+// exactly refs/remotes/<name> and refs/heads/<name>; both existing is
+// ErrTrunkAmbiguous. found is false when nothing matches.
+func (r *Repo) ResolveBranchRef(name string) (full, commit string, found bool, err error) {
+	var candidates []string
+	switch {
+	case strings.HasPrefix(name, "refs/remotes/"), strings.HasPrefix(name, "refs/heads/"):
+		candidates = []string{name}
+	case strings.HasPrefix(name, "refs/"):
+		return "", "", false, fmt.Errorf("trunk %q is not a branch: use a ref under refs/remotes/ or refs/heads/", name)
+	default:
+		candidates = []string{"refs/remotes/" + name, "refs/heads/" + name}
+	}
+	// One git process: for-each-ref matches these patterns by path
+	// prefix, so keep only exact names that point at commits.
+	out, err := r.Git(append([]string{"for-each-ref", "--format=%(refname) %(objecttype) %(objectname)"}, candidates...)...)
+	if err != nil {
+		return "", "", false, err
+	}
+	var hits, ids []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		f := strings.Fields(line)
+		if len(f) != 3 || f[1] != "commit" {
+			continue
+		}
+		for _, c := range candidates {
+			if f[0] == c {
+				hits, ids = append(hits, c), append(ids, f[2])
+			}
+		}
+	}
+	switch len(hits) {
+	case 0:
+		return "", "", false, nil
+	case 1:
+		return hits[0], ids[0], true, nil
+	}
+	return "", "", false, fmt.Errorf("%w: %q is both %s and %s; name the one you mean in full", ErrTrunkAmbiguous, name, hits[0], hits[1])
 }

@@ -446,14 +446,14 @@ const (
 // behindState classifies a working tree whose current key trunk retired.
 func (s *State) behindState(keysFile string) (behind, string) {
 	ref := s.Trunk.Ref
-	anc, err := s.Repo.IsAncestor(ref, "HEAD")
+	anc, err := s.Repo.IsAncestor(s.Trunk.At(), "HEAD")
 	if err != nil {
 		return behindUnknown, err.Error()
 	}
 	if anc {
 		return behindRollback, ""
 	}
-	mb, err := s.Repo.MergeBase("HEAD", ref)
+	mb, err := s.Repo.MergeBase("HEAD", s.Trunk.At())
 	if errors.Is(err, gitx.ErrNoMergeBase) {
 		return behindUnknown, "this clone has no merge base of HEAD and " + ref + " (shallow clone or unrelated history)"
 	}

@@ -230,7 +230,7 @@ func TestDoctor(t *testing.T) {
 	res := w.Lin.In(w.PkgDir).Must("doctor")
 	contains(t, "doctor", res.Stdout,
 		"ok    git", "ok    workspace", "carbon.toml format 1, environments dev, staging, prod",
-		"ok    trunk", "main (from git config carbon.trunk) at ", "holds 1 key(s)", "hybrid post-quantum",
+		"ok    trunk", "refs/heads/main at ", "holds 1 key(s)", "hybrid post-quantum",
 		"you are lin (device laptop), a member of @engineering and @payments",
 		"ok    environment", "dev (the default)",
 		"checkout/dev: your key opens it (slot lin/laptop) and it matches trunk",
@@ -282,7 +282,7 @@ func TestDoctor(t *testing.T) {
 	nb := w.Person("newbie")
 	nb.Join()
 	res = nb.In(w.PkgDir).Must("doctor")
-	contains(t, "doctor", res.Stdout, "WARN  who", "newbie/laptop is not on trunk main yet")
+	contains(t, "doctor", res.Stdout, "WARN  who", "newbie/laptop is not on trunk refs/heads/main")
 }
 
 func TestDoctorBootstrapAndOutsideAWorkspace(t *testing.T) {

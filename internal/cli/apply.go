@@ -344,9 +344,9 @@ func applyPolicyLabel(pol *policy.Policy) string {
 	switch pol.Origin {
 	case policy.OriginTrunk:
 		if from == "" {
-			return pol.Ref
+			return pol.TrunkDisplay()
 		}
-		return fmt.Sprintf("%s (%s)", pol.Ref, from)
+		return fmt.Sprintf("%s (%s)", pol.TrunkDisplay(), from)
 	case policy.OriginWorktreeTrunk:
 		return fmt.Sprintf("the working tree (trunk is \"worktree\", from %s)", from)
 	}
@@ -385,7 +385,7 @@ func (c *Context) planApplyScope(w *Workspace, pol *policy.Policy, pkg *config.P
 			}
 		}
 		var err error
-		tk, err = scope.ReadKeysAt(w.Repo.Source(pol.Ref), trunkDir, env)
+		tk, err = scope.ReadKeysAt(w.Repo.Source(pol.At()), trunkDir, env)
 		if err != nil {
 			e := AsError(err)
 			return block("cannot read the keys file on trunk: "+e.Message, "")
@@ -627,7 +627,7 @@ func (c *Context) planApplyScope(w *Workspace, pol *policy.Policy, pkg *config.P
 // working tree are byte-identical to trunk's (a file missing on both sides
 // counts as identical).
 func applySameAsTrunk(w *Workspace, pol *policy.Policy, s *scope.Scope, trunkDir string) (bool, error) {
-	src := w.Repo.Source(pol.Ref)
+	src := w.Repo.Source(pol.At())
 	for _, f := range []struct{ local, base string }{
 		{s.KeysPath(), s.Env + ".keys.toml"},
 		{s.SecretsPath(), s.Env + ".secrets.toml"},

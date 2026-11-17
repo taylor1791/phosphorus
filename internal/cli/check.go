@@ -70,6 +70,8 @@ type checkCounts struct {
 type checkTrunk struct {
 	// Ref is the trunk ref, "worktree", or "" when there is none yet.
 	Ref string `json:"ref"`
+	// Commit is the trunk commit compared against.
+	Commit string `json:"commit,omitempty"`
 	// From is CARBON_TRUNK, git config carbon.trunk, remote default
 	// branch, or none.
 	From string `json:"from"`
@@ -82,15 +84,15 @@ type checkTrunk struct {
 func describeTrunk(st *audit.State) checkTrunk {
 	var ct checkTrunk
 	if t := st.TrunkRef; t != nil {
-		ct.Ref, ct.From = t.Ref, t.From
+		ct.Ref, ct.From, ct.Commit = t.Ref, t.From, t.Commit
 	}
 	switch {
 	case st.Trunk == nil:
 		ct.Mode = "unreadable"
-		ct.Describe = fmt.Sprintf("%s (from %s), which cannot be read; slot and key rules were skipped", ct.Ref, ct.From)
+		ct.Describe = fmt.Sprintf("%s (from %s), which cannot be read; slot and key rules were skipped", st.TrunkRef.Display(), ct.From)
 	case st.Trunk.Origin == policy.OriginTrunk:
 		ct.Mode = "trunk"
-		ct.Describe = fmt.Sprintf("%s (from %s)", ct.Ref, ct.From)
+		ct.Describe = fmt.Sprintf("%s (from %s)", st.TrunkRef.Display(), ct.From)
 	case st.Trunk.Origin == policy.OriginWorktreeTrunk:
 		ct.Mode = "worktree"
 		ct.Describe = fmt.Sprintf("none: the trunk is \"worktree\" (from %s), so policy comes from the working tree", ct.From)
@@ -99,7 +101,7 @@ func describeTrunk(st *audit.State) checkTrunk {
 		ct.Describe = "none yet: no remote and no git config " + policy.TrunkConfigKey + " (bootstrap); policy comes from the working tree"
 	default:
 		ct.Mode = "bootstrap"
-		ct.Describe = fmt.Sprintf("%s (from %s), which has no carbon.toml yet (bootstrap); policy comes from the working tree", ct.Ref, ct.From)
+		ct.Describe = fmt.Sprintf("%s (from %s), which has no carbon 1.0 carbon.toml yet (bootstrap); policy comes from the working tree", st.TrunkRef.Display(), ct.From)
 	}
 	return ct
 }

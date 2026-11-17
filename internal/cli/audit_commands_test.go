@@ -3,6 +3,7 @@ package cli_test
 import (
 	"encoding/json"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -100,7 +101,7 @@ func TestCheckListsDrops(t *testing.T) {
 	w.Ada.In(w.PkgDir).Stdin("whsec_new").Must("set", "webhook_secret", "--env", "prod")
 	res := w.Anyone().Must("check")
 	contains(t, "check", res.Stdout, "!! 1 ITEM TO REVIEW", "checkout/prod   webhook_secret", "DROP", "1 item to review")
-	if !strings.HasPrefix(res.Stdout, "Compared with trunk: main (from git config carbon.trunk)\n\n!!!!") {
+	if !regexp.MustCompile(`^Compared with trunk: refs/heads/main at [0-9a-f]{7} \(from git config carbon.trunk\)\n\n!!!!`).MatchString(res.Stdout) {
 		t.Fatalf("the trunk line and the review banner do not come first:\n%s", res.Stdout)
 	}
 	cj := checkAsJSON(t, w.Anyone().Must("check", "--json"))
@@ -140,7 +141,7 @@ func TestCheckTrunk(t *testing.T) {
 	w := clitest.Standard(t)
 	setAll(t, w)
 	cj := checkAsJSON(t, w.Anyone().Must("check", "--json"))
-	if cj.Trunk.Ref != "main" || cj.Trunk.From != "git config carbon.trunk" || cj.Trunk.Mode != "trunk" {
+	if cj.Trunk.Ref != "refs/heads/main" || cj.Trunk.From != "git config carbon.trunk" || cj.Trunk.Mode != "trunk" {
 		t.Fatalf("%+v", cj.Trunk)
 	}
 	// worktree mode, chosen per process: a warning.

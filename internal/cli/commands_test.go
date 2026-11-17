@@ -287,7 +287,7 @@ func TestBranchWithoutTrunkKey(t *testing.T) {
 	w.Commit("key on trunk")
 	w.Checkout("old")
 	res := w.Ada.In(co).Stdin("x").Fails(1, "set", "webhook_secret", "--env", "prod")
-	contains(t, "stderr", res.Stderr, "has a key on trunk that this branch does not have", "git merge main")
+	contains(t, "stderr", res.Stderr, "has a key on trunk that this branch does not have", "git merge refs/heads/main")
 
 	// The reverse: a key created on a branch, not on trunk; a non-reader
 	// cannot drop to an inbox trunk does not have.

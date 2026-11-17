@@ -151,6 +151,17 @@ func git(t *testing.T, dir string, args ...string) {
 	}
 }
 
+func gitOut(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git %v: %v", args, err)
+	}
+	return string(out)
+}
+
 // TestLoadTrunkRules exercises what the CLI does: ResolveTrunk from the
 // environment, git config and remotes, then LoadTrunkAt. Nothing in the
 // working tree takes part.
@@ -203,7 +214,7 @@ func TestLoadTrunkRules(t *testing.T) {
 	git(t, f.root, "checkout", "-qb", "feature")
 	f.write(".carbon/teams.toml", "engineering = [\"ada\"]\npayments = [\"ada\"]\nsre = [\"ada\"]\n")
 	p = mustLoad()
-	if p.Origin != OriginTrunk || p.Notice != "" || p.Ref != "main" || p.Trunk.From != TrunkFromGitConfig {
+	if p.Origin != OriginTrunk || p.Notice != "" || p.Ref != "refs/heads/main" || p.Trunk.Name != "main" || p.Trunk.From != TrunkFromGitConfig {
 		t.Fatalf("origin %s trunk %+v", p.Origin, p.Trunk)
 	}
 	if sa, _ := p.Scope("checkout", "prod"); sa.Names("ada/laptop") {
@@ -241,15 +252,15 @@ func TestLoadTrunkRules(t *testing.T) {
 		t.Fatalf("remotes without a default: %v", err)
 	}
 	git(t, f.root, "update-ref", "refs/remotes/origin/master", "main")
-	if p = mustLoad(); p.Ref != "origin/master" || p.Trunk.From != TrunkFromRemote || p.Origin != OriginTrunk {
+	if p = mustLoad(); p.Ref != "refs/remotes/origin/master" || p.Trunk.From != TrunkFromRemote || p.Origin != OriginTrunk {
 		t.Fatalf("origin/master: %+v %s", p.Trunk, p.Origin)
 	}
 	git(t, f.root, "update-ref", "refs/remotes/origin/main", "main")
-	if p = mustLoad(); p.Ref != "origin/main" {
+	if p = mustLoad(); p.Ref != "refs/remotes/origin/main" {
 		t.Fatalf("origin/main preferred: %+v", p.Trunk)
 	}
 	git(t, f.root, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/feature-x")
-	if p = mustLoad(); p.Ref != "origin/feature-x" {
+	if p = mustLoad(); p.Ref != "refs/remotes/origin/feature-x" {
 		t.Fatalf("origin/HEAD target: %+v", p.Trunk)
 	}
 	// A remote HEAD pointing nowhere is an error, not a fallback.
@@ -260,6 +271,53 @@ func TestLoadTrunkRules(t *testing.T) {
 	// carbon never wrote git config.
 	if _, ok, _ := repo.ConfigGet(TrunkConfigKey); ok {
 		t.Fatal("carbon wrote git config")
+	}
+}
+
+// A tag can never stand in for trunk: git resolves refs/tags/<x> before
+// refs/remotes/<x>, and CI fetches tags.
+func TestTrunkIsNeverATag(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not on PATH")
+	}
+	f := newFixture(t)
+	git(t, f.root, "init", "-q", "-b", "main")
+	git(t, f.root, "add", "-A")
+	git(t, f.root, "commit", "-qm", "carbon")
+	good := strings.TrimSpace(gitOut(t, f.root, "rev-parse", "HEAD"))
+	git(t, f.root, "update-ref", "refs/remotes/origin/main", "HEAD")
+	git(t, f.root, "commit", "-qm", "evil", "--allow-empty")
+	git(t, f.root, "tag", "origin/main")
+	git(t, f.root, "tag", "main")
+	repo, err := gitx.Find(f.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{}
+	getenv := func(k string) string { return env[k] }
+	for _, name := range []string{"", "origin/main", "refs/remotes/origin/main"} {
+		env[TrunkEnv] = name
+		tr, err := ResolveTrunk(repo, getenv)
+		if err != nil || tr.Ref != "refs/remotes/origin/main" || tr.Commit != good {
+			t.Fatalf("CARBON_TRUNK=%q: %+v %v", name, tr, err)
+		}
+	}
+	// The local branch main, not the tag main.
+	env[TrunkEnv] = "main"
+	if tr, err := ResolveTrunk(repo, getenv); err != nil || tr.Ref != "refs/heads/main" {
+		t.Fatalf("main: %+v %v", tr, err)
+	}
+	for _, bad := range []string{"refs/tags/main", "refs/tags/origin/main", "refs/notes/x", "nope"} {
+		env[TrunkEnv] = bad
+		if tr, err := ResolveTrunk(repo, getenv); err == nil {
+			t.Fatalf("CARBON_TRUNK=%s resolved to %+v", bad, tr)
+		}
+	}
+	// A local branch and a remote-tracking branch of one short name.
+	git(t, f.root, "branch", "origin/main", good)
+	env[TrunkEnv] = "origin/main"
+	if _, err := ResolveTrunk(repo, getenv); err == nil || !strings.Contains(err.Error(), "refs/heads/origin/main") {
+		t.Fatalf("ambiguous name: %v", err)
 	}
 }
 

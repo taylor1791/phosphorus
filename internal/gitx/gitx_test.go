@@ -160,7 +160,7 @@ func TestConfigAndRemotes(t *testing.T) {
 	if ok, _ := r.HasRemoteRefs(); !ok {
 		t.Fatal("no remotes")
 	}
-	if d, ok, _ := r.RemoteDefault(); !ok || d != "origin/master" {
+	if d, ok, _ := r.RemoteDefault(); !ok || d != "refs/remotes/origin/master" {
 		t.Fatal(d)
 	}
 }

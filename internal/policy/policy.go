@@ -350,3 +350,21 @@ func sortedKeys[V any](m map[string]V) []string {
 	sort.Strings(keys)
 	return keys
 }
+
+// At is what git reads this policy's trunk files from: the trunk commit
+// resolved for this command, else Ref.
+func (p *Policy) At() string {
+	if p.Trunk != nil && p.Trunk.Commit != "" {
+		return p.Trunk.Commit
+	}
+	return p.Ref
+}
+
+// TrunkDisplay is how carbon shows this policy's trunk: the full ref and
+// the short commit id.
+func (p *Policy) TrunkDisplay() string {
+	if p.Trunk != nil && p.Trunk.Ref == p.Ref {
+		return p.Trunk.Display()
+	}
+	return p.Ref
+}

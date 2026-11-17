@@ -342,21 +342,20 @@ func (s *State) loadTrunk(getenv func(string) string) error {
 		bootstrap(fmt.Sprintf("this repository has no trunk yet (no remote and no %s)", policy.TrunkConfigKey))
 		return nil
 	}
-	ok, err := s.Repo.RefExists(t.Ref)
-	if err != nil {
-		return err
-	}
-	if !ok {
+	if t.Commit == "" {
 		s.TrunkErr = &policy.TrunkMissingError{Ref: t.Ref, From: t.From}
 		return nil
 	}
 	ref := t.Ref
-	s.trunkSrc = s.Repo.Source(ref)
-	if _, err := s.trunkSrc.ReadFile(config.FileName); errors.Is(err, fs.ErrNotExist) {
-		bootstrap(fmt.Sprintf("trunk %s has no %s", ref, config.FileName))
+	s.trunkSrc = s.Repo.Source(t.Commit)
+	if data, err := s.trunkSrc.ReadFile(config.FileName); errors.Is(err, fs.ErrNotExist) {
+		bootstrap(fmt.Sprintf("trunk %s has no %s", t.Display(), config.FileName))
 		return nil
 	} else if err != nil {
 		return err
+	} else if config.IsUnadoptedRoot(data) {
+		bootstrap(fmt.Sprintf("trunk %s still has a carbon 0.0.3 %s (no [workspace])", t.Display(), config.FileName))
+		return nil
 	}
 	p, err := policy.Load(s.trunkSrc)
 	if err != nil {

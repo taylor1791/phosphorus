@@ -28,9 +28,15 @@ const (
 // git config carbon.trunk (each a ref or "worktree"), then the remote default
 // branch. carbon never writes git config itself.
 type Trunk struct {
-	// Ref is a git ref, config.TrunkWorktree, or "" when From is
-	// TrunkFromNone.
+	// Ref is the full branch refname (refs/remotes/... or refs/heads/...,
+	// never a tag), config.TrunkWorktree, or "" when From is TrunkFromNone.
 	Ref string
+	// Name is the value as configured (CARBON_TRUNK or git config), before
+	// it was resolved to Ref.
+	Name string
+	// Commit is the commit Ref pointed to when it was resolved, once per
+	// command. Every read of trunk uses it.
+	Commit string
 	// From is one of the TrunkFrom* constants.
 	From string
 }
@@ -45,7 +51,28 @@ func (t *Trunk) String() string {
 	if t.From == TrunkFromNone {
 		return "none (no remote, no " + TrunkConfigKey + ")"
 	}
-	return fmt.Sprintf("%s (from %s)", t.Ref, t.From)
+	return fmt.Sprintf("%s (from %s)", t.Display(), t.From)
+}
+
+// Display is the full ref and the short commit id, as carbon shows trunk.
+func (t *Trunk) Display() string {
+	if t.Commit == "" {
+		return t.Ref
+	}
+	c := t.Commit
+	if len(c) > 7 {
+		c = c[:7]
+	}
+	return t.Ref + " at " + c
+}
+
+// At is what git reads trunk files from: the commit when resolved, else
+// the ref.
+func (t *Trunk) At() string {
+	if t.Commit != "" {
+		return t.Commit
+	}
+	return t.Ref
 }
 
 // TrunkMissingError means the chosen trunk ref does not resolve: an override
@@ -68,38 +95,49 @@ func (e *NoTrunkError) Error() string {
 // ResolveTrunk chooses the trunk ref as described on [Trunk]. getenv is
 // usually os.Getenv.
 func ResolveTrunk(repo *gitx.Repo, getenv func(string) string) (*Trunk, error) {
+	var t *Trunk
 	if v := getenv(TrunkEnv); v != "" {
 		if err := config.CheckTrunk(v); err != nil {
 			return nil, fmt.Errorf("%s: %w", TrunkEnv, err)
 		}
-		return &Trunk{Ref: v, From: TrunkFromEnv}, nil
-	}
-	if v, ok, err := repo.ConfigGet(TrunkConfigKey); err != nil {
+		t = &Trunk{Name: v, From: TrunkFromEnv}
+	} else if v, ok, err := repo.ConfigGet(TrunkConfigKey); err != nil {
 		return nil, err
 	} else if ok {
 		if err := config.CheckTrunk(v); err != nil {
 			return nil, fmt.Errorf("git config %s: %w", TrunkConfigKey, err)
 		}
-		return &Trunk{Ref: v, From: TrunkFromGitConfig}, nil
-	}
-	def, ok, err := repo.RemoteDefault()
-	if err != nil {
-		return nil, err
-	}
-	if ok {
-		if err := config.CheckTrunk(def); err != nil || def == config.TrunkWorktree {
-			return nil, fmt.Errorf("remote default branch %q is not a usable trunk name; set one with `git config %s <ref>`", def, TrunkConfigKey)
+		t = &Trunk{Name: v, From: TrunkFromGitConfig}
+	} else {
+		def, ok, err := repo.RemoteDefault()
+		if err != nil {
+			return nil, err
 		}
-		return &Trunk{Ref: def, From: TrunkFromRemote}, nil
+		if !ok {
+			remotes, err := repo.HasRemoteRefs()
+			if err != nil {
+				return nil, err
+			}
+			if remotes {
+				return nil, &NoTrunkError{}
+			}
+			return &Trunk{From: TrunkFromNone}, nil
+		}
+		t = &Trunk{Name: def, From: TrunkFromRemote}
 	}
-	remotes, err := repo.HasRemoteRefs()
+	if t.Name == config.TrunkWorktree {
+		t.Ref = t.Name
+		return t, nil
+	}
+	full, commit, found, err := repo.ResolveBranchRef(t.Name)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("trunk (from %s): %w", t.From, err)
 	}
-	if remotes {
-		return nil, &NoTrunkError{}
+	if !found {
+		return nil, &TrunkMissingError{Ref: t.Name, From: t.From}
 	}
-	return &Trunk{From: TrunkFromNone}, nil
+	t.Ref, t.Commit = full, commit
+	return t, nil
 }
 
 // LoadTrunkWith reads trunk policy using getenv for CARBON_TRUNK. See
@@ -151,14 +189,10 @@ func loadTrunkAt(repo *gitx.Repo, t *Trunk) (*Policy, error) {
 	if t.From == TrunkFromNone {
 		return bootstrap(fmt.Sprintf("this repository has no trunk yet (no remote and no %s)", TrunkConfigKey))
 	}
-	ok, err := repo.RefExists(t.Ref)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
+	if t.Commit == "" {
 		return nil, &TrunkMissingError{Ref: t.Ref, From: t.From}
 	}
-	src := repo.Source(t.Ref)
+	src := repo.Source(t.Commit)
 	if data, err := src.ReadFile(config.FileName); errors.Is(err, fs.ErrNotExist) {
 		return bootstrap(fmt.Sprintf("trunk %s has no %s", t.Ref, config.FileName))
 	} else if err != nil {

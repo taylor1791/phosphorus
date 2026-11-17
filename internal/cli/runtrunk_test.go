@@ -25,7 +25,7 @@ func TestRunExportEditRefuseKeyNotFromTrunk(t *testing.T) {
 	for _, args := range [][]string{{"run", "--", helper, "env"}, {"export"}, {"export", "--format", "json"}} {
 		res := w.Lin.With("FROM_SHELL=x").In(w.PkgDir).Fails(1, args...)
 		contains(t, "stderr", res.Stderr, "the key for checkout/dev on this branch does not descend from trunk's",
-			"git checkout main -- services/checkout/.carbon/dev.keys.toml")
+			"git checkout refs/heads/main -- services/checkout/.carbon/dev.keys.toml")
 		if strings.Contains(res.Stdout, "ROGUE") || strings.Contains(res.Stderr, "ROGUE") || res.Stdout != "" {
 			t.Fatalf("a value under the rogue key was released:\n%s", res)
 		}
