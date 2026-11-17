@@ -17,6 +17,7 @@ import (
 func init() {
 	Register(&Command{
 		Name:    "rename",
+		Group:   GroupSetup,
 		Usage:   "<old-package> <new-package>",
 		Summary: "Rename a package and re-seal its secrets under the new name",
 		Help: `Values, drops and keys are bound to the package's name, so renaming a package

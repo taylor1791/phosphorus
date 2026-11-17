@@ -13,6 +13,7 @@ import (
 func init() {
 	Register(&Command{
 		Name:    "env",
+		Group:   GroupDaily,
 		Summary: "Show the current environment and where it comes from",
 		Help: `env prints the environment carbon commands use here and which rule chose it:
 --env, then CARBON_ENV, then "carbon env use" (stored per worktree in the
@@ -21,6 +22,7 @@ git directory), then the workspace's default_environment.`,
 	})
 	Register(&Command{
 		Name:    "env use",
+		Group:   GroupDaily,
 		Usage:   "<name> | --clear",
 		Summary: "Pick the environment for this worktree",
 		Help: `env use stores the environment for this worktree inside its git directory,

@@ -12,6 +12,7 @@ import (
 func init() {
 	Register(&Command{
 		Name:    "who",
+		Group:   GroupInspection,
 		Usage:   "<package> [--env <env>]",
 		Summary: "Explain who reads a package, and through which rule",
 		Help: `who lists the people and machines that policy names as readers of a
@@ -27,6 +28,7 @@ a reader gets a slot only after the policy merges and a reader runs
 	})
 	Register(&Command{
 		Name:    "access",
+		Group:   GroupInspection,
 		Usage:   "<person|machine:name> [--env <env>]",
 		Summary: "Explain what a person or machine reads, and through which rule",
 		Help: `access is the reverse of "carbon who": every scope policy lets a person (all

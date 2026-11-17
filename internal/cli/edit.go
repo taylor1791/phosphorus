@@ -27,6 +27,7 @@ import (
 func init() {
 	Register(&Command{
 		Name:    "edit",
+		Group:   GroupDaily,
 		Usage:   "[--allow-empty] [--env <env>] [--package <name>]",
 		Summary: "Bulk-edit the scope's secrets in $EDITOR",
 		Help: `edit decrypts every declared secret of the package in the environment into a

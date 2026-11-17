@@ -12,6 +12,7 @@ import (
 func init() {
 	Register(&Command{
 		Name:    "get",
+		Group:   GroupDaily,
 		Usage:   "<name> [--env <env>] [--package <name>]",
 		Summary: "Print a secret's value",
 		Help: `get decrypts one secret and writes its value to stdout, followed by a newline

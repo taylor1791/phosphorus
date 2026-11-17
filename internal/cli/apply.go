@@ -24,7 +24,8 @@ import (
 func init() {
 	Register(&Command{
 		Name:    "apply",
-		Usage:   "[--package <name>] [--env <env>] [--no-commit] [--dry-run]",
+		Group:   GroupAccess,
+		Usage:   "[--package <name>] [--env <env>] [--dry-run] [--no-commit] [--reseal-unproven] [--yes]",
 		Summary: "Apply merged policy: wrap, rotate, re-seal, promote drops",
 		Help: `apply carries out the access policy merged to trunk, for every package in
 every environment (or the ones named with --package and --env). Policy and

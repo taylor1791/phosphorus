@@ -17,6 +17,7 @@ import (
 func init() {
 	Register(&Command{
 		Name:    "request",
+		Group:   GroupAccess,
 		Usage:   "<package> [--env <env>] [--as <reader>]",
 		Summary: "Propose yourself as a reader of a package in policy",
 		Help: `request edits the package's carbon.toml in the working tree to add you (your

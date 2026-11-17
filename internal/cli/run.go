@@ -16,6 +16,7 @@ import (
 func init() {
 	Register(&Command{
 		Name:    "run",
+		Group:   GroupDaily,
 		Usage:   "[--env <env>] [--package <name>] [--] <command> [args...]",
 		Summary: "Run a command with the package's environment",
 		Help: `run resolves the package's [env] table, decrypting in memory, and replaces

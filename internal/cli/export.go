@@ -19,6 +19,7 @@ import (
 func init() {
 	Register(&Command{
 		Name:    "export",
+		Group:   GroupDaily,
 		Usage:   "[--format dotenv|json] [-o <path>] [--env <env>] [--package <name>]",
 		Summary: "Write resolved values to an ignored file",
 		Help: `export resolves the package's [env] table, like run, and writes the variables

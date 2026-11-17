@@ -17,6 +17,7 @@ import (
 func init() {
 	Register(&Command{
 		Name:    "set",
+		Group:   GroupDaily,
 		Usage:   "<name> [--generate] [--allow-empty] [--env <env>] [--package <name>]",
 		Summary: "Seal a secret, or drop one into the inbox",
 		Help: `set reads the value from a hidden prompt, or from stdin when stdin is not a

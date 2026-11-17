@@ -21,6 +21,7 @@ import (
 func init() {
 	Register(&Command{
 		Name:    "doctor",
+		Group:   GroupInspection,
 		Summary: "Diagnose the local setup",
 		Help: `doctor checks what commonly goes wrong, without needing access to any scope:
 git, the repository and workspace, the trunk ref, your identity file (present,

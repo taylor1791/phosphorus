@@ -20,6 +20,7 @@ import (
 func init() {
 	Register(&Command{
 		Name:    "init",
+		Group:   GroupSetup,
 		Usage:   "[--name <package>] [--trunk <ref>] [--environments dev,staging,prod]",
 		Summary: "Create a workspace, or a package in the current directory",
 		Help: `At the top of a repository with no carbon.toml, init creates the workspace:

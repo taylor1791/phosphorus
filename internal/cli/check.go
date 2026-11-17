@@ -16,6 +16,7 @@ import (
 func init() {
 	Register(&Command{
 		Name:    "check",
+		Group:   GroupInspection,
 		Usage:   "[--strict] [--max-debt <duration>] [--unused] [--bootstrap]",
 		Summary: "Validate graph, policy, and keys; the CI gate",
 		Help: `check audits the whole repository without a key: the [env] reference graph,

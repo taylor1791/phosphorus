@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"time"
@@ -22,7 +23,19 @@ import (
 
 // Version is the carbon version, set at build time with
 // -ldflags "-X github.com/taylor1791/phosphorus/internal/cli.Version=...".
+// Without it, a binary built by `go install <module>/cmd/carbon@<version>`
+// reports that module version (see init), and anything else "1.0.0-dev".
 var Version = "1.0.0-dev"
+
+func init() {
+	if Version != "1.0.0-dev" {
+		return
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" &&
+		!strings.HasPrefix(bi.Main.Version, "v0.0.0-") && !strings.Contains(bi.Main.Version, "+dirty") {
+		Version = strings.TrimPrefix(bi.Main.Version, "v")
+	}
+}
 
 // Command is one carbon subcommand.
 type Command struct {
@@ -30,6 +43,9 @@ type Command struct {
 	Name string
 	// Usage is what follows the name in the usage line, e.g. "<name>".
 	Usage string
+	// Group places the command in `carbon help`: GroupDaily, GroupAccess,
+	// GroupInspection or GroupSetup.
+	Group string
 	// Summary is one line for `carbon help`.
 	Summary string
 	// Help is the longer description for `carbon help <command>`.
@@ -96,7 +112,7 @@ type Global struct {
 var globalValueFlags = map[string]bool{"--env": true, "-env": true, "-C": true, "--C": true, "--chdir": true, "-chdir": true, "--package": true, "-package": true}
 
 func addGlobalFlags(fs *flag.FlagSet, g *Global) {
-	fs.StringVar(&g.Env, "env", "", "environment (default: CARBON_ENV, `carbon env use`, then default_environment)")
+	fs.StringVar(&g.Env, "env", "", "environment `name` (default: CARBON_ENV, carbon env use, then default_environment)")
 	fs.BoolVar(&g.JSON, "json", false, "print one JSON document on stdout")
 	fs.BoolVar(&g.Yes, "yes", false, "do not ask for confirmation")
 	fs.StringVar(&g.Dir, "C", "", "run as if started in `dir`")
@@ -195,8 +211,7 @@ func (c *Context) dispatch(args []string) error {
 		fmt.Fprintf(c.Stdout, "carbon %s\n", Version)
 		return nil
 	case cmd == nil && len(c.Args) > 0:
-		return &Error{Code: ExitUsage, Message: fmt.Sprintf("unknown command %q", c.Args[0]),
-			Hint: "See `carbon help` for the list of commands."}
+		return unknownCommand(c.Args[0])
 	case cmd == nil:
 		c.printHelp(c.Stdout, nil)
 		if c.Global.Help {
@@ -282,25 +297,137 @@ func (c *Context) printHelp(w io.Writer, cmd *Command) {
 		if cmd.Help != "" {
 			fmt.Fprintf(w, "\n%s\n", strings.TrimSpace(cmd.Help))
 		}
-		fmt.Fprint(w, "\nFlags:\n")
-		printFlags(w, c.Flags)
+		global := newFlagSet("global")
+		addGlobalFlags(global, &Global{})
+		own := newFlagSet(cmd.Name)
+		c.Flags.VisitAll(func(f *flag.Flag) {
+			if global.Lookup(f.Name) == nil {
+				own.Var(f.Value, f.Name, f.Usage)
+			}
+		})
+		if hasVisibleFlags(own) {
+			fmt.Fprint(w, "\nFlags:\n")
+			printFlags(w, own)
+		}
+		fmt.Fprint(w, "\nGlobal flags:\n")
+		printFlags(w, global)
+		fmt.Fprint(w, "\nExit codes: see `carbon help`.\n")
 		return
 	}
-	fmt.Fprint(w, "carbon: encrypted secrets for monorepos, stored in the repo.\n\nUsage: carbon <command> [flags]\n\nCommands:\n")
-	var rows [][]string
-	for _, cmd := range Commands() {
-		if !cmd.Hidden {
-			rows = append(rows, []string{"  " + cmd.Name, cmd.Summary})
+	fmt.Fprintf(w, "carbon %s: encrypted secrets for monorepos, stored in the repo.\n\nUsage: carbon <command> [flags]\n", Version)
+	for _, g := range groups {
+		var rows [][]string
+		for _, cmd := range Commands() {
+			if !cmd.Hidden && cmd.group() == g.id {
+				rows = append(rows, []string{fmt.Sprintf("  %-9s %s", cmd.Name, cmd.Summary)})
+			}
+		}
+		if len(rows) == 0 {
+			continue
+		}
+		fmt.Fprintf(w, "\n%s:\n", g.title)
+		Table(w, rows)
+	}
+	fmt.Fprint(w, "\nGlobal flags, accepted by every command, before or after it:\n")
+	global := newFlagSet("global")
+	addGlobalFlags(global, &Global{})
+	printFlags(w, global)
+	fmt.Fprint(w, "\nExit codes:\n")
+	Table(w, [][]string{
+		{"  0", "success"},
+		{"  1", "error (including a key or file carbon refuses to trust)"},
+		{"  2", "usage: bad flags or arguments"},
+		{"  3", "no access to a scope"},
+		{"  4", "check found errors"},
+		{"  5", "package, secret or person not found"},
+		{"  6", "no usable identity"},
+		{"  7", "not confirmed (no terminal and no --yes, or answered no)"},
+		{"  run", "exits with its command's code"},
+	})
+	fmt.Fprint(w, "\nRun `carbon help <command>` or `carbon <command> --help` for details.\n")
+}
+
+func hasVisibleFlags(fs *flag.FlagSet) bool {
+	n := 0
+	fs.VisitAll(func(f *flag.Flag) {
+		if f.Usage != "" {
+			n++
+		}
+	})
+	return n > 0
+}
+
+// Command groups, in the order `carbon help` lists them.
+const (
+	GroupDaily      = "daily"
+	GroupAccess     = "access"
+	GroupInspection = "inspection"
+	GroupSetup      = "setup"
+)
+
+var groups = []struct{ id, title string }{
+	{GroupDaily, "Daily use"},
+	{GroupAccess, "Access"},
+	{GroupInspection, "Inspection"},
+	{GroupSetup, "Setup"},
+	{"", "Other"},
+}
+
+func (cmd *Command) group() string {
+	for _, g := range groups {
+		if g.id == cmd.Group {
+			return g.id
 		}
 	}
-	Table(w, rows)
-	fmt.Fprint(w, "\nGlobal flags: --env <name>, --package <name>, --json, --yes, -C <dir>, --no-color\n")
-	fmt.Fprint(w, "Run `carbon help <command>` for details.\n")
+	return ""
+}
+
+// unknownCommand is the usage error for a word that is no command, with
+// the nearest command name when one is close.
+func unknownCommand(name string) *Error {
+	e := &Error{Code: ExitUsage, Message: fmt.Sprintf("unknown command %q", name),
+		Hint: "See `carbon help` for the list of commands."}
+	best, bestD := "", 0
+	for n, cmd := range registry {
+		if cmd.Hidden {
+			continue
+		}
+		d := editDistance(name, n)
+		if best == "" || d < bestD || (d == bestD && n < best) {
+			best, bestD = n, d
+		}
+	}
+	if best != "" && bestD <= max(2, len(name)/3) {
+		e.Hint = fmt.Sprintf("Did you mean `carbon %s`? See `carbon help` for the list of commands.", best)
+	}
+	return e
+}
+
+// editDistance is the Levenshtein distance between a and b.
+func editDistance(a, b string) int {
+	prev := make([]int, len(b)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(a); i++ {
+		cur := make([]int, len(b)+1)
+		cur[0] = i
+		for j := 1; j <= len(b); j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			cur[j] = min(prev[j]+1, cur[j-1]+1, prev[j-1]+cost)
+		}
+		prev = cur
+	}
+	return prev[len(b)]
 }
 
 func init() {
 	Register(&Command{
 		Name:    "help",
+		Group:   GroupSetup,
 		Usage:   "[command]",
 		Summary: "Show help for carbon or a command",
 		MaxArgs: 2,
@@ -312,7 +439,7 @@ func init() {
 			name := strings.Join(c.Args, " ")
 			cmd, ok := registry[name]
 			if !ok {
-				return &Error{Code: ExitUsage, Message: fmt.Sprintf("unknown command %q", name), Hint: "See `carbon help`."}
+				return unknownCommand(name)
 			}
 			fs := newFlagSet(cmd.Name)
 			addGlobalFlags(fs, &Global{})
@@ -326,6 +453,7 @@ func init() {
 	})
 	Register(&Command{
 		Name:    "version",
+		Group:   GroupSetup,
 		Summary: "Print the carbon version",
 		Run: func(c *Context) error {
 			if c.JSON() {

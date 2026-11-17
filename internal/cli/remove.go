@@ -17,6 +17,7 @@ import (
 func init() {
 	Register(&Command{
 		Name:    "remove",
+		Group:   GroupAccess,
 		Usage:   "<person | person/device | machine:name>",
 		Summary: "Remove a person, device, or machine from policy",
 		Help: `remove edits policy in the working tree. For a person it deletes

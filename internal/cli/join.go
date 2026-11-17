@@ -20,7 +20,8 @@ import (
 func init() {
 	Register(&Command{
 		Name:    "join",
-		Usage:   "[--person <name>] [--device <name>] [--x25519] [--passphrase] | --machine <name>",
+		Group:   GroupAccess,
+		Usage:   "[--person <name>] [--device <name>] [--x25519] [--passphrase] | --machine <name> [--description <text>]",
 		Summary: "Create an identity and add its public key to the repo",
 		Help: `join creates this device's identity under ~/.config/carbon/identity (or
 reuses it: one identity serves every repo on the device) and adds its public

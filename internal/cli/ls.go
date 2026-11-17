@@ -10,6 +10,7 @@ import (
 func init() {
 	Register(&Command{
 		Name:    "ls",
+		Group:   GroupDaily,
 		Usage:   "[--env <env>] [--package <name>]",
 		Summary: "List secret names and their state",
 		Help: `ls lists the package's declared and stored secrets in one environment, with

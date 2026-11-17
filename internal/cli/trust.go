@@ -14,6 +14,7 @@ import (
 func init() {
 	Register(&Command{
 		Name:    "trust",
+		Group:   GroupAccess,
 		Usage:   "[<package>] [--env <env>]",
 		Summary: "Accept a scope's current key after it was replaced",
 		Help: `carbon remembers, per identity and per clone, the last key it verified for

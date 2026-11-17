@@ -18,7 +18,8 @@ import (
 func init() {
 	Register(&Command{
 		Name:    "status",
-		Usage:   "[--all]",
+		Group:   GroupDaily,
+		Usage:   "[--all] [--unlock]",
 		Summary: "What you can read, grant, and should rotate",
 		Help: `status says who you are (from your identity's public key), the current
 environment, the scopes you can read, the scopes carbon would refuse to

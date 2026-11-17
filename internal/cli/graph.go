@@ -9,6 +9,7 @@ import (
 func init() {
 	Register(&Command{
 		Name:    "graph",
+		Group:   GroupInspection,
 		Summary: "Emit the package dependency graph as DOT",
 		Help: `graph prints the dependency graph built from every package's [env] table,
 in Graphviz DOT: an edge from a package to each package whose secrets or vars

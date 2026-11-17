@@ -122,3 +122,50 @@ func TestSanitizeAndJoinAnd(t *testing.T) {
 		t.Error("joinAnd")
 	}
 }
+
+// Every command has a summary, a group, and a usage line naming each of its
+// own flags; `carbon help` and `carbon <cmd> --help` work for each.
+func TestHelpMatchesFlags(t *testing.T) {
+	global := newFlagSet("global")
+	addGlobalFlags(global, &Global{})
+	for _, cmd := range Commands() {
+		if cmd.Summary == "" || strings.Contains(cmd.Summary, "\n") {
+			t.Errorf("%s: summary must be one line", cmd.Name)
+		}
+		if cmd.group() == "" {
+			t.Errorf("%s: no help group", cmd.Name)
+		}
+		fs := newFlagSet(cmd.Name)
+		if cmd.Flags != nil {
+			cmd.Flags(fs)
+		}
+		usage := usageLine(cmd)
+		fs.VisitAll(func(f *flag.Flag) {
+			if f.Usage == "" || global.Lookup(f.Name) != nil {
+				return
+			}
+			if !strings.Contains(usage, "--"+f.Name) && !strings.Contains(usage, "-"+f.Name+" ") {
+				t.Errorf("%s: usage %q does not name its flag --%s", cmd.Name, usage, f.Name)
+			}
+		})
+		for _, args := range [][]string{append(strings.Fields(cmd.Name), "--help"), append([]string{"help"}, strings.Fields(cmd.Name)...)} {
+			code, out, _ := run(t, args...)
+			if code != 0 || !strings.Contains(out, "Usage: "+usage) {
+				t.Errorf("carbon %s: exit %d\n%s", strings.Join(args, " "), code, out)
+			}
+		}
+	}
+	code, out, _ := run(t, "help")
+	for _, want := range []string{"Daily use:", "Access:", "Inspection:", "Setup:", "Exit codes:", "  4     check found errors"} {
+		if code != 0 || !strings.Contains(out, want) {
+			t.Errorf("carbon help lacks %q:\n%s", want, out)
+		}
+	}
+	code, _, errOut := run(t, "stauts")
+	if code != ExitUsage || !strings.Contains(errOut, "Did you mean `carbon status`?") {
+		t.Errorf("unknown command: exit %d\n%s", code, errOut)
+	}
+	if code, out, _ := run(t, "--version"); code != 0 || !strings.HasPrefix(out, "carbon ") {
+		t.Errorf("--version: exit %d %q", code, out)
+	}
+}
