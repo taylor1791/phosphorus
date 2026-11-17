@@ -163,10 +163,11 @@ func loadTrunkAt(repo *gitx.Repo, t *Trunk) (*Policy, error) {
 		return bootstrap(fmt.Sprintf("trunk %s has no %s", t.Ref, config.FileName))
 	} else if err != nil {
 		return nil, err
-	} else if config.IsLegacy(data) {
-		// A carbon 0.0.3 root file on trunk means carbon 1.0 is not adopted
-		// there yet: this is the carbon-migrate cutover branch.
-		return bootstrap(fmt.Sprintf("trunk %s still has a carbon 0.0.3 %s", t.Ref, config.FileName))
+	} else if config.IsUnadoptedRoot(data) {
+		// A root file with no [workspace] (a carbon 0.0.3 service) means
+		// carbon 1.0 is not adopted on trunk yet: this is the carbon-migrate
+		// cutover branch. A root with [workspace] is loaded and fails closed.
+		return bootstrap(fmt.Sprintf("trunk %s still has a carbon 0.0.3 %s (no [workspace])", t.Ref, config.FileName))
 	}
 	p, err := Load(src)
 	if err != nil {

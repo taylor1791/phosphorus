@@ -39,16 +39,22 @@ var ErrTrunkSettingRemoved = errors.New(`[workspace] trunk was removed: delete t
 // that reads policy from the working tree always.
 const TrunkWorktree = "worktree"
 
-// IsLegacy reports whether data parses as a carbon 0.0.3 carbon.toml (it
-// has a [push] or [pull] table).
-func IsLegacy(data []byte) bool {
+// IsUnadoptedRoot reports whether data, a root carbon.toml, shows that carbon
+// 1.0 is not adopted yet: it parses as TOML and has no `workspace` key at
+// all (a carbon 0.0.3 service at the root, whatever tables it uses). A file
+// that does not parse, or has a `workspace` key, is not: it is loaded and
+// fails as usual, so an adopted root with a stray [push] or [pull] still
+// fails closed with the legacy error.
+func IsUnadoptedRoot(data []byte) bool {
+	if HasConflictMarkers(data) {
+		return false
+	}
 	var loose map[string]any
 	if toml.Unmarshal(data, &loose) != nil {
 		return false
 	}
-	_, push := loose["push"]
-	_, pull := loose["pull"]
-	return push || pull
+	_, ws := loose["workspace"]
+	return !ws
 }
 
 // LegacyError means a carbon.toml is a carbon 0.0.3 file.

@@ -271,8 +271,10 @@ is an error whose hint is `git remote set-head origin -a`, `git fetch`, or
 Two documented exceptions read policy from the working tree:
 
 1. **Bootstrap.** The chosen ref resolves but has no root `carbon.toml`, or its
-   root `carbon.toml` is a carbon 0.0.3 file (carbon 1.0 is not adopted on
-   trunk yet: the carbon-migrate cutover branch), or no ref can be chosen
+   root `carbon.toml` parses and has no `workspace` key at all (a carbon 0.0.3
+   service: carbon 1.0 is not adopted on trunk yet, the carbon-migrate cutover
+   branch; a root with `[workspace]` is loaded as usual, so a stray `[push]` or
+   `[pull]` there is still the legacy error), or no ref can be chosen
    because the repository has no remote-tracking refs and no override (a
    brand-new local repository). The command prints a one-line notice. A 0.0.3
    file in the working tree is still the error that points at carbon-migrate.
