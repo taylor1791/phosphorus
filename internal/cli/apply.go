@@ -98,6 +98,9 @@ type applyScope struct {
 	Rekeyed []applyRekey   `json:"rekeyed,omitempty"`
 	Rotate  *applyRotation `json:"rotate,omitempty"`
 	Promote []string       `json:"promote,omitempty"`
+	// DropsNotOnTrunk are drops this branch has and trunk does not, line
+	// for line: unreviewed, so they are left as drops.
+	DropsNotOnTrunk []string `json:"drops_not_on_trunk,omitempty"`
 	// Unproven are entries under retired keys: whoever wrote them held that
 	// key, which a removed reader may still. apply re-seals them under the
 	// current key (vouching for them) only with --reseal-unproven; otherwise SkipUnproven.
@@ -481,10 +484,32 @@ func (c *Context) planApplyScope(w *Workspace, pol *policy.Policy, pkg *config.P
 		}
 	}
 	p.Grant = applyGrants(sa, p.missing)
-	for _, name := range s.Secrets.Names() {
-		if s.Secrets.Entries[name].IsDrop() {
-			p.Promote = append(p.Promote, name)
+	// Only drops trunk has, line for line, are promoted: a drop that is
+	// only on this branch has not been reviewed, and promoting it would
+	// take it out of check's banner.
+	var trunkSecrets *store.Secrets
+	if pol.Origin == policy.OriginTrunk {
+		rel := path.Join(trunkDir, config.CarbonDir, env+".secrets.toml")
+		if data, err := w.Repo.Source(pol.At()).ReadFile(rel); err == nil {
+			if trunkSecrets, err = store.ParseSecrets(rel, data); err != nil {
+				return block("cannot read the secrets file on trunk: "+AsError(err).Message, "")
+			}
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return block("cannot read the secrets file on trunk: "+AsError(err).Message, "")
 		}
+	}
+	for _, name := range s.Secrets.Names() {
+		e := s.Secrets.Entries[name]
+		if !e.IsDrop() {
+			continue
+		}
+		if pol.Origin == policy.OriginTrunk {
+			if trunkSecrets == nil || trunkSecrets.Entries[name] != e {
+				p.DropsNotOnTrunk = append(p.DropsNotOnTrunk, name)
+				continue
+			}
+		}
+		p.Promote = append(p.Promote, name)
 	}
 	p.SkipUnproven = !c.Bool("reseal-unproven")
 	for _, st := range s.StaleEntries() {
@@ -1034,6 +1059,9 @@ func printApplyScope(out io.Writer, p *applyScope) {
 	}
 	for _, n := range p.Promote {
 		rows = append(rows, []string{"  promotes drop", n})
+	}
+	for _, n := range p.DropsNotOnTrunk {
+		rows = append(rows, []string{"  leaves drop", n + ": not on trunk yet; left as a drop"})
 	}
 	for _, u := range p.Unproven {
 		what := "re-seals as trusted"

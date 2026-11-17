@@ -433,8 +433,10 @@ func TestApplyCommitsExactlyItsFiles(t *testing.T) {
 	w.Lin.In(co).Stdin("sk_1").Must("set", "stripe_api_key", "--env", "prod")
 	w.Commit("prod key")
 	w.Ada.In(co).Stdin("whsec_1").Must("set", "webhook_secret", "--env", "prod")
+	w.Commit("drop") // apply promotes only drops trunk has
+	w.Lin.In(co).Stdin("sk_2").Must("set", "stripe_api_key", "--env", "prod")
 
-	// The drop is not committed: apply would sweep it in, so it refuses.
+	// A value set but not committed: apply would sweep it in, so it refuses.
 	res := w.Lin.Fails(1, "apply", "--yes", "--env", "prod")
 	contains(t, "dirty", res.Stderr, "uncommitted changes", "prod.secrets.toml", "--no-commit")
 	// --no-commit writes and leaves the files unstaged.
@@ -695,7 +697,9 @@ func TestRename(t *testing.T) {
 	// Access still comes from checkout's trunk entry, not the workspace
 	// default that an unknown package name would get.
 	res = w.Lin.Must("apply", "--env", "prod", "--yes")
-	contains(t, "apply on rename branch", res.Stdout, "renamed from checkout", "promotes drop", "Committed")
+	// The drop rename re-sealed is not line for line on trunk, so it stays a
+	// drop until the rename merges.
+	contains(t, "apply on rename branch", res.Stdout, "renamed from checkout", "webhook_secret: not on trunk yet")
 	if strings.Contains(res.Stdout, "gains access") || strings.Contains(res.Stdout, "loses access") {
 		t.Fatalf("apply on the rename branch used the wrong policy:\n%s", res)
 	}

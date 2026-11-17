@@ -61,3 +61,28 @@ func TestTrunkTagCannotStandInForTheBranch(t *testing.T) {
 	res = w.Anyone().Must("check")
 	mustContain(t, "check", res.Stdout, "Compared with trunk: refs/heads/main at "+real[:7])
 }
+
+// Finding 3: apply on a branch must not promote a drop trunk does not
+// have: that would take an unreviewed value out of check's banner.
+func TestApplyLeavesDropsThatAreNotOnTrunk(t *testing.T) {
+	w := clitest.Standard(t)
+	co := w.PkgDir
+	setAll(t, w)
+	w.Branch("mallory")
+	w.Ada.In(co).Stdin("evil").Must("set", "webhook_secret", "--env", "prod")
+	w.Commit("drop")
+	head := w.Git("rev-parse", "HEAD")
+	res := w.Lin.Must("apply", "--yes")
+	if w.Git("rev-parse", "HEAD") != head {
+		t.Fatalf("apply committed on the drop's branch:\n%s", res)
+	}
+	ci(t, w.Repo, 0).has(t, "drop.pending", "checkout/prod webhook_secret")
+	res = w.Lin.Must("apply", "--dry-run", "--env", "prod")
+	mustNotContain(t, "plan", res.Stdout, "promotes drop")
+	// Once trunk has it, apply promotes it.
+	w.Checkout("main")
+	w.Merge("mallory")
+	res = w.Lin.Must("apply", "--yes")
+	mustContain(t, "apply on trunk", res.Stdout, "promotes drop", "webhook_secret")
+	ci(t, w.Repo, 0).lacks(t, "drop.pending")
+}
