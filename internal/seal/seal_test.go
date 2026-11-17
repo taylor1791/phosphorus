@@ -206,3 +206,30 @@ func TestVectors(t *testing.T) {
 		})
 	}
 }
+
+// Finding 9: each blob has exactly one encoding. Line breaks (which Go's
+// decoder skips) and non-canonical trailing bits are rejected.
+func TestStrictBase64(t *testing.T) {
+	k, _ := NewKey()
+	ad, _ := ValueAD("p", "e", "n", "kaaaaa", time.Unix(0, 0))
+	// "hi" seals to 24+2+16 = 42 bytes: 56 characters, no spare bits. Use a
+	// 3-byte value for 43 bytes, whose last character carries 2 spare bits.
+	blob, _ := Seal(k, []byte("hi!"), ad)
+	if _, err := Open(k, blob, ad); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{blob[:20] + "\n" + blob[20:], blob[:20] + "\r\n" + blob[20:], blob + "\n"} {
+		if _, err := Open(k, bad, ad); err == nil {
+			t.Errorf("blob with a line break opened")
+		}
+	}
+	const alpha = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	last := strings.IndexByte(alpha, blob[len(blob)-1])
+	alt := blob[:len(blob)-1] + string(alpha[last^1])
+	if _, err := Open(k, alt, ad); err == nil {
+		t.Error("blob with non-canonical trailing bits opened")
+	}
+	if _, err := DecodeBase64("AAAA\nAAAA"); err == nil {
+		t.Error("DecodeBase64 accepted a newline")
+	}
+}

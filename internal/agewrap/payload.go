@@ -38,7 +38,7 @@ func ParseSlotPayload(b []byte) (SlotPayload, error) {
 	if err != nil {
 		return SlotPayload{}, err
 	}
-	kb, err := seal.Encoding.DecodeString(lines[3])
+	kb, err := seal.DecodeBase64(lines[3])
 	if err != nil {
 		return SlotPayload{}, errors.New("slot payload: key is not valid base64")
 	}
@@ -105,7 +105,7 @@ func ParseDrop(b []byte) (Drop, error) {
 	if err != nil || seal.FormatTime(set) != lines[4] {
 		return Drop{}, errors.New("drop payload: set time is not RFC 3339 UTC whole seconds")
 	}
-	v, err := seal.Encoding.DecodeString(lines[5])
+	v, err := seal.DecodeBase64(lines[5])
 	if err != nil {
 		return Drop{}, errors.New("drop payload: value is not valid base64")
 	}

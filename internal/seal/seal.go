@@ -36,8 +36,19 @@ const (
 )
 
 // Encoding is the base64 used everywhere in carbon's formats: the standard
-// alphabet without padding.
-var Encoding = base64.RawStdEncoding
+// alphabet without padding, strict (unused trailing bits must be zero).
+// Decode with [DecodeBase64], which also rejects line breaks.
+var Encoding = base64.RawStdEncoding.Strict()
+
+// DecodeBase64 decodes carbon base64: standard alphabet, no padding,
+// canonical trailing bits, and no "\r" or "\n" (which the standard decoder
+// would otherwise skip), so each blob has exactly one encoding.
+func DecodeBase64(s string) ([]byte, error) {
+	if strings.ContainsAny(s, "\r\n") {
+		return nil, errors.New("base64 contains a line break")
+	}
+	return Encoding.DecodeString(s)
+}
 
 // ErrAuth means a blob failed authentication: it was tampered with, or it was
 // moved to a place (name, package, environment, key, time) it was not sealed
@@ -162,7 +173,7 @@ func Decode(blob string) ([]byte, error) {
 	if !ok {
 		return nil, fmt.Errorf("sealed value does not start with %q", Prefix)
 	}
-	raw, err := Encoding.DecodeString(rest)
+	raw, err := DecodeBase64(rest)
 	if err != nil {
 		return nil, fmt.Errorf("sealed value is not valid base64: %w", err)
 	}
