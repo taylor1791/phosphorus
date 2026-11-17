@@ -146,8 +146,22 @@ func (r *Repo) IsIgnored(p string) (bool, error) {
 
 // Add stages paths.
 func (r *Repo) Add(paths ...string) error {
-	_, err := r.Git(append([]string{"add", "--"}, paths...)...)
+	_, err := r.Git(append([]string{"--literal-pathspecs", "add", "--"}, paths...)...)
 	return err
+}
+
+// Detached reports whether HEAD is detached (not on a branch).
+func (r *Repo) Detached() (bool, error) {
+	_, err := r.Git("symbolic-ref", "-q", "HEAD")
+	if err == nil {
+		return false, nil
+	}
+	var ge *Error
+	var ee *exec.ExitError
+	if errors.As(err, &ge) && errors.As(ge.Err, &ee) && ee.ExitCode() == 1 {
+		return true, nil
+	}
+	return false, err
 }
 
 // Commit commits exactly paths (staging them first) with message.
@@ -155,7 +169,14 @@ func (r *Repo) Commit(message string, paths ...string) error {
 	if err := r.Add(paths...); err != nil {
 		return err
 	}
-	_, err := r.Git(append([]string{"commit", "-q", "-m", message, "--"}, paths...)...)
+	// Literal paths, and no hook runs: --no-verify skips pre-commit and
+	// commit-msg, and core.hooksPath pointing at nothing stops the rest
+	// (post-commit and others). carbon commits on branches other people
+	// wrote, and a hooks directory configured in the repository runs their
+	// code.
+	args := []string{"--literal-pathspecs", "-c", "core.hooksPath=" + os.DevNull,
+		"commit", "--no-verify", "-q", "-m", message, "--"}
+	_, err := r.Git(append(args, paths...)...)
 	return err
 }
 

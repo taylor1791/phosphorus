@@ -36,7 +36,7 @@ func (o *Opened) VerifyTrunk(trunk *store.Keys) error {
 		return nil
 	}
 	if trunk.Scope != o.Name() {
-		return fmt.Errorf("%w: trunk's keys file says scope = %q", ErrWrongScope, trunk.Scope)
+		return o.verifyRenamed(trunk) // rename_verify.go
 	}
 	fail := func(why string) error {
 		return fmt.Errorf("%w: %s (%s)", ErrNotFromTrunk, why, o.KeysPath())
