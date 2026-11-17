@@ -17,12 +17,13 @@ import (
 func init() {
 	Register(&Command{
 		Name:    "set",
-		Usage:   "<name> [--generate] [--env <env>] [--package <name>]",
+		Usage:   "<name> [--generate] [--allow-empty] [--env <env>] [--package <name>]",
 		Summary: "Seal a secret, or drop one into the inbox",
 		Help: `set reads the value from a hidden prompt, or from stdin when stdin is not a
 terminal (one trailing newline is stripped). It never takes the value as an
 argument. --generate makes random bytes instead (generate = "random:<n>" in
-the declaration, 32 by default) and nobody sees them.
+the declaration, 32 by default) and nobody sees them. An empty value is
+refused unless --allow-empty is given.
 
 If you read the scope, the value is sealed under its key. If you cannot, it
 becomes a drop: encrypted to the scope's inbox key from trunk, readable by
@@ -32,6 +33,7 @@ policy names.`,
 		MinArgs: 1, MaxArgs: 1,
 		Flags: func(fs *flag.FlagSet) {
 			fs.Bool("generate", false, "generate a random value instead of reading one")
+			fs.Bool("allow-empty", false, "store an empty value instead of refusing it")
 		},
 		Run: runSet,
 	})
@@ -165,7 +167,7 @@ func runSet(c *Context) error {
 		}
 	}
 
-	value, err := c.secretValue(s.Name(), name, decl, generate)
+	value, err := c.secretValue(s.Name(), name, decl, generate, c.Bool("allow-empty"))
 	if err != nil {
 		return err
 	}
@@ -304,7 +306,7 @@ func generatedBytes(decl config.Secret) int {
 
 // secretValue returns the value to store: generated, or read from the
 // hidden prompt / stdin.
-func (c *Context) secretValue(scopeName, name string, decl config.Secret, generate bool) ([]byte, error) {
+func (c *Context) secretValue(scopeName, name string, decl config.Secret, generate, allowEmpty bool) ([]byte, error) {
 	if generate {
 		raw := make([]byte, generatedBytes(decl))
 		defer clear(raw)
@@ -319,9 +321,12 @@ func (c *Context) secretValue(scopeName, name string, decl config.Secret, genera
 	if err != nil {
 		return nil, err
 	}
-	if len(v) == 0 {
+	if len(v) == 0 && !allowEmpty {
 		return nil, &Error{Code: ExitUsage, Message: "the value is empty; nothing was stored",
-			Hint: fmt.Sprintf("Pipe the value in (printf %%s \"$VALUE\" | carbon set %s) or type it at the prompt.", name)}
+			Hint: fmt.Sprintf("Pipe the value in (printf %%s \"$VALUE\" | carbon set %s), type it at the prompt, or pass --allow-empty to store an empty value.", name)}
+	}
+	if v == nil {
+		v = []byte{}
 	}
 	return v, nil
 }
