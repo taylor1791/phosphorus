@@ -58,6 +58,10 @@ type joinResult struct {
 	PublicFile  string   `json:"public_file"`
 	Already     bool     `json:"already_joined,omitempty"`
 	Teams       []string `json:"joined_teams,omitempty"`
+	// Reads is how many scopes working-tree policy names this person for.
+	Reads int `json:"policy_scopes"`
+	// Next is the next step, as printed.
+	Next string `json:"next,omitempty"`
 	// PrivateKey is set for --machine only: the identity to store in CI.
 	PrivateKey string `json:"private_key,omitempty"`
 }
@@ -191,6 +195,14 @@ func runJoin(c *Context) error {
 		}
 	}
 
+	// What comes next depends on whether policy already names this person
+	// (a bootstrap team, or a new device of a reader) and on whether there
+	// is a reviewed trunk.
+	if after, err := policy.LoadWorktree(w.Root); err == nil {
+		res.Reads = len(after.ScopesOf(person))
+	}
+	res.Next = joinNext(bootstrap && len(res.Teams) > 0, firstPerson, res.Reads)
+
 	return c.Output(res, func(out io.Writer) {
 		var rows [][]string
 		if res.Created {
@@ -204,9 +216,27 @@ func runJoin(c *Context) error {
 		}
 		rows = append(rows, []string{"Fingerprint", res.Fingerprint})
 		Table(out, rows)
-		fmt.Fprint(out, "\nNext: open a pull request with this change and ask to be added to a team.\n")
-		fmt.Fprint(out, "Access starts once it merges and a current reader runs `carbon apply`.\n")
+		fmt.Fprintf(out, "\n%s\n", res.Next)
 	})
+}
+
+// joinNext is the next-step text after join.
+func joinNext(bootstrapTeams, firstPerson bool, reads int) string {
+	switch {
+	case bootstrapTeams:
+		return "You read every environment those teams are granted, because carbon is not on trunk yet.\n" +
+			"Next: carbon init in each package directory, declare its secrets, then carbon set <name>.\n" +
+			"Commit the carbon files to trunk when ready; from then on access changes go through review."
+	case reads > 0:
+		return fmt.Sprintf("Policy already names you for %s, so no access change is needed.\n", plural(reads, "scope")) +
+			"Next: open a pull request with this change. Once it merges, a current reader runs\n" +
+			"`carbon apply` to wrap those scopes' keys to this device."
+	case firstPerson:
+		return "Next: add yourself to a team in .carbon/teams.toml or to an [access] list, then commit."
+	}
+	return "Next: open a pull request with this change and ask to be added to a team\n" +
+		"(or run `carbon request <package> --env <env>` on the same branch).\n" +
+		"Access starts once it merges and a current reader runs `carbon apply`."
 }
 
 // createIdentity writes a new identity file (mode 0600, directory 0700),
