@@ -21,6 +21,9 @@ deviate from this file, write the deviation and the reason in
 - Config is data. Nothing in any TOML file is ever executed.
 - Secret values are never logged, never put in error messages, never passed as
   process arguments, and never written to disk except by `export` and `edit`.
+- `CARBON_IDENTITY` and `CARBON_IDENTITY_FILE` are removed from the environment
+  of every subprocess carbon starts (`gitx.ScrubbedEnviron`), including the
+  child of `run`.
 
 ## Names
 
@@ -45,7 +48,6 @@ Secrets and vars share one namespace inside a package; a name in both is a
 format = 1
 environments = ["dev", "staging", "prod"]
 default_environment = "dev"
-trunk = "origin/main"        # a git ref, or "worktree" (see Trunk)
 
 [access]
 dev  = ["@engineering"]                                        # short form
@@ -151,12 +153,15 @@ successor = "k3f9q2"
 sealed = "carbon1:..."
 ```
 
-A retired key keeps no slots and no inbox fields. `reason` is `removed <who>`
+A retired key keeps no slots and no `inbox`; it may keep `inbox_sealed` so
+that drops written to its inbox on older branches still open. `reason` is `removed <who>`
 (comma-separated when several) for a removal, or free text otherwise.
 
 ## Encodings
 
-Base64 here always means standard alphabet without padding.
+Base64 here always means standard alphabet without padding, strict: unused
+trailing bits are zero and the text has no line breaks. Decoders reject
+anything else, so each blob has exactly one encoding.
 
 ### Sealed blob: `carbon1:<base64(nonce || ciphertext)>`
 
@@ -236,28 +241,75 @@ fails loudly if it differs from `inbox`.
 ## Trunk
 
 Policy (workspace and package `[access]`, people, machines, teams) and inbox
-public keys are read from the trunk ref with `git show <ref>:<path>` and
-`git ls-tree`, never from the working tree, in these commands: `apply`, the
-drop path of `set`, scope creation, and the slot checks in `check`.
+public keys are read from the trunk ref with `git ls-tree` and
+`git cat-file`, never from the working tree, in these commands: `apply`, the
+drop path of `set`, scope creation, the trunk check every reader runs (below),
+and the slot checks in `check`.
 
-Two documented exceptions:
+**Choosing the ref.** Nothing a commit can change chooses the trunk. In order:
 
-1. **Bootstrap.** If the trunk ref does not exist, or has no root
-   `carbon.toml`, carbon is not adopted on trunk yet. Policy is read from the
-   working tree and the command prints a one-line notice saying so.
-2. **No protected trunk.** `trunk = "worktree"` in the workspace file reads
+1. the environment variable `CARBON_TRUNK` (a ref, or `worktree`);
+2. the clone's local git config `carbon.trunk` (a ref, or `worktree`);
+3. the remote default branch: the target of `refs/remotes/origin/HEAD`, else
+   `origin/main`, else `origin/master`, whichever exists first.
+
+carbon never writes git config itself (`carbon init --trunk <ref>` runs
+`git config carbon.trunk <ref>` because the user asked). A ref name must
+match `[A-Za-z0-9][A-Za-z0-9._/-]*`, must not be `HEAD`, must not contain
+`@`, `:` or `..`, and must not end in `/` or `.lock`; `worktree` is the one
+special word. `[workspace] trunk` no longer exists: a workspace file that has
+it is an error telling the user to delete it and use git config or
+`CARBON_TRUNK`. `policy.Trunk` records the ref and where it came from (env,
+git config, remote default, none) for `doctor`, `status` and `check`.
+
+**Errors, never fallbacks.** An override (1 or 2) that does not resolve is an
+error. A remote default that points nowhere is an error. If the repository
+has remote-tracking refs but none of rule 3's candidates and no override, that
+is an error whose hint is `git remote set-head origin -a`, `git fetch`, or
+`git config carbon.trunk <ref>`.
+
+Two documented exceptions read policy from the working tree:
+
+1. **Bootstrap.** The chosen ref resolves but has no root `carbon.toml`, or no
+   ref can be chosen because the repository has no remote-tracking refs and no
+   override (a brand-new local repository). The command prints a one-line
+   notice.
+2. **No protected trunk.** `worktree` from `CARBON_TRUNK` or git config reads
    policy from the working tree always. `check` reports this as a warning.
 
-Everything else (`who`, `access`, `status`, `run`, the graph checks) reads the
-working tree.
+**Readers check the keys file against trunk.** After opening a scope, every
+command that reads or seals (`get`, `run`, `export`, `set`, `apply`) compares
+the working tree's keys file with trunk's for that scope, when trunk is a ref
+and has one (`scope.Opened.VerifyTrunk`):
+
+- same `current` id: the working tree's `inbox` and `inbox_sealed` for it must
+  equal trunk's;
+- the working tree's current key is a key trunk has retired (the branch is
+  behind): accepted, and when trunk's record keeps `inbox_sealed` the opened
+  key must unseal it;
+- trunk's current key is a retired key in the working tree's chain that opened,
+  and that key unseals trunk's `inbox_sealed` for that id to trunk's `inbox`
+  (the branch rotated past trunk, by someone who held trunk's key): accepted;
+- otherwise the command refuses: the scope's key on this branch does not
+  descend from trunk's (fix: `git checkout <trunk> -- <keys file>`, or merge
+  trunk).
+
+The drop path of `set` also refuses when the working tree lists trunk's
+current key as retired (the local trunk ref is behind: `git fetch`).
+
+Everything else (`who`, `access`, `status`, `run`'s environment, the graph
+checks) reads the working tree.
 
 ## Scope lifecycle
 
-- **Creation.** A scope gets its first key when someone first runs `set` in it
-  (or `apply` finds a scope with declared secrets and no key). Anyone may
-  create it: carbon generates the key and inbox pair and wraps the key to every
-  device that trunk policy names for the scope. If the creator is not a reader
-  the value still gets sealed and they simply cannot read it back.
+- **Creation.** A scope gets its first key when a reader first runs `set` in
+  it (or `apply` finds a scope with declared secrets and no key). Only a device
+  that trunk policy names for the scope may create it (bootstrap and
+  `worktree`: working-tree policy); anyone else gets an error naming the
+  readers who can. carbon generates the key and inbox pair and wraps the key to
+  every device that policy names. carbon cannot prove who generated a
+  scope's first key: a new keys file in a pull request is a trusted act to
+  review, like a drop, and `check` lists new scope keys.
 - **Grant.** `apply`, run by a reader, adds a slot for each device trunk policy
   names that has none.
 - **Removal.** When the current key has a slot for a device trunk policy no
@@ -267,10 +319,18 @@ working tree.
   `reason = "removed <who>"`.
 - **Drops.** `set` by a non-reader writes a drop to the trunk inbox key.
   Readers open drops transparently in `get`, `run`, `export`. `apply` promotes
-  each drop to a sealed value, keeping its `set` time.
-- **Old keys.** A value whose `key` is a retired id is opened by walking the
-  retired chain from the current key. `apply` re-seals such values under the
-  current key.
+  each drop to a sealed value, keeping its `set` time unless that is later
+  than now (a dropper chooses it), in which case it becomes now.
+- **Old keys (the chain rule).** A value whose `key` is a retired id is opened
+  by walking the retired chain from the current key: each retired key is
+  unsealed by its `successor`, which must itself be the current key or an
+  opened retired key. A retired `inbox_sealed` that fails to open is tampering,
+  and drops under it report it. A value under a retired key proves only that
+  its writer held that key, which a removed reader still may: `ls` marks it
+  "stale: retired key, author unproven", and `apply` lists such values
+  (`scope.StaleEntries`, `RefreshDetailed`) for confirmation before re-sealing
+  them under the current key. A drop that does not open never blocks
+  rotation or refresh: it is left as it is and reported.
 - **Rotation debt.** A secret owes a rotation when its `set` time is earlier
   than the `retired` time of a key whose reason is a removal, or when it is
   older than its `rotate_after`. Debt clears when a new value is set.

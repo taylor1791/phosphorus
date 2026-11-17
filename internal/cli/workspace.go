@@ -185,7 +185,7 @@ func (c *Context) Environment(w *Workspace) (string, error) {
 // trunk = "worktree" exceptions, and prints the bootstrap notice on stderr.
 // Use it for anything that wraps keys or writes drops.
 func (c *Context) TrunkPolicy(w *Workspace) (*policy.Policy, error) {
-	p, err := policy.LoadTrunk(w.Repo, w.Config)
+	p, err := policy.LoadTrunkWith(w.Repo, c.Getenv)
 	if err != nil {
 		return nil, err
 	}
@@ -305,7 +305,42 @@ func (c *Context) OpenScope(w *Workspace, p *config.Package, s *scope.Scope) (*s
 	if errors.Is(err, scope.ErrNotReader) {
 		return nil, c.NoAccessErr(pol, p.Name, s.Env, me, s.SlotIDs())
 	}
-	return o, err
+	if err != nil {
+		return nil, err
+	}
+	if err := c.VerifyTrunk(w, p, o); err != nil {
+		o.Close()
+		return nil, err
+	}
+	return o, nil
+}
+
+// VerifyTrunk checks an opened scope against trunk's keys file with
+// scope.Opened.VerifyTrunk, when trunk is a ref that has one, and turns a
+// failure into an error with the fix. Every path that opens a scope to read
+// or seal must call it (OpenScope does).
+func (c *Context) VerifyTrunk(w *Workspace, p *config.Package, o *scope.Opened) error {
+	pol, err := c.TrunkPolicy(w)
+	if err != nil {
+		return err
+	}
+	if pol.Origin != policy.OriginTrunk {
+		return nil
+	}
+	keys, err := c.TrunkKeys(w, pol, p, o.Env)
+	if err != nil {
+		return err
+	}
+	err = o.VerifyTrunk(keys)
+	if errors.Is(err, scope.ErrNotFromTrunk) {
+		rel := w.Rel(o.KeysPath())
+		return &Error{Code: ExitError, Err: err,
+			Message: fmt.Sprintf("the key for %s on this branch does not descend from trunk's", o.Name()),
+			Details: []string{err.Error(), "carbon will not read or seal under a key that trunk did not lead to."},
+			Hint: fmt.Sprintf("Restore the keys file from trunk:   git checkout %s -- %s\nor bring this branch up to date:   git merge %s",
+				pol.Ref, rel, pol.Ref)}
+	}
+	return err
 }
 
 // NoAccessErr builds the "you cannot read <package> in <env>" error: who

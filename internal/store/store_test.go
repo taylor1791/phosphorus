@@ -160,3 +160,24 @@ func TestReadWriteFiles(t *testing.T) {
 		t.Fatalf("temporary files left behind: %v", ents)
 	}
 }
+
+// Local date-times would be read in the machine's time zone; they are
+// rejected whatever the zone is.
+func TestLocalDateTimesRejected(t *testing.T) {
+	saved := time.Local
+	time.Local = time.UTC // the zone in which they used to slip through
+	defer func() { time.Local = saved }()
+	for _, set := range []string{"2026-01-01T00:00:00", "2026-01-01"} {
+		src := `a = { key = "kaaaaa", set = ` + set + `, value = "carbon1:x" }` + "\n"
+		if _, err := ParseSecrets("x", []byte(src)); err == nil {
+			t.Errorf("set = %s accepted", set)
+		}
+	}
+	src := strings.Replace(keysSample, "created = 2026-06-01T10:00:00Z", "created = 2026-06-01T10:00:00", 1)
+	if _, err := ParseKeys("x", []byte(src)); err == nil {
+		t.Error("local created accepted")
+	}
+	if _, err := ParseSecrets("x", []byte("a = { key = \"kaaaaa\", set = 2026-01-01T00:00:00+00:00, value = \"carbon1:x\" }\n")); err != nil {
+		t.Errorf("+00:00 offset rejected: %v", err)
+	}
+}

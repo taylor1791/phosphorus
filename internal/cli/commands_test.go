@@ -25,8 +25,14 @@ func TestInitWorkspaceThenPackage(t *testing.T) {
 	r := clitest.NewRepo(t)
 	any := r.Anyone()
 	res := any.Must("init", "--trunk", "main", "--environments", "dev,prod")
-	contains(t, "stdout", res.Stdout, "Created carbon.toml", "Created .carbon/teams.toml")
-	contains(t, "carbon.toml", r.Read("carbon.toml"), `environments = ["dev", "prod"]`, `trunk = "main"`, `prod = ["@engineering"]`)
+	contains(t, "stdout", res.Stdout, "Created carbon.toml", "Created .carbon/teams.toml", "git config carbon.trunk main (this clone only)")
+	contains(t, "carbon.toml", r.Read("carbon.toml"), `environments = ["dev", "prod"]`, `prod = ["@engineering"]`)
+	if strings.Contains(r.Read("carbon.toml"), "trunk") {
+		t.Fatal("init wrote a trunk setting")
+	}
+	if got := r.Git("config", "--local", "carbon.trunk"); got != "main" {
+		t.Fatalf("carbon.trunk = %q", got)
+	}
 	contains(t, ".gitattributes", r.Read(".gitattributes"), "**/.carbon/*.keys.toml linguist-generated")
 
 	any.Fails(2, "init")
@@ -121,7 +127,7 @@ func TestSingleUserBootstrap(t *testing.T) {
 	r.AddPackage("api", "api", "[secrets]\ndb_password = {}\ntoken = { generate = \"random:16\" }\n")
 
 	res := ada.In("api").Stdin("hunter2\n").Must("set", "db_password")
-	contains(t, "stderr", res.Stderr, "notice: trunk main does not exist")
+	contains(t, "stderr", res.Stderr, "notice: this repository has no trunk yet", "reading policy from the working tree")
 	contains(t, "stdout", res.Stdout, "Created the key for api/dev", "Sealed. Commit api/.carbon/dev.keys.toml and api/.carbon/dev.secrets.toml")
 	if strings.Contains(res.Stdout+res.Stderr, "hunter2") {
 		t.Fatal("value echoed")
@@ -208,17 +214,6 @@ func TestReadersAndNonReaders(t *testing.T) {
 	w.Lin.In(co).Stdin("").Fails(2, "set", "webhook_secret", "--env", "prod")
 	w.Lin.Fails(5, "ls") // not inside a package
 	w.Lin.Fails(5, "ls", "--package", "nope")
-}
-
-func TestNonReaderCreatesScope(t *testing.T) {
-	w := clitest.Standard(t)
-	co := w.PkgDir
-	res := w.Sam.In(co).Stdin("sk_from_sam").Must("set", "stripe_api_key", "--env", "prod")
-	contains(t, "stdout", res.Stdout, "Created the key for checkout/prod", "You are not a reader of checkout/prod")
-	w.Sam.In(co).Fails(3, "get", "stripe_api_key", "--env", "prod")
-	if got := w.Lin.In(co).Must("get", "stripe_api_key", "--env", "prod").Stdout; got != "sk_from_sam" {
-		t.Fatalf("lin get = %q", got)
-	}
 }
 
 func TestDropByNonReaderThenReaderReads(t *testing.T) {

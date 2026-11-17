@@ -63,7 +63,7 @@ func run(dir string, args ...string) ([]byte, error) {
 	full := append([]string{"-c", "core.quotepath=off"}, args...)
 	cmd := exec.Command("git", full...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
+	cmd.Env = append(ScrubbedEnviron(os.Environ()), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -253,4 +253,79 @@ func skipped(f string) bool {
 		}
 	}
 	return false
+}
+
+// identityVars are environment variables that carry carbon key material or
+// point at it. They are removed from every subprocess carbon starts.
+var identityVars = []string{"CARBON_IDENTITY", "CARBON_IDENTITY_FILE"}
+
+// ScrubbedEnviron returns environ (as from os.Environ) without
+// CARBON_IDENTITY and CARBON_IDENTITY_FILE. Every git subprocess gets it;
+// `run` should use it for the child process too.
+func ScrubbedEnviron(environ []string) []string {
+	out := make([]string, 0, len(environ))
+	for _, kv := range environ {
+		name, _, _ := strings.Cut(kv, "=")
+		keep := true
+		for _, v := range identityVars {
+			if name == v {
+				keep = false
+			}
+		}
+		if keep {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
+// ConfigGet reads a key from the repository's own git config (--local). ok
+// is false when the key is unset.
+func (r *Repo) ConfigGet(key string) (value string, ok bool, err error) {
+	out, err := r.Git("config", "--local", "--get", key)
+	if err != nil {
+		var ge *Error
+		var ee *exec.ExitError
+		if errors.As(err, &ge) && errors.As(ge.Err, &ee) && ee.ExitCode() == 1 {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return strings.TrimSpace(string(out)), true, nil
+}
+
+// ConfigSet writes a key to the repository's own git config (--local).
+func (r *Repo) ConfigSet(key, value string) error {
+	_, err := r.Git("config", "--local", key, value)
+	return err
+}
+
+// HasRemoteRefs reports whether the repository has any remote-tracking refs.
+func (r *Repo) HasRemoteRefs() (bool, error) {
+	out, err := r.Git("for-each-ref", "--count=1", "--format=%(refname)", "refs/remotes/")
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(string(out)) != "", nil
+}
+
+// RemoteDefault returns the remote default branch as a short ref, trying
+// refs/remotes/origin/HEAD, then origin/main, then origin/master. ok is false
+// when none exists.
+func (r *Repo) RemoteDefault() (ref string, ok bool, err error) {
+	if out, err := r.Git("symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"); err == nil {
+		if s := strings.TrimSpace(string(out)); s != "" {
+			return s, true, nil
+		}
+	}
+	for _, c := range []string{"origin/main", "origin/master"} {
+		ok, err := r.RefExists("refs/remotes/" + c)
+		if err != nil {
+			return "", false, err
+		}
+		if ok {
+			return c, true, nil
+		}
+	}
+	return "", false, nil
 }

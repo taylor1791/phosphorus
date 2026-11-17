@@ -84,6 +84,11 @@ func ParseSecrets(path string, data []byte) (*Secrets, error) {
 	if err := strictDecode(data, &raw); err != nil {
 		return nil, &ParseError{path, err}
 	}
+	if loose, err := looseTables(data); err != nil {
+		return nil, &ParseError{path, err}
+	} else if err := offsetTimesOnly(data, loose, "set"); err != nil {
+		return nil, &ParseError{path, err}
+	}
 	s := NewSecrets()
 	for name, e := range raw {
 		if err := config.CheckSecretName(name); err != nil {
@@ -188,6 +193,13 @@ func ParseKeys(path string, data []byte) (*Keys, error) {
 	var raw keysTOML
 	if err := strictDecode(data, &raw); err != nil {
 		return nil, &ParseError{path, err}
+	}
+	if loose, err := looseTables(data); err != nil {
+		return nil, &ParseError{path, err}
+	} else if keys, ok := loose["keys"].(map[string]any); ok {
+		if err := offsetTimesOnly(data, keys, "created", "retired"); err != nil {
+			return nil, &ParseError{path, err}
+		}
 	}
 	fail := func(f string, a ...any) error { return &ParseError{path, fmt.Errorf(f, a...)} }
 	if _, _, err := config.ParseScopeName(raw.Scope); err != nil {
@@ -402,4 +414,33 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// offsetTimesOnly rejects TOML local date-times and dates in the named
+// fields: they would otherwise be read in the machine's time zone. tables
+// maps a table name to its fields; fields of every inline table under it
+// are checked.
+func offsetTimesOnly(data []byte, tables map[string]any, fields ...string) error {
+	for name, v := range tables {
+		m, ok := v.(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, f := range fields {
+			if x, present := m[f]; present {
+				if _, ok := x.(time.Time); !ok {
+					return fmt.Errorf("%s: %s must be a UTC date-time like 2026-11-02T17:04:11Z", name, f)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func looseTables(data []byte) (map[string]any, error) {
+	var m map[string]any
+	if err := toml.Unmarshal(data, &m); err != nil {
+		return nil, err
+	}
+	return m, nil
 }
