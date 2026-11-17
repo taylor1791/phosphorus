@@ -233,7 +233,7 @@ func TestDoctor(t *testing.T) {
 		"ok    trunk", "main (from git config carbon.trunk) at ", "holds 1 key(s)", "hybrid post-quantum",
 		"you are lin (device laptop), a member of @engineering and @payments",
 		"ok    environment", "dev (the default)",
-		"checkout/dev: you have a slot (lin/laptop)",
+		"checkout/dev: your key opens it (slot lin/laptop) and it matches trunk",
 		"No problems")
 
 	w.Lin.In(w.PkgDir).Stdin(stripeValue).Must("set", "stripe_api_key", "--env", "prod")

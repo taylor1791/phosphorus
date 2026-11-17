@@ -53,6 +53,28 @@ type doctorResult struct {
 type doctor struct {
 	c   *Context
 	res doctorResult
+	ids []agewrap.Identity // parsed without a passphrase; nil if protected
+}
+
+// insideDir reports whether p (relative to cwd if not absolute) is inside
+// root, after resolving symlinks in both. A name such as "..foo" is inside.
+func insideDir(root, p, cwd string) bool {
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(cwd, p)
+	}
+	if r, err := filepath.EvalSymlinks(root); err == nil {
+		root = r
+	}
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		p = r
+	} else if r, err := filepath.EvalSymlinks(filepath.Dir(p)); err == nil {
+		p = filepath.Join(r, filepath.Base(p))
+	}
+	rel, err := filepath.Rel(root, p)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func (d *doctor) add(name, status, msg, fix string) {
@@ -191,6 +213,9 @@ func (d *doctor) trunk(w *Workspace) *policy.Policy {
 		d.addErr("trunk", err)
 		return nil
 	}
+	// Later checks (the scope's trunk check) reuse it; doctor reports the
+	// bootstrap state itself, so its notice is not printed.
+	d.c.trunkPol = pol
 	undo := "git config --unset " + policy.TrunkConfigKey
 	if t.From == policy.TrunkFromEnv {
 		undo = "unset " + policy.TrunkEnv
@@ -242,11 +267,9 @@ func (d *doctor) identity(w *Workspace, pol *policy.Policy) []policy.Device {
 			d.add("identity", checkFail, path+" is a directory, not an identity file", "Move it aside and run:   carbon join")
 			return nil
 		}
-		if w != nil {
-			if rel, err := filepath.Rel(w.Root, path); err == nil && !strings.HasPrefix(rel, "..") {
-				d.add("identity", checkFail, "your private key "+path+" is inside the repository",
-					"Move it out of the repository (for example to ~/.config/carbon/identity) and set CARBON_IDENTITY_FILE if needed.")
-			}
+		if w != nil && insideDir(w.Root, path, c.Cwd) {
+			d.add("identity", checkFail, "your private key "+path+" is inside the repository",
+				"Move it out of the repository (for example to ~/.config/carbon/identity) and set CARBON_IDENTITY_FILE if needed.")
 		}
 		if perm := fi.Mode().Perm(); perm&0o077 != 0 {
 			d.add("identity", checkFail, fmt.Sprintf("%s has mode %04o: other users can read your private key", path, perm),
@@ -264,6 +287,7 @@ func (d *doctor) identity(w *Workspace, pol *policy.Policy) []policy.Device {
 		return nil
 	}
 	ids, err := agewrap.ParseIdentityFile(data, nil)
+	d.ids = ids
 	if err != nil || len(ids) == 0 {
 		why := "it holds no identity"
 		if err != nil {
@@ -382,6 +406,10 @@ func (d *doctor) scope(w *Workspace, pol *policy.Policy, env string, me []policy
 	}
 	pkg, err := c.Package(w)
 	if err != nil {
+		if c.Global.Package != "" {
+			d.addErr("package", err)
+			return
+		}
 		d.add("package", checkInfo, "not inside a package (use --package <name> to check one)", "")
 		return
 	}
@@ -395,16 +423,37 @@ func (d *doctor) scope(w *Workspace, pol *policy.Policy, env string, me []policy
 		d.add("scope", checkInfo, name+" has no key yet; the first `carbon set` creates it", "")
 		return
 	}
-	slots := map[string]bool{}
-	for _, id := range s.SlotIDs() {
-		slots[id] = true
-	}
 	ids := DeviceIDs(me)
-	for _, id := range ids {
-		if slots[id] {
-			d.add("scope", checkOK, fmt.Sprintf("%s: you have a slot (%s)", name, id), "")
+	if d.ids != nil {
+		// Really open it, and check its key against trunk, as a reader's
+		// command would.
+		o, err := s.Open(d.ids, ids...)
+		switch {
+		case err == nil:
+			verr := c.VerifyTrunk(w, pkg, o)
+			slot := o.Slot
+			o.Close()
+			if verr != nil {
+				d.addErr("scope", verr)
+				return
+			}
+			d.add("scope", checkOK, fmt.Sprintf("%s: your key opens it (slot %s) and it matches trunk", name, slot), "")
 			d.drops(s)
 			return
+		case !errors.Is(err, scope.ErrNotReader):
+			d.addErr("scope", err)
+			return
+		}
+	} else {
+		// Passphrase-protected: say what the keys file shows, unverified.
+		for _, id := range s.SlotIDs() {
+			for _, mine := range ids {
+				if id == mine {
+					d.add("scope", checkInfo, fmt.Sprintf("%s: there is a slot for %s (not opened: the identity is passphrase-protected)", name, id), "")
+					d.drops(s)
+					return
+				}
+			}
 		}
 	}
 	if len(me) == 0 {
