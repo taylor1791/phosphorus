@@ -154,10 +154,21 @@ retired = 2026-11-02T17:04:11Z
 reason = "removed sam"
 successor = "k3f9q2"
 sealed = "carbon1:..."
+carried = ["sha256:...", "sha256:..."]
 ```
 
 A retired key keeps no slots and no `inbox`; it may keep `inbox_sealed` so
-that drops written to its inbox on older branches still open. `reason` is
+that drops written to its inbox on older branches still open. A retired
+key has a required `carried` list, written on one line after `sealed`
+(`store.Key.Carried`): sorted, without repeats, each element `sha256:` and
+the hex SHA-256 of the canonical secrets-file line of an entry that was
+under that key when it was retired, exactly as the deterministic writer
+emits it (`<name> = { key = "<id>", set = <time>, value = "<blob>" }`, or
+`drop =`), without the trailing newline (`store.EntryLine`,
+`store.LineHash`). Only entries whose `key` is the retired id are listed;
+the list may be empty. The strict reader refuses a retired key without
+`carried` and a current key with one. `carried` is authenticated by the
+retired `sealed` blob (Encodings). `reason` is
 what `apply` rotated for: `removed <who>` for a removal, `rekeyed <device>`
 for a device whose public key changed, or both (`removed sam, rekeyed
 ada/laptop`), each list comma-separated when several. The code that builds
@@ -197,10 +208,14 @@ contain newlines, so the encoding is unambiguous.
 |---|---|---|---|
 | secret value | scope key `<key id>` | the value bytes | `carbon/v1/value`, package, env, secret name, key id, set time |
 | `inbox_sealed` | scope key `<key id>` | the inbox identity string | `carbon/v1/inbox`, package, env, key id |
-| retired `sealed` | the successor key | the retired key's 32 bytes | `carbon/v1/retired`, package, env, retired key id, successor key id, retired time, reason |
+| retired `sealed` | the successor key | the retired key's 32 bytes | `carbon/v1/retired`, package, env, retired key id, successor key id, retired time, reason, carried digest |
 
 Times in associated data are RFC 3339 UTC with whole seconds, e.g.
-`2026-11-02T17:04:11Z`.
+`2026-11-02T17:04:11Z`. The carried digest (`seal.CarriedDigest`) is the
+hex SHA-256 of the retired record's `carried` elements, as written, joined
+with `\n` (no trailing newline); an empty list hashes the empty string.
+A reader walking the retired chain therefore rejects an edited `carried`
+list as tampering (`ErrTampered`).
 
 ### Slot: `{ to = "sha256:<hex>", slot = "age1:<base64(age file)>" }`
 
@@ -422,11 +437,19 @@ checks) reads the working tree.
   names that has none.
 - **Removal.** When the current key has a slot for a device trunk policy no
   longer names, or a slot whose `to` is not the hash of the device's
-  current policy key (re-keyed device), `apply` rotates: new key and inbox
-  pair, slots for the readers that remain, every value under the current key
-  re-sealed under the new key **keeping its `set` time**, the old key retired
-  and sealed under the new one with a reason naming the removals and re-keys
-  (`removed sam`, `rekeyed ada/laptop`, `removed sam, rekeyed ada/laptop`).
+  current policy key (re-keyed device), `apply` rotates
+  (`scope.Opened.Rotate`): new key and inbox pair, slots for the readers
+  that remain, and the old key retired and sealed under the new one with a
+  reason naming the removals and re-keys (`removed sam`, `rekeyed
+  ada/laptop`, `removed sam, rekeyed ada/laptop`) and a `carried` list of
+  every entry under it. **A rotation does not touch the secrets file**: it
+  re-seals nothing and opens no value, so a value that does not open does
+  not stop it. Existing values and drops stay under the old key id (drops
+  in the old inbox) and open through the retired chain. A removed reader
+  has seen those values already, so re-sealing them would protect nothing;
+  rotation debt lists them. New values are sealed under the new current key
+  by `set`, `edit` and drop promotion. A rotation commit changes only the
+  keys file, unless the same `apply` also promotes drops.
 - **Removed readers cannot write.** `set` refuses (exit 3) when the policy in
   effect no longer names the caller's device for the scope, even while its
   slot still opens the key before the rotation.
@@ -441,18 +464,34 @@ checks) reads the working tree.
   lists it in the plan as "not on trunk yet; left as a drop"
   (`DropsNotOnTrunk`). A drop that `carbon rename` re-sealed differs from
   trunk's line, so it stays a drop until the rename merges. Under bootstrap
-  and `worktree` trunk every drop that opens is promoted.
+  and `worktree` trunk every drop that opens is promoted. A drop under a
+  retired key that the key carries is promoted like any other (sealed under
+  the current key); an unproven drop is promoted only with
+  `--reseal-unproven`. Promotion seals under the current key.
 - **Old keys (the chain rule).** A value whose `key` is a retired id is opened
   by walking the retired chain from the current key: each retired key is
   unsealed by its `successor`, which must itself be the current key or an
-  opened retired key. A retired `inbox_sealed` that fails to open is tampering,
-  and drops under it report it. A value under a retired key proves only that
-  its writer held that key, which a removed reader still may: `ls` marks it
-  "stale: retired key, author unproven", `status` lists it under
-  "Unproven", and `apply` lists such values (`scope.StaleEntries`) and leaves
-  them as they are. Only `apply --reseal-unproven` re-seals them under the
-  current key, which vouches for them. A drop that does not open never blocks
-  rotation or refresh: it is left as it is and reported.
+  opened retired key, with the record's `carried` digest in the associated
+  data. A retired `inbox_sealed` that fails to open is tampering, and drops
+  under it report it.
+- **Carried and unproven entries.** An entry under a retired key is
+  *carried* when its line hash (`store.LineHash`) is in that key's `carried`
+  list, and *unproven* otherwise; an entry under a key id the keys file does
+  not have is unproven too (`scope.IsUnproven`, `scope.StaleEntries`; `ls`,
+  `status`, `check`, `apply` and `get` all use this definition). A carried
+  entry is an ordinary value or drop that a rotation left in place: `ls`
+  shows it as sealed (its KEY column shows the old id), `get` and `run` open
+  it without a note, and `status` and `check` say nothing about it beyond
+  rotation debt. An unproven entry was written after the rotation by
+  someone holding the retired key, which a removed reader still may: `ls`
+  marks it "stale: retired key, author unproven", `get` prints a note,
+  `status` lists it under "Unproven", `check` warns
+  (`secret.stale-key`, `secret.stale-after-retirement`), and `apply` lists
+  it and leaves it as it is. Only `apply --reseal-unproven` re-seals
+  unproven entries under the current key (`scope.Opened.ResealUnproven`),
+  which vouches for them; carried entries are never re-sealed. A drop that
+  does not open never blocks promotion or `--reseal-unproven`: it is left
+  as it is and reported.
 - **Rotation debt.** A secret owes a rotation when its `set` time is at or
   before (`set <= retired`; both are whole seconds) the `retired` time of a
   key whose reason names a removal or a re-key, in any form `apply` writes
@@ -461,7 +500,9 @@ checks) reads the working tree.
   winning. An entry whose ciphertext (`value` or `drop`) is unchanged from
   trunk's line for the same name is trunk's value: its debt uses trunk's
   `set` time, whatever the line claims, so re-dating a line cannot hide
-  debt. Debt clears when a new value is set.
+  debt. A value that owes a rotation stays under the retired key id, since
+  a rotation does not re-seal it; debt clears when a new value is set
+  (under the current key, with a later `set` time).
 - **Conflicts.** If a keys or secrets file contains git conflict markers,
   every command stops with an error that names the file and the fix.
 
@@ -526,15 +567,19 @@ environments. For each scope it compares the working tree with trunk:
   exactly what `apply` writes, recomputed from trunk's key and trunk policy
   (`scope.RotationReason`); the new key's slots are only
   for devices trunk policy grants, each `to` that device's key hash; it has an
-  inbox; and every value trunk has is still present with trunk's `set` time.
-  Otherwise **error** (`key.changed`).
+  inbox; every secrets-file entry trunk has is still present and
+  byte-identical, except an entry set again under the new current key (an
+  ordinary new value); and the new retired record's `carried` is exactly
+  the line hashes of trunk's entries under the retired id, recomputed from
+  trunk's secrets file (`scope.CarriedBy`). Otherwise **error**
+  (`key.changed`).
 - `current` is a key trunk has retired: if trunk's tip is an ancestor of HEAD
   it is a rollback, **error**; otherwise the branch is behind and its keys
   file must be unchanged since the merge base (**error** if changed, **error**
   `key.unverified` if the merge base cannot be computed); unchanged is
   `key.behind-trunk`, info.
-- Every retired record trunk has is present and identical: **error**
-  (`key.retired-changed`) otherwise.
+- Every retired record trunk has is present and identical, `carried`
+  included: **error** (`key.retired-changed`) otherwise.
 - A keys file only in the working tree: `key.new`, banner. A keys file trunk
   has that is gone while the scope exists, or that stays while its package or
   environment was removed: **error** (`key.removed`); removed together with
@@ -543,12 +588,14 @@ environments. For each scope it compares the working tree with trunk:
 - A rename, as `carbon rename` writes it (`audit/rename.go`): the package
   keeps its directory, the working tree's package name is not on trunk, and
   trunk's keys file in that directory names the old package. Every value,
-  drop and slot was re-sealed under the new name, so `check` compares the
-  scope with trunk's under the old name structurally: the same `current`
-  id; the same key ids with unchanged `created`, `retired`, `reason` and
-  `successor`; for each key the same slot devices with the same `to`; the
-  same secret names, each with the same `key`, `set` time and kind (value or
-  drop). A match is one `scope.renamed` per scope (info, banner, never
+  drop and slot was re-sealed under the new name, and each retired key's
+  `carried` list rewritten to the new lines (so every entry keeps its
+  carried or unproven status), so `check` compares the scope with trunk's
+  under the old name structurally: the same `current` id; the same key ids
+  with unchanged `created`, `retired`, `reason` and `successor`; for each
+  key the same slot devices with the same `to`; the same secret names, each
+  with the same `key`, `set` time, kind (value or drop) and carried status.
+  A match is one `scope.renamed` per scope (info, banner, never
   raised by `--strict`) in place of `key.removed`, `key.new` and
   `trunk.unreadable`; any structural difference is **error**
   (`key.changed`). A renamed scope skips the other comparisons with trunk
@@ -557,11 +604,15 @@ environments. For each scope it compares the working tree with trunk:
   than one: **error**. `require_pq` scopes: a slot whose stanza type is not the
   hybrid type, a named device whose public key is not hybrid, or an inbox key
   that is not hybrid: **error**.
-- A value under an older key than trunk's value for the same name: **error**
-  (`secret.rolled-back`). Under the same key with an earlier `set`: warning,
-  banner (`secret.older-than-trunk`). Under a retired key: warning, banner
+- A value under an older key than trunk's value for the same name, or a
+  line that differs from trunk's under a key trunk has retired (a carried
+  value replaced: only someone holding the retired key can write there):
+  **error** (`secret.rolled-back`). Under the same current key with an
+  earlier `set`: warning, banner (`secret.older-than-trunk`). An unproven
+  entry (under a retired key that does not carry it): warning, banner
   (`secret.stale-key`, or `secret.stale-after-retirement` when set after the
-  retirement).
+  retirement). A carried entry is not reported. An entry under a key id the
+  keys file does not have: **error** (`secret.unknown-key`).
 - A value with trunk's ciphertext for the same name but a different `set`
   time: **error** (`secret.redated`). The line was re-dated, not set again;
   it no longer opens (the set time is in its associated data), and the new

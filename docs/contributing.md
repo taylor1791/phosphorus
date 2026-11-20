@@ -20,7 +20,7 @@ themselves. To build carbon by hand: `CGO_ENABLED=0 go build ./cmd/carbon`.
 
 | Package | Use it for |
 |---|---|
-| `internal/scope` | Everything about a scope's keys and values: `Load`, `Create`, `Open`, `Reveal`/`RevealAll`, `Seal`, `Drop`, `AddSlots`, `DiffSlots`, `Rotate`/`RotateSkippingBadDrops`, `Promote(At)`/`PromoteDrops(At)`, `Refresh`/`RefreshDetailed`, `StaleEntries`, `VerifyTrunk`, `TrunkInbox`, `ReadKeysAt`, `List` |
+| `internal/scope` | Everything about a scope's keys and values: `Load`, `Create`, `Open`, `Reveal`/`RevealAll`, `Seal`, `Drop`, `AddSlots`, `DiffSlots`, `Rotate` (keys only; the secrets file is untouched), `CarriedBy`, `IsUnproven`, `Promote(At)`/`PromoteDrops(At)`, `ResealUnproven`, `StaleEntries` (unproven entries), `VerifyTrunk`, `TrunkInbox`, `ReadKeysAt`, `List` |
 | `internal/policy` | Who reads a scope: `LoadTrunk`/`LoadTrunkWith` (apply, drops, scope creation, check's slot rules; `Policy.Trunk` says which ref and from where, see `ResolveTrunk`), `LoadWorktree` (who, access, status, run), `Policy.Scope` (devices, `Why`, `Unresolved`, `RequirePQ`, `Drops`, `Eligible`), `Scopes`, `ScopesOf`, `Identify`, `TeamsOf` |
 | `internal/config` | Parsing people-written files, names, `ParseTemplate`, `ParseDuration`, `ParseGenerate`, `Quote`, writers for people/machines/teams |
 | `internal/audit` | Keyless analysis of the whole repo (`check`, `status`): `Load(repo, getenv)` (trunk resolved with `policy.ResolveTrunk`; an unresolvable one is `State.TrunkErr`) → `State.Check` (findings with stable rule ids, listed in `audit.Rules`, banner items flagged), `State.Debts`, `BuildGraph`, `Refs` |
@@ -32,11 +32,12 @@ themselves. To build carbon by hand: `CGO_ENABLED=0 go build ./cmd/carbon`.
 `apply` is orchestration over these: for each scope, `policy.LoadTrunk` →
 `Policy.Scope` → `Scope.Open` → `Opened.VerifyTrunk(trunk keys)` →
 `Scope.DiffSlots`; if `Extra` is non-empty (including `Rekeyed` devices,
-whose slot records an old public key), `Opened.RotateSkippingBadDrops` with
-`reason = "removed <who>"` (say "<device>'s key changed" for `Rekeyed`); else `Opened.AddSlots(Missing)`; then
-then `ctx.RecordPin` after saving a rotation; `PromoteDropsAt(now)`; show `Scope.StaleEntries()` in the plan (values under
-retired keys have an unproven author) before `RefreshDetailed`; report skipped
-drops; `Scope.Save`; `Repo.Commit` with exactly the written paths.
+whose slot records an old public key), `Opened.Rotate` with
+`scope.RotationReason` (it leaves the secrets file alone and records what the
+old key carried); else `Opened.AddSlots(Missing)`; then `ctx.RecordPin` after
+saving a rotation; promote drops trunk has; show `Scope.StaleEntries()` (the
+unproven entries: under a retired key that does not carry them) in the plan,
+and `ResealUnproven` only with `--reseal-unproven`; report skipped drops; `Scope.Save`; `Repo.Commit` with exactly the written paths.
 
 ## Adding a command
 

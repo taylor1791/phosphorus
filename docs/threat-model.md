@@ -58,7 +58,8 @@ provide:
 | A workflow on another branch that can read a deploy machine's identity | Everything that machine reads. | Keep deploy identities in a GitHub Environment secret with a deployment-branch policy limited to the default branch; an `if:` condition in the workflow protects nothing. |
 | A current reader | Everything in their scopes, and the ability to copy it anywhere. | Not preventable by any design. Scopes keep the blast radius small, and git records who granted what. |
 | A removed reader, or a stolen device, before the rotation is applied | Everything the device could read until a reader runs `apply` after the removal merges. | `carbon remove` changes policy; the key rotates only when a reader applies it. `check` warns about the pending revocation (an error under `--strict`). A removed reader cannot `set` once the removal is on trunk. |
-| A removed reader after the rotation | Every value set before the rotation, from git history. | Keys rotate, so values set afterwards are safe. Rotation debt (`carbon status`, `check --max-debt`) lists every secret to change at its source; `check` requires a rotation's recorded reason to be the one `apply` computes from trunk, and counts debt from trunk's set time for a value whose line is unchanged from trunk, so neither can be edited to hide debt. Carbon never seals a new value under a key trunk has retired: `set` and `edit` on a branch that is behind (or that reverted a rotation) refuse until trunk is merged. |
+| A removed reader after the rotation | Every value set before the rotation, from git history. | Keys rotate, so values set afterwards are safe. A rotation does not re-seal existing values: they stay under the retired key, because the removed reader has seen them already and re-sealing would protect nothing. Rotation debt (`carbon status`, `check --max-debt`) lists every secret to change at its source; `check` requires a rotation's recorded reason to be the one `apply` computes from trunk, and counts debt from trunk's set time for a value whose line is unchanged from trunk, so neither can be edited to hide debt. Carbon never seals a new value under a key trunk has retired: `set` and `edit` on a branch that is behind (or that reverted a rotation) refuse until trunk is merged. |
+| A removed reader who writes a value under the retired key they kept | A value of their choosing under that key, if it is merged. | The retired record lists, as `carried`, the line hash of every entry under the key when it was retired, and the list is authenticated (its digest is in the retired `sealed` blob's associated data, so readers reject an edited list). A line written later under the retired key is not carried: it is unproven, `ls`, `status` and `check`'s banner (`secret.stale-key`, `secret.stale-after-retirement`) mark it, and `apply` re-seals it only with `--reseal-unproven`. Replacing a carried line is `secret.rolled-back` (error); a rotation commit that changes trunk's secrets-file lines or carries other lines than trunk's fails `check` (`key.changed`). |
 | A removed reader who still has the previous key and can get a commit merged | A **forged rotation**: a new key of their own, structurally identical to what `apply` writes. | Keyless `check` cannot tell it from a real rotation, and readers' pins accept it (the previous key is in the chain). `check` lists every rotation in the banner (`key.rotated`); the defence is a reviewer confirming the author of a key-changing commit is a current reader. |
 | Someone holding a stolen identity file | Whatever that device can read. | A passphrase on the identity file (`carbon join --passphrase`) stops this. `carbon remove ada/laptop`, merged and applied, rotates the affected scopes. Hardware and plugin identities are supported by the format but untested. |
 | Malware running as the developer | Whatever the developer can read. | Out of scope. `run` passes secrets only to the child process and writes nothing to disk; `export` writes only where asked. |
@@ -72,9 +73,9 @@ choices that make it work offline, without a server, on ordinary branches.
 - **`check` holds no key.** It cannot open a slot, so it cannot tell a
   reader's key change from one forged with public keys only. It enforces
   every structural rule a legitimate `apply` commit satisfies and lists
-  every key change, every drop and every value under a retired key in its
-  review banner. A passing `check` on a change to keys files is not safe to
-  merge without review.
+  every key change, every drop and every unproven value (under a retired
+  key that does not carry it) in its review banner. A passing `check` on a
+  change to keys files is not safe to merge without review.
 - **`check` is only as strong as the CI around it.** It does not run
   against anything on a direct push to trunk (trunk compared with itself),
   and a pull request that can edit the workflow running it can skip it.
@@ -89,10 +90,12 @@ choices that make it work offline, without a server, on ordinary branches.
   clone, a new identity, or a CI job with a fresh checkout trusts the first
   key it sees on trunk. Pins live in the clone's git directory, per
   identity.
-- **A value under a retired key proves only that its writer held that
-  key**, which a removed reader may still hold. `ls` and `status` mark such
-  values unproven; `apply` lists them and re-seals them only with
-  `--reseal-unproven`.
+- **An unproven value proves only that its writer held a retired key**,
+  which a removed reader may still hold. Values a rotation left in place
+  are distinguishable: the retired record's authenticated `carried` list
+  names them, and they are ordinary values. A line under a retired key
+  that it does not carry is unproven: `ls`, `status` and `check` mark it;
+  `apply` lists it and re-seals it only with `--reseal-unproven`.
 - **A drop's author is whoever git says.** The drop box trades the
   guarantee that every value came from a reader for the ability to add a
   secret without one. The marker and review are the compensating control.
@@ -100,8 +103,9 @@ choices that make it work offline, without a server, on ordinary branches.
   slot. That is a visible diff and usually a failing `check`, not a
   disclosure.
 - **Rotation does not un-share.** A removed person keeps what they could
-  read. Rotation debt is the list of credentials to change at their
-  source; carbon cannot change them for you.
+  read. A rotation does not re-seal existing values; they stay under the
+  retired key until set again. Rotation debt is the list of credentials to
+  change at their source; carbon cannot change them for you.
 - **Git history is permanent.** Ciphertext committed today can be attacked
   with tomorrow's tools. New identities and every inbox key are hybrid
   post-quantum (ML-KEM-768 with X25519) by default; X25519 keys are still
@@ -113,12 +117,14 @@ choices that make it work offline, without a server, on ordinary branches.
 
 - **Concurrent applies conflict.** Two branches that each run `apply` can
   conflict on a slot line (keep either: both wrap the same key) or, if both
-  rotate, on `current` (keep one side's keys and secrets files, then apply
-  again).
-- **A rotation conflicts with a branch that added a secret** in the same
-  scope, because a rotation re-seals every line. Resolve by keeping the
-  rotated lines and adding back the other side's lines; the next `apply`
-  lists them as unproven.
+  rotate, in the keys file (keep either side's whole keys file, then apply
+  again; a value the other side set under its own new key then names an
+  unknown key and must be set again).
+- **A rotation no longer conflicts with a branch that added a secret.** A
+  rotation changes only the keys file. The branch's new line merges under
+  the retired key, is not carried, and is unproven until a reader runs
+  `carbon apply --reseal-unproven` or someone sets it again after merging
+  trunk.
 - **Grants wait for a reader.** Access starts only when a current reader
   runs `apply` after the policy change merges. There is no bot that does
   this yet.

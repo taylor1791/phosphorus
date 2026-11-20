@@ -44,6 +44,26 @@ own. Each section is numbered from 1.
    which key and slot lines changed, which is exactly what a reviewer must
    see. `init` and `carbon-migrate` no longer write the line, and `doctor`
    no longer asks for it. A repository that already has it should delete it.
+9. **A rotation does not re-seal values** (now in the contract). The design
+   and the contract first had a rotation re-seal every value under the new
+   key, keeping its set time. A removed reader has already seen every
+   existing value, so that protected nothing, and because it rewrote every
+   line of the secrets file, every rotation conflicted in git with any
+   branch that added or changed a secret in the scope. A rotation now makes
+   the new key and inbox, wraps the key to the remaining readers, retires
+   the old key sealed under the new one, and leaves the secrets file byte
+   for byte as it was: existing values and drops stay under the old key id
+   and open through the retired chain, and a rotation commit changes only
+   the keys file (unless the same `apply` promotes drops). It opens no
+   value, so a value that does not open no longer stops it. To keep
+   telling values the rotation left in place from values written later
+   with the retired key, the retired record has a required `carried` list,
+   the line hashes of every entry under the key when it was retired; its
+   digest is the last line of the retired `sealed` blob's associated data,
+   so it cannot be edited without breaking the chain. Entries under a
+   retired key that it carries are ordinary; the others are unproven
+   (Decisions 46). Rotation debt still lists every value set before the
+   removal (17).
 
 ## Decisions
 
@@ -150,7 +170,10 @@ own. Each section is numbered from 1.
     in the same second as the rotation may have been readable with the old
     key. A line whose ciphertext is unchanged from trunk's takes trunk's set
     time for debt, so re-dating it on a branch hides nothing (`check` also
-    reports it as `secret.redated`).
+    reports it as `secret.redated`). A rotation does not re-seal anything,
+    so a value that owes a rotation stays under the retired key id until it
+    is set again; setting a new value (under the current key, with a later
+    set time) clears the debt.
 
 ### set, get, edit, run, export
 
@@ -261,7 +284,17 @@ own. Each section is numbered from 1.
     `scope.RotationReason`, and `check` recomputes it from trunk's key and
     trunk policy and requires the record to say exactly that
     (`key.changed` otherwise), so a rotation cannot name the wrong person
-    and leave the real removal without debt.
+    and leave the real removal without debt. Since a rotation leaves the
+    secrets file as it is (Deviations 9), a change of `current` must keep
+    every entry trunk has byte-identical, except one set again under the new
+    current key, and the new retired record's `carried` must be exactly the
+    line hashes of trunk's entries under the retired id, recomputed from
+    trunk's secrets file (`key.changed` otherwise): leaving one out would
+    make a legitimate value look unproven, adding one would vouch for a line
+    nobody carried. Retired records, `carried` included, are append-only
+    (`key.retired-changed`), and a line that differs from trunk's under a
+    key trunk has retired is `secret.rolled-back`: only someone holding the
+    retired key can write there.
 32. **`check`: scopes across trunk and the working tree.** Scopes are the
     union of both sides (rules in the contract: `key.new`, `key.removed`,
     `scope.removed`, `store.orphan`). The reason for `key.removed`: removing
@@ -288,7 +321,9 @@ own. Each section is numbered from 1.
       for a scope whose key id changed since it was pinned; otherwise
       `status` decrypts nothing;
     - re-keyed devices as pending rotations (`rekey`);
-    - values under retired keys as "Unproven".
+    - unproven values (under a retired key that does not carry them, or an
+      unknown key) as "Unproven". Values a rotation carried are not listed
+      beyond rotation debt.
 
     It does not decrypt a passphrase-protected identity unless `--unlock` is
     given; a wrong passphrase is "no usable identity", not an abort.
@@ -306,7 +341,8 @@ own. Each section is numbered from 1.
     its new name is not on trunk, and trunk's keys file there names the old
     package (`audit/rename.go`). Every value and slot was re-sealed under
     the new name and `check` holds no key, so it compares structure only
-    (rules in the contract) and reports one `scope.renamed` banner item per
+    (rules in the contract), including that each entry is still carried or
+    still unproven, and reports one `scope.renamed` banner item per
     scope; any other difference is `key.changed`. A rename and a move in
     one change is not recognised and fails as before.
 38. **`check`: changed device keys and new devices.** Replacing the public
@@ -371,12 +407,15 @@ own. Each section is numbered from 1.
     - a rotation runs only when the scope's keys and secrets files are
       byte-identical to trunk's; otherwise *blocked*, suspect: a value added
       on the branch under the still-current key could come from the reader
-      being removed, and the rotation would re-seal it as trusted. Grants
-      and drop promotion without a rotation are unaffected.
-44. **Drops that do not open** are never fatal: rotation uses
-    `RotateSkippingBadDrops`, promotion skips them, and each is named in the
-    plan ("leaves drop") and the commit message. Promotion uses `PromoteAt`
-    (16).
+      being removed, and the rotation would record it as carried, vouching
+      for it. Grants and drop promotion without a rotation are unaffected.
+      The plan says the rotation leaves values where they are; it re-seals
+      nothing (Deviations 9).
+44. **Values and drops that do not open** never stop a rotation, which
+    opens no value. Promotion and `--reseal-unproven` skip a drop that does
+    not open, and each is named in the plan ("leaves drop") and the commit
+    message; a sealed value that does not open stops `--reseal-unproven`
+    for its scope. Promotion uses `PromoteAt` (16).
 45. **`apply` promotes only drops that trunk has, line for line.** `apply`
     on an unmerged branch promoted a drop that existed only there, which
     turned an unreviewed value into a sealed one and took it out of
@@ -386,15 +425,21 @@ own. Each section is numbered from 1.
     "not on trunk yet; left as a drop" (`DropsNotOnTrunk`). A drop that
     `rename` re-sealed differs from trunk's line, so it stays a drop until
     the rename merges. Under bootstrap and `worktree` trunk there is no
-    reviewed line to compare with, and drops are promoted as before.
-46. **Unproven values.** Every entry under a retired key is listed by name
-    in the plan, with its key and set time, and marked when its set time is
-    after its key was retired (advisory only: a forger can back-date). By
-    default, with or without `--yes`, they and stale drops are left as they
-    are (a rotation keeps them under their old key ids; the chain still
-    opens them). `--reseal-unproven` re-seals them under the current key,
-    which vouches for them; they are then listed as "re-seals as trusted"
-    in the plan being confirmed.
+    reviewed line to compare with, and drops are promoted as before. A drop
+    under a retired key that the key carries is promoted like any other; an
+    unproven drop is promoted only with `--reseal-unproven` (46).
+46. **Unproven values.** An entry under a retired key is *carried* when its
+    line hash is in that key's `carried` list, and *unproven* otherwise; an
+    entry under an unknown key id is unproven too (`scope.IsUnproven`; the
+    same definition in `ls`, `status`, `check`, `apply` and `get`). Carried
+    entries are ordinary and `apply` leaves them alone. Every unproven entry
+    is listed by name in the plan, with its key and set time, and marked
+    when its set time is after its key was retired (advisory only: a forger
+    can back-date). By default, with or without `--yes`, unproven values and
+    drops are left as they are (the chain still opens them).
+    `--reseal-unproven` re-seals only the unproven entries under the current
+    key (`scope.Opened.ResealUnproven`), which vouches for them; they are
+    then listed as "re-seals as trusted" in the plan being confirmed.
 47. **`require_pq`.** Non-hybrid devices are never wrapped to; they are
     reported. An existing non-hybrid slot is not rotated away by itself (it
     is reported as a `check` failure), but a rotation for another reason
@@ -422,7 +467,10 @@ own. Each section is numbered from 1.
 51. **`rename`** needs a reader of every environment that has a key,
     re-wraps each slot to the public key trunk policy has for that device id
     (refusing if trunk has none: run `apply` first), keeps values under the
-    key they were sealed with, and does not commit. It prepares every file
+    key they were sealed with, rewrites each retired key's `carried` list to
+    the re-sealed lines (so each entry stays carried or unproven, and the
+    retired `sealed` blob is re-sealed with the new digest), and does not
+    commit. It prepares every file
     in memory and writes them all or none (a failed write restores the
     files already written). Slots are written with their `to` hash and
     every reader's pin moves to the new scope name (`RenamePins`). If any
@@ -493,9 +541,11 @@ the defence for most of them.
    looks the same as one made by someone else with public keys only. It
    enforces every structural rule a legitimate `apply` commit satisfies, and
    lists every key change (new key, rotation, new slot, renamed or removed
-   scope), every changed device key and new device, every drop, and every
-   value under a retired or older key in a banner so none passes silently. A passing check on a change to keys files is not "safe
-   to merge without review", and neither is an `apply` commit: the author of
+   scope), every changed device key and new device, every drop, every
+   unproven value (under a retired key that does not carry it) and every
+   value under an older key than trunk's in a banner so none passes
+   silently. A passing check on a change to keys files is not "safe to
+   merge without review", and neither is an `apply` commit: the author of
    every key-changing commit must be a current reader of the scope.
 2. **A forged rotation by a removed reader is not detected.** A reader
    removed from policy still holds the scope key they had. With it they can
@@ -514,14 +564,20 @@ the defence for most of them.
    reader created it. A keys file is only as trustworthy as the review that
    merged it; a new keys file in a pull request is a trusted act to review,
    like a drop, and `check` lists it as `key.new`.
-5. **A value under a retired key** proves only that its writer held that key,
-   which a removed reader still may. Readers can still open it (old branches
-   must merge), `ls` marks it "author unproven", `status` lists it under
-   "Unproven", and `apply` lists it and leaves it as it is unless
-   `--reseal-unproven` is given (Decisions 46). Its set time is chosen by
-   its writer, so the "set after its key was retired" mark is advisory:
-   `check` refuses only a set time more than 10 minutes in the future
-   (`secret.future`) and a re-dated trunk line (`secret.redated`).
+5. **An unproven value** (under a retired key that does not carry it)
+   proves only that its writer held that key, which a removed reader still
+   may. Values a rotation left in place are carried: the retired record
+   lists their line hashes and authenticates the list, so a line written
+   later under the retired key is told apart from them. Readers can still
+   open an unproven value (old branches must merge), `ls` marks it "author
+   unproven", `status` lists it under "Unproven", `check` lists it in the
+   banner, and `apply` lists it and leaves it as it is unless
+   `--reseal-unproven` is given (Decisions 46). A carried line replaced
+   with another line under the same retired key is `secret.rolled-back`
+   (error). Its set time is chosen by its writer, so the "set after its key
+   was retired" mark is advisory: `check` refuses only a set time more than
+   10 minutes in the future (`secret.future`) and a re-dated trunk line
+   (`secret.redated`).
 6. **Slot `to` hashes are not authenticated by cryptography.** `check`
    protects them structurally (the contract's slot rules); a reader's
    `apply` treats a mismatch as a re-key and rotates.
@@ -534,24 +590,7 @@ the defence for most of them.
 
 ## Known merge limits
 
-1. **A rotation and a branch that adds or changes a secret in the same
-   scope conflict.** A rotation re-seals every value under the current key,
-   which is normally every line of the scope's secrets file, so any line
-   another branch (cut before the rotation) added or changed lands inside a
-   changed region and git reports a conflict. The design's merge table says
-   "a branch cut before a key rotation adds a secret ... merges"; that holds
-   only when the rotation did not touch the secrets file (the scope had no
-   values yet). Resolution: keep the rotated side's lines, then add back
-   each line the other side added or changed, exactly as written there.
-   Each line is self-contained: the added value still opens through the
-   retired key. After the merge it is a value under a retired key: `check`
-   lists it in the banner, and the next `carbon apply` lists it as unproven
-   and re-seals it only with `--reseal-unproven` (or set it again). The
-   conflict-marker error for a secrets file prints this resolution.
-   Since `set` and `edit` refuse to seal on a branch whose current key trunk
-   has retired (Decisions 14), a branch that has not merged the rotation
-   must merge trunk before it can set or edit secrets in that scope.
-2. **Two concurrent applies can conflict on a slot line or on `current`.**
+1. **Two concurrent applies can conflict on a slot line or on `current`.**
    Two branches that grant different devices merge cleanly when their new
    slot lines land at different places in the sorted list. They conflict
    when both insert at the same place, or when both wrap the same device.
@@ -559,6 +598,22 @@ the defence for most of them.
    every grant merged so far and also wraps the person the earlier,
    unmerged apply granted. Either side's line is valid (both wrap the same
    key to the same device); keep either. The conflict-marker error for a
-   keys file says so. Two branches that both rotate the same key conflict on
-   `current`: keep one side's keys and secrets files and run `carbon apply`
-   to rotate again.
+   keys file says so. Two branches that both rotate the same key conflict
+   in the keys file: keep either side's whole keys file and run `carbon
+   apply` to rotate again. A rotation leaves the secrets file as it is, so
+   it does not conflict there; but a value the other side set under its own
+   new key then names a key the kept file does not have
+   (`secret.unknown-key`) and must be set again.
+
+A rotation no longer conflicts with a branch that adds or changes a secret
+(Deviations 9): it changes only the keys file, so a branch cut before the
+rotation merges with no conflict in the secrets or keys file. Its new line
+is under the retired key and not carried by it, so it is unproven: `check`
+lists it in the banner (`secret.stale-key`), and it stays so until a reader
+runs `carbon apply --reseal-unproven` or someone sets it again after merging
+trunk. A line that replaces one the retired key carried is also
+`secret.rolled-back` (error), so a changed secret must be set again. `set`
+and `edit` refuse to seal on a branch whose current key trunk has retired
+(Decisions 14), so that branch must merge trunk before it can set or edit
+secrets in the scope. The conflict-marker error for a secrets file now
+covers only both sides setting the same secret (keep either line).
