@@ -95,8 +95,15 @@ of them:
 
 A reader then unseals the chain in order, each record under the key after it
 (the first under the current key). Because `predecessor` and `carried` are in
-the associated data, every link is authenticated in both directions. A record
-that fails to open makes it and every older key unavailable; values under
+the associated data, every link is authenticated in both directions. The
+chain is also a hash chain: each record's associated data holds the record
+digest (below) of its predecessor's record as it stood when the key was
+retired, and a reader recomputes that digest from the file as it walks. A
+changed older record therefore breaks the newer record that vouches for it,
+and no retired record can be changed, added or forged without re-sealing the
+newest one, which needs the current key. A record that fails to open (carbon
+reports it as tampered, naming the record and, when it has one, its
+predecessor) makes it and every older key unavailable; values under
 them fail, and the rest of the scope reads. In particular, a single record
 claiming the current key as `successor` in a scope whose current key is its
 first is structurally on the chain; it cannot be forged without the current
@@ -138,12 +145,34 @@ joined with `\n`, no trailing newline:
 |---|---|---|---|
 | `value` | scope key `key` | the value bytes | `carbon/v1/value`, package, env, secret name, key id, set time |
 | `inbox_sealed` | that key | the inbox identity string (`AGE-SECRET-KEY-PQ-1…`) | `carbon/v1/inbox`, package, env, key id |
-| retired `sealed` | the successor key | the retired key's 32 bytes | `carbon/v1/retired`, package, env, retired key id, successor key id, retired time, reason, predecessor key id (`-` for none), carried digest |
+| retired `sealed` | the successor key | the retired key's 32 bytes | `carbon/v1/retired`, package, env, retired key id, successor key id, retired time, reason, predecessor key id (`-` for none), predecessor record digest (`-` for none), carried digest |
 
 Package is the package's `name` (not its path); env is the environment name.
 The carried digest is the hex SHA-256 of the retired record's `carried`
 elements, as written, joined with `\n` (no trailing newline); an empty list
 hashes the empty string (`e3b0c442…b855`).
+
+**Record digest.** The predecessor record digest is the hex SHA-256 of the
+predecessor's retired record, serialised as these lines joined with `\n`, no
+trailing newline:
+
+```
+carbon/v1/record
+<key id>
+<created>          RFC 3339 UTC, whole seconds
+<retired>          RFC 3339 UTC, whole seconds
+<reason>
+<successor id>
+<predecessor id>   "-" when the record has none
+<sealed>           the carbon1: blob as written
+<carried digest>   the carried digest (above) of its carried list
+<inbox_sealed>     the carbon1: blob as written, "-" when absent
+```
+
+The fields are the predecessor's own, not the record being sealed. Rotation
+computes the digest from the predecessor's record as it stood at that moment;
+a reader recomputes it from the keys file while walking the chain. A rename
+re-seals every record and rebuilds the digests oldest first.
 
 ## Slot: `{ to = "sha256:<hex>", slot = "age1:<base64(age file)>" }`
 
@@ -212,25 +241,41 @@ python3 tools/decrypt.py unwrap "age1:…the drop field…" | age -d -i inbox.tx
 # line 6 of the output is the value in unpadded base64
 
 # 4. A value under a retired key k_old: unseal k_old with its successor first.
-#    The last two associated data lines are k_old's predecessor ("-" if it has
-#    none) and the digest of k_old's carried list.
+#    The last three associated data lines are k_old's predecessor k_prev ("-"
+#    if it has none), the record digest of k_prev's record ("-" if none), and
+#    the digest of k_old's carried list.
 DIGEST=$(printf '%s' "sha256:…first…"$'\n'"sha256:…second…" | sha256sum | cut -d' ' -f1)
 #    (macOS: shasum -a 256; for an empty carried list use printf '' instead)
+#    The record digest of k_prev, from its record in the keys file (skip when
+#    k_old has no predecessor): k_prev's carried digest first, then the record.
+PDIGEST=$(printf '%s' "sha256:…k_prev's carried, joined with newlines…" | sha256sum | cut -d' ' -f1)
+PREC=$(printf '%s\n' carbon/v1/record k_prev <k_prev created> <k_prev retired> "<k_prev reason>" \
+  k_old <k_prev predecessor or -> "carbon1:…sealed of k_prev…" "$PDIGEST" "<k_prev inbox_sealed or ->" \
+  | head -c -1 | sha256sum | cut -d' ' -f1)
+#    (head -c -1 drops the trailing newline; on macOS use: | perl -pe 'chomp if eof')
 OLDKEY=$(python3 tools/decrypt.py open "$KEY" "carbon1:…sealed of k_old…" \
-  carbon/v1/retired checkout prod k_old "$KID" <retired time> "<reason>" <predecessor or -> "$DIGEST" | base64 | tr -d '\n=')
+  carbon/v1/retired checkout prod k_old "$KID" <retired time> "<reason>" <k_prev or -> <"$PREC" or -> "$DIGEST" | base64 | tr -d '\n=')
 # (base64 without line breaks or padding, which is what decrypt.py expects as a key)
 python3 tools/decrypt.py open "$OLDKEY" "carbon1:…" carbon/v1/value checkout prod <name> k_old <set time>
 ```
 
 A chain of several retired keys is walked the same way, one successor at a
-time, from the current key back along `predecessor`. Check the chain's
+time, from the current key back along `predecessor`, each record's associated
+data carrying the record digest of the next older one. Check the chain's
 structure (above) first: a stray retired record is a reason to distrust the
 keys file, not one to skip.
 
 ## Test vectors
 
 - `testdata/vectors/sealed.json`: fixed key, nonce, associated data,
-  plaintext and expected blob for each sealed-blob kind. Regenerate with
+  plaintext and expected blob for each sealed-blob kind. The retired kind
+  is a two-record chain: `retired-first` is the scope's first key `k0b2z7`,
+  sealed under `k1a8c0` (no predecessor, nothing carried), and `retired` is
+  `k1a8c0`, sealed under `k3f9q2`, whose associated data names `k0b2z7` as
+  predecessor and holds its record digest; its `predecessor_record` object
+  gives `k0b2z7`'s record fields (with `""` for an absent predecessor or
+  `inbox_sealed`, written as `-` when hashed), so the digest can be
+  recomputed from the serialisation above. Regenerate with
   `go run ./tools/genvectors > testdata/vectors/sealed.json`, which does not
   use carbon's own code. Check with
   `python3 tools/decrypt.py vectors testdata/vectors/sealed.json`; the Go test

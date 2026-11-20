@@ -61,6 +61,32 @@ branch that still uses a key trunk has since rotated. With a shallow clone
 it cannot prove the branch only fell behind, and fails with
 `key.unverified`. `fetch-depth: 0` avoids that.
 
+On such a branch (behind trunk, or one that rolled back a rotation),
+`check` also judges every secrets-file entry under the key trunk retired
+against trunk's retired record for that key. A line whose hash is not in
+that record's `carried` list was written by someone holding a key trunk has
+retired: it is `secret.rolled-back` (error) when trunk has that name with a
+different line, and `secret.stale-key` (warning, in the banner) when the
+name is new or trunk does not have it with a different line. Both hints say
+that merging trunk and setting the secret again clears it. An honest branch
+that fell behind and only added a secret gets a banner item, not an error.
+
+### Check the merge result
+
+`check` judges the tree CI checked out. Run it on the result of merging
+the pull request into its target branch, not on the branch alone: what
+merges is the merge result, and a branch can pass on its own and still
+produce a merge result that fails (or the reverse).
+
+- GitHub Actions: a `pull_request` workflow's `actions/checkout` checks out
+  `refs/pull/<N>/merge`, the merge result, by default. Keep that default;
+  do not set `ref:` to the head commit.
+- Other CI systems: use the provider's merge ref, or merge the target
+  branch into the checkout before running `check`, for example
+  `git merge --no-edit origin/main` (git needs a committer name and email
+  for this; set `user.name` and `user.email` in the job if the image has
+  none). A conflicted merge stops there, as it should.
+
 ### GitHub Actions
 
 ```yaml
@@ -133,7 +159,7 @@ needs a key or a person, and `check` holds neither:
 | `RENAMED` | A package was renamed (`carbon rename`) and every value re-sealed. Confirm the author is a reader of the scope. |
 | `KEY CHANGED for <device>` | The public key of an existing device or machine was replaced. Once merged and applied, the new key reads everything that device read. Confirm the printed fingerprint with the device's owner over a channel you trust. |
 | `NEW DEVICE <device>` | A device was added to an existing person: once applied it reads everything the person reads. Confirm the fingerprint with them. |
-| `UNDER A RETIRED KEY` / `SUSPECT` | An unproven value: under a retired key that did not carry it (or a carried line trunk no longer has), so whoever wrote it held that key, which a removed reader may still hold. Values a rotation carried are not listed. |
+| `UNDER A RETIRED KEY` / `SUSPECT` | An unproven value: under a retired key that did not carry it (or a carried line trunk no longer has), so whoever wrote it held that key, which a removed reader may still hold. On a branch behind trunk this includes a value added under the branch's current key, which trunk has retired; merging trunk and setting it again clears it. Values a rotation carried are not listed. |
 | `OLDER VALUE` | A value was replaced by an older line. |
 | `SCOPE REMOVED` | A scope and its keys were deleted together. |
 

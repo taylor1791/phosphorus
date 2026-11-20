@@ -218,7 +218,8 @@ named in full: `CARBON_TRUNK=refs/remotes/origin/main`. Forbid direct pushes
 to trunk (on trunk, `check` compares trunk with itself), and protect
 `.github/workflows/` and `CODEOWNERS`: the workflow that runs `check` comes
 from the pull request being checked. Deploy secrets belong in a GitHub
-Environment restricted to the default branch. Deploy jobs use a machine identity
+Environment restricted to the default branch, and CI must check the merge
+result of a pull request, not the branch alone. Deploy jobs use a machine identity
 (`carbon join --machine <name>`), supplied as `CARBON_IDENTITY`, and run
 `carbon run --env prod -- ./deploy`. [docs/ci.md](docs/ci.md) has a GitHub
 Actions example and explains the review banner, `--strict` and
@@ -399,8 +400,8 @@ Each clone remembers, per identity, the last key it verified for each scope
 (in `.git/carbon/pins.toml`, outside the work tree). If a scope's key is
 later replaced by one that does not follow from the pinned key (for example
 a forged key that was merged), reader commands refuse it. A legitimate
-rotation is followed automatically, because the new key carries the old one
-sealed inside it.
+rotation is followed automatically, because the keys file keeps the old key
+sealed under the new one.
 
 `carbon trust <package> --env <env>` shows the pinned and current keys and
 the commit that last changed the keys file, asks for confirmation, and pins

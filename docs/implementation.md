@@ -234,14 +234,25 @@ contain newlines, so the encoding is unambiguous.
 |---|---|---|---|
 | secret value | scope key `<key id>` | the value bytes | `carbon/v1/value`, package, env, secret name, key id, set time |
 | `inbox_sealed` | scope key `<key id>` | the inbox identity string | `carbon/v1/inbox`, package, env, key id |
-| retired `sealed` | the successor key | the retired key's 32 bytes | `carbon/v1/retired`, package, env, retired key id, successor key id, retired time, reason, predecessor key id (`-` for none, `seal.NoPredecessor`), carried digest |
+| retired `sealed` | the successor key | the retired key's 32 bytes | `carbon/v1/retired`, package, env, retired key id, successor key id, retired time, reason, predecessor key id (`-` for none, `seal.NoPredecessor`), predecessor record digest (`-` for none), carried digest (`seal.RetiredAD`) |
 
 Times in associated data are RFC 3339 UTC with whole seconds, e.g.
 `2026-11-02T17:04:11Z`. The carried digest (`seal.CarriedDigest`) is the
 hex SHA-256 of the retired record's `carried` elements, as written, joined
 with `\n` (no trailing newline); an empty list hashes the empty string.
-A reader walking the retired chain therefore rejects an edited
-`predecessor` or `carried` as tampering (`ErrTampered`).
+
+The predecessor record digest (`seal.RecordDigest`; `store.Keys.RecordDigest`
+computes it for a record as it stands in the file) is the hex SHA-256 of
+these lines joined with `\n`, no trailing newline: `carbon/v1/record`
+(`seal.PurposeRecord`), the predecessor's key id, `created`, `retired`
+(both RFC 3339 UTC, whole seconds), `reason`, `successor`, `predecessor`
+(`-` for none), `sealed` (the `carbon1:` blob as written), the carried
+digest of its `carried` list, and `inbox_sealed` (the `carbon1:` blob as
+written, `-` when absent). Rotation computes it from the predecessor's
+record as it stood when the key was retired; readers recompute it from the
+file while walking the chain. The retired records are therefore a hash
+chain, and a reader walking it rejects an edited `predecessor`, `carried`,
+or any field of an older record as tampering (`ErrTampered`).
 
 ### Slot: `{ to = "sha256:<hex>", slot = "age1:<base64(age file)>" }`
 
@@ -509,10 +520,19 @@ checks) reads the working tree.
 - **Old keys (the chain rule).** A value whose `key` is a retired id is opened
   through the chain (`scope.Opened.walkRetired`): the records are unsealed in
   chain order, each under the key after it (the first under the current
-  key), with its `predecessor` and `carried` digest in the associated data,
-  so every link is authenticated in both directions. A link that fails to
-  open makes it and every older key on the chain unavailable (values and
-  drops under them fail with the reason); the rest of the scope reads. A
+  key), with its `predecessor`, its predecessor's record digest and its
+  `carried` digest in the associated data, so every link is authenticated
+  in both directions and the chain is a hash chain: each record commits to
+  the whole of the next older one, recomputed from the file
+  (`store.Keys.RecordDigest`). Changing, adding or forging any retired
+  record therefore means re-sealing the newest one, which needs the current
+  key. A link that fails to open, because its own record or the
+  predecessor record it vouches for was changed, is `ErrTampered` naming the
+  record and that predecessor, and makes it and every older key on the
+  chain unavailable (values and drops under them fail with the reason); the
+  rest of the scope reads. `Rotate` writes the digest of the newest retired
+  record as it stands; `scope.Opened.Rename` re-seals the records oldest
+  first, so each digest is of the renamed predecessor. A
   single record claiming the current key's place in a scope whose current
   key has no predecessor is structurally on the chain; it cannot be forged
   without the current key, so it fails to open, values under it fail, and
@@ -527,9 +547,16 @@ checks) reads the working tree.
   opened (`scope.Opened.IsUnproven`), which authenticates its `carried`
   list. `ls`, `status`, `check`, `apply` and `get` all use this
   definition, from the keys file's chain and `carried` lists only; `check`
-  adds one keyless rule of its own against trunk (`check` rules below). A carried
+  adds keyless rules of its own against trunk (`check` rules below).
+  Commands that open nothing judge it structurally, from the files alone:
+  `ls` always, and a non-reader's `status` and an `apply --dry-run` that
+  can open nothing. For them a retired record that would fail
+  authentication looks the same as one that opens; `check` against trunk
+  and the reader commands (`get`, `run`, `export`, `apply`) are
+  authoritative. A carried
   entry is an ordinary value or drop that a rotation left in place: `ls`
-  shows it as sealed (its KEY column shows the old id), `get` and `run` open
+  shows it as "sealed (retired key)" (or "drop (retired key)") with the old
+  id in its KEY column, and `ls --json` sets `retired_key`; `get` and `run` open
   it without a note, and `status` and `check` say nothing about it beyond
   rotation debt. An unproven entry was written after the rotation by
   someone holding the retired key, which a removed reader still may: `ls`
@@ -629,7 +656,19 @@ environments. For each scope it compares the working tree with trunk:
   it is a rollback, **error**; otherwise the branch is behind and its keys
   file must be unchanged since the merge base (**error** if changed, **error**
   `key.unverified` if the merge base cannot be computed); unchanged is
-  `key.behind-trunk`, info.
+  `key.behind-trunk`, info. In both cases the secrets file is judged
+  against trunk's retired record for that key (`audit.behindTrunk`): every
+  entry under it must be a line whose hash is in that record's `carried`
+  list. Any other entry was written by someone holding a key trunk has
+  retired: when trunk has the same name with a different line it is
+  **error** (`secret.rolled-back`), otherwise (a new name, or one trunk does
+  not have) a warning, banner (`secret.stale-key`). Both hints say that
+  merging trunk and setting the secret again clears it; `secret.rolled-back`
+  adds that a reader may instead run `carbon apply --reseal-unproven` after
+  merging. An honest behind branch that only added a secret therefore gets
+  a banner item, not an error. On such a branch this replaces the per-name
+  comparisons with trunk's line below (`secret.rolled-back` for an older
+  key, `secret.redated`, `secret.older-than-trunk`).
 - Every retired record trunk has is present and identical, `predecessor`
   and `carried` included: **error** (`key.retired-changed`) otherwise.
 - A retired record in the working tree that trunk does not have, other than
@@ -637,8 +676,9 @@ environments. For each scope it compares the working tree with trunk:
   rotation rules above): **error** (`key.retired-added`), naming the record,
   with the fix (remove it, or restore the keys file from trunk). A new
   scope key (no keys file on trunk) may have no retired records at all. A
-  retired record decides which values count as carried, and only someone
-  holding a retired key could seal one.
+  retired record decides which values count as carried; since the chain is
+  a hash chain, adding one that opens takes the current key (a current
+  reader), but `check` holds no key and cannot tell.
 - A keys file only in the working tree: `key.new`, banner. A keys file trunk
   has that is gone while the scope exists, or that stays while its package or
   environment was removed: **error** (`key.removed`); removed together with
