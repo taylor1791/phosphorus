@@ -246,12 +246,12 @@ payments    = ["lin"]
 ### Sealed values and drops: `.carbon/prod.secrets.toml`
 
 ```toml
-session_key    = { key = "k3f9q2", set = 2026-11-02T17:04:11Z, value = "carbon1:9wN3..." }
-stripe_api_key = { key = "k3f9q2", set = 2026-09-14T09:30:02Z, value = "carbon1:Qm7r..." }
+session_key = { key = "k3f9q2", set = 2026-11-02T17:04:11Z, value = "carbon1:9wN3..." }
+stripe_api_key = { key = "k1a8c0", set = 2026-09-14T09:30:02Z, value = "carbon1:Qm7r..." }
 webhook_secret = { key = "k3f9q2", set = 2026-11-10T08:12:40Z, drop = "age1:YWdlLWVuY3J5..." }
 ```
 
-A `value` was sealed by a reader. A `drop` was written by someone who may not be one, and stays marked that way until a reader's `carbon apply` promotes it.
+A `value` was sealed by a reader. `stripe_api_key` was set before the last rotation and stays under the retired key `k1a8c0`, which carried it. A `drop` was written by someone who may not be one, and stays marked that way until a reader's `carbon apply` promotes it.
 
 ### Wrapped keys: `.carbon/prod.keys.toml`
 
@@ -274,10 +274,21 @@ created      = 2026-06-01T10:00:00Z
 retired      = 2026-11-02T17:04:11Z
 reason       = "removed sam"
 successor    = "k3f9q2"
+predecessor  = "k0b2z7"              # the key k1a8c0 replaced; absent for a scope's first key
 sealed       = "carbon1:Zk2p..."     # the old key, sealed under k3f9q2
 carried      = ["sha256:5d0e...", "sha256:b71c..."]   # the values under this key when it was retired
 inbox_sealed = "carbon1:Qm9t..."     # kept so drops made on older branches still open
+
+[keys.k0b2z7]                  # the scope's first key, retired when ada's laptop was rekeyed
+created      = 2026-01-12T09:00:00Z
+retired      = 2026-06-01T10:00:00Z
+reason       = "rekeyed ada/laptop"
+successor    = "k1a8c0"
+sealed       = "carbon1:Hc4w..."     # sealed under k1a8c0
+carried      = []                    # no values were under it
 ```
+
+The retired keys form one chain back from the current key, each naming its successor and its predecessor. Both links are inside the authenticated data of the sealed old key, so a reader opening the chain checks every link in both directions. A retired record that is not on that chain makes readers refuse the scope, naming the record.
 
 The environment for a command resolves in this order: `--env`, then `CARBON_ENV`, then `carbon env use` (stored under `.git/`, so it is per worktree and cannot be committed), then `default_environment`.
 
@@ -410,7 +421,7 @@ A workspace or package can turn drops off per environment with `drops = false` u
 
 1. Generates a new scope key and inbox key, and wraps the scope key to the remaining readers.
 2. Leaves every existing value where it is, under the old key, and records in the keys file which values those were. Sam has already seen them, so re-sealing them would protect nothing. Only the keys file changes.
-3. Keeps the old key as retired, sealed under the new one, so existing values and branches cut before the removal still decrypt.
+3. Keeps the old key as retired, sealed under the new one and naming the key it replaced, so existing values and branches cut before the removal still decrypt.
 
 Removing one device, such as `carbon remove ada/laptop` after a theft, works the same way.
 
@@ -612,6 +623,7 @@ The build was reviewed adversarially, one independent reviewer per part. The fin
 | Anyone can generate a fresh key and wrap it to every reader's public key | Only readers create scope keys; reader commands require a key that descends from trunk's; each clone pins the last key it verified |
 | A removed reader holds the key until `apply` runs, and could relabel a slot or write values in that window | Slots record the key they were wrapped to; `set` refuses a caller policy no longer names; rotation runs only on files that match trunk |
 | A removed reader can forge values under a key they kept | Each retired key records the values it carried. Any other value under it is unproven and is re-sealed only with `--reseal-unproven` |
+| A removed reader could add a retired record of their own, sealed under the key they kept, that carried a value of their choosing | Each retired key names its predecessor, authenticated, so the chain is checked in both directions. Readers refuse a scope with a retired record off the chain, and `carbon check` refuses any retired record a branch adds other than the one its rotation writes |
 | `carbon check` passed forged rotations and rollbacks | Rotations must retire trunk's key, retired records are append-only, and every key change is in the review banner |
 | A passing `carbon check` was described as safe to merge without review | Withdrawn. It cannot prove who made a key change |
 | Rotation re-sealed every line, so a branch that added a secret conflicted in git | Rotation leaves existing values in place and changes only the keys file |

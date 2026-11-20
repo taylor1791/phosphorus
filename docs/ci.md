@@ -133,7 +133,7 @@ needs a key or a person, and `check` holds neither:
 | `RENAMED` | A package was renamed (`carbon rename`) and every value re-sealed. Confirm the author is a reader of the scope. |
 | `KEY CHANGED for <device>` | The public key of an existing device or machine was replaced. Once merged and applied, the new key reads everything that device read. Confirm the printed fingerprint with the device's owner over a channel you trust. |
 | `NEW DEVICE <device>` | A device was added to an existing person: once applied it reads everything the person reads. Confirm the fingerprint with them. |
-| `UNDER A RETIRED KEY` / `SUSPECT` | A value sealed under a retired key: whoever wrote it held that key, which a removed reader may still hold. |
+| `UNDER A RETIRED KEY` / `SUSPECT` | An unproven value: under a retired key that did not carry it (or a carried line trunk no longer has), so whoever wrote it held that key, which a removed reader may still hold. Values a rotation carried are not listed. |
 | `OLDER VALUE` | A value was replaced by an older line. |
 | `SCOPE REMOVED` | A scope and its keys were deleted together. |
 
@@ -153,7 +153,7 @@ what a pull request's policy proposes (`policy.grant-proposed`,
 
 | Flag | Effect |
 |---|---|
-| `--strict` | Every warning becomes an error, and so does every pending grant. Warnings include pending revocations and re-keyed slots, rotation debt (all of it, not only debt past `--max-debt`), values under retired keys, older values restored over trunk's, team members without a person file, and a `worktree` trunk. Notes never fail, including the banner's drops, new keys, rotations, renames and key changes, and policy proposals. A pull request that only changes policy is not failed by its own change (its grants are not pending until it merges); on trunk, `--strict` fails until a reader has applied every merged change. |
+| `--strict` | Every warning becomes an error, and so does every pending grant. Warnings include pending revocations and re-keyed slots, rotation debt (all of it, not only debt past `--max-debt`), unproven values under retired keys, older values restored over trunk's, team members without a person file, and a `worktree` trunk. Notes never fail, including the banner's drops, new keys, rotations, renames and key changes, and policy proposals. A pull request that only changes policy is not failed by its own change (its grants are not pending until it merges); on trunk, `--strict` fails until a reader has applied every merged change. |
 | `--max-debt 30d` | Rotation debt older than this fails the job. Debt is a secret set before someone who could read it was removed or re-keyed, or older than its `rotate_after`. It clears when the secret is set again. |
 | `--unused` | Also list secrets that no `[env]` table references. |
 | `--json` | One JSON document on stdout: `ok`, `trunk` (`ref`, `commit`, `from`, `mode`), `counts`, `findings` (each with a stable `rule` id) and `rules`. |

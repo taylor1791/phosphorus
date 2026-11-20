@@ -351,7 +351,10 @@ not touch the secrets file. The person removed has already seen every
 existing value, so re-sealing them would protect nothing; they stay under
 the old key id and keep opening through the retired key. A rotation commit
 changes only the keys file, so a branch cut before the removal that added
-or changed a secret merges without a conflict.
+or changed a secret merges without a conflict. An added secret is then
+reported as unproven (below); a changed one is under a key trunk has
+retired and differs from trunk's line, so `check` fails it
+(`secret.rolled-back`) until you merge trunk and set it again.
 
 What protects you is changing the credentials themselves: every value set
 before the removal owes a rotation (`carbon status`, `carbon check --max-debt`)

@@ -65,6 +65,25 @@ own. Each section is numbered from 1.
    (Decisions 46). Rotation debt still lists every value set before the
    removal (17).
 
+   A `carried` list made a retired record worth forging. Readers first
+   walked every record that reached the current key through successors, so
+   a removed reader who kept retired key K1 could add a record of his own,
+   with K1 as successor, sealed under K1, whose `carried` vouched for a
+   value of his choosing. Each retired record now also names its
+   `predecessor` (the key it replaced; absent for a scope's first key),
+   written at retirement and bound in the `sealed` blob's associated data
+   (the line before the carried digest, `-` for none). The records must
+   form one chain back from the current key (`store.Keys.Chain`): at most
+   one record names the current key as successor, and from each record the
+   next is the one its `predecessor` names, which must name it as
+   successor. Readers refuse the whole scope (`ErrTampered`, naming the
+   record and the fix) when any retired record is off that chain, rather
+   than ignore it, then unseal the chain in order, so every link is
+   authenticated in both directions; a link that fails makes it and every
+   older key unavailable and the rest reads. `carried` counts only for
+   records on the chain that opened. `check`, which holds no key, refuses
+   any added retired record but the one a rotation writes (31).
+
 ## Decisions
 
 ### Workspace, trunk and files
@@ -291,10 +310,25 @@ own. Each section is numbered from 1.
     line hashes of trunk's entries under the retired id, recomputed from
     trunk's secrets file (`key.changed` otherwise): leaving one out would
     make a legitimate value look unproven, adding one would vouch for a line
-    nobody carried. Retired records, `carried` included, are append-only
-    (`key.retired-changed`), and a line that differs from trunk's under a
-    key trunk has retired is `secret.rolled-back`: only someone holding the
-    retired key can write there.
+    nobody carried. The new retired record's `predecessor` must be what
+    trunk's chain implies (the newest record on trunk's chain, or none), and
+    the working tree's chain must be valid: linear, with no stray records
+    (`key.changed` otherwise). Retired records, `predecessor` and `carried`
+    included, are append-only (`key.retired-changed`), and a retired record
+    trunk does not have, other than the one the rotation writes, is
+    `key.retired-added` (error); a new scope key may have none. A retired
+    record decides which values count as carried, and `check` cannot open
+    one, so it does not judge whether an added one is genuine: it refuses
+    it. A line that differs from trunk's under the same key, which trunk has
+    retired, is `secret.rolled-back` (error). Its message does not accuse
+    anyone: such a line is either an edit made on a branch cut before the
+    rotation or a value forged by someone who kept the key, and carbon
+    cannot tell which; the fix is to merge trunk and `carbon set` it again
+    (or `carbon apply --reseal-unproven` by a reader, if the value is known
+    good). `check` also counts an entry under a retired key as carried only
+    if trunk has the identical line for that name: a carried line copied
+    back after trunk deleted it is `secret.stale-key` (warning, banner),
+    although its hash is in a `carried` list (46).
 32. **`check`: scopes across trunk and the working tree.** Scopes are the
     union of both sides (rules in the contract: `key.new`, `key.removed`,
     `scope.removed`, `store.orphan`). The reason for `key.removed`: removing
@@ -428,10 +462,15 @@ own. Each section is numbered from 1.
     reviewed line to compare with, and drops are promoted as before. A drop
     under a retired key that the key carries is promoted like any other; an
     unproven drop is promoted only with `--reseal-unproven` (46).
-46. **Unproven values.** An entry under a retired key is *carried* when its
-    line hash is in that key's `carried` list, and *unproven* otherwise; an
-    entry under an unknown key id is unproven too (`scope.IsUnproven`; the
-    same definition in `ls`, `status`, `check`, `apply` and `get`). Carried
+46. **Unproven values.** An entry under a retired key is *carried* when the
+    key is on the scope's chain (Deviations 9) and the entry's line hash is
+    in that key's `carried` list, and *unproven* otherwise; an entry under
+    an unknown key id is unproven too (`scope.IsUnproven`; the same
+    definition in `ls`, `status`, `check`, `apply` and `get`). A reader that
+    opened the scope also requires the record to have opened
+    (`scope.Opened.IsUnproven`). `check` adds a keyless rule of its own: an
+    entry counts as carried only if trunk has the identical line for that
+    name (31); `ls`, `status` and `apply` use the keys file only. Carried
     entries are ordinary and `apply` leaves them alone. Every unproven entry
     is listed by name in the plan, with its key and set time, and marked
     when its set time is after its key was retired (advisory only: a forger
@@ -568,7 +607,10 @@ the defence for most of them.
    proves only that its writer held that key, which a removed reader still
    may. Values a rotation left in place are carried: the retired record
    lists their line hashes and authenticates the list, so a line written
-   later under the retired key is told apart from them. Readers can still
+   later under the retired key is told apart from them. A retired key does
+   not let its holder forge a record that carries a value: the chain is
+   authenticated backwards, readers refuse a stray record, and `check`
+   refuses an added one (Deviations 9). Readers can still
    open an unproven value (old branches must merge), `ls` marks it "author
    unproven", `status` lists it under "Unproven", `check` lists it in the
    banner, and `apply` lists it and leaves it as it is unless
@@ -611,8 +653,9 @@ rotation merges with no conflict in the secrets or keys file. Its new line
 is under the retired key and not carried by it, so it is unproven: `check`
 lists it in the banner (`secret.stale-key`), and it stays so until a reader
 runs `carbon apply --reseal-unproven` or someone sets it again after merging
-trunk. A line that replaces one the retired key carried is also
-`secret.rolled-back` (error), so a changed secret must be set again. `set`
+trunk. A line that replaces trunk's line under the same retired key is
+`secret.rolled-back` (error), so a changed secret must be set again after
+merging trunk. `set`
 and `edit` refuse to seal on a branch whose current key trunk has retired
 (Decisions 14), so that branch must merge trunk before it can set or edit
 secrets in the scope. The conflict-marker error for a secrets file now
