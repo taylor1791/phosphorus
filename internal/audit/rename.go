@@ -68,7 +68,7 @@ func renameProblems(sf *ScopeFiles, tk *store.Keys, ts *store.Secrets) []string 
 		case !ok:
 			probs = append(probs, "key "+id+" is missing")
 			continue
-		case !k.Created.Equal(t.Created), !k.Retired.Equal(t.Retired), k.Reason != t.Reason, k.Successor != t.Successor:
+		case !k.Created.Equal(t.Created), !k.Retired.Equal(t.Retired), k.Reason != t.Reason, k.Successor != t.Successor, k.Predecessor != t.Predecessor:
 			probs = append(probs, "key "+id+"'s record changed")
 		}
 		if len(k.Slots) != len(t.Slots) {

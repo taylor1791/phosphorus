@@ -162,7 +162,7 @@ func runStatus(c *Context) error {
 	if st.TrunkIsReviewed() {
 		for _, f := range st.Check(audit.Options{Now: c.Now()}).Findings {
 			switch f.Rule {
-			case audit.RuleKeyChanged, audit.RuleKeyRetiredChanged, audit.RuleKeyUnverified:
+			case audit.RuleKeyChanged, audit.RuleKeyRetiredChanged, audit.RuleKeyRetiredAdded, audit.RuleKeyUnverified:
 				if _, ok := suspect[f.Scope]; !ok {
 					suspect[f.Scope] = f.Rule
 				}

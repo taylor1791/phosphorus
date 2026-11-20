@@ -464,7 +464,7 @@ func reaches(ks *store.Keys, id, want string) bool {
 // sameRecord reports whether two key records are identical.
 func sameRecord(a, b *store.Key) bool {
 	if !a.Created.Equal(b.Created) || !a.Retired.Equal(b.Retired) || a.Reason != b.Reason ||
-		a.Successor != b.Successor || a.Sealed != b.Sealed || a.InboxSealed != b.InboxSealed ||
+		a.Successor != b.Successor || a.Predecessor != b.Predecessor || a.Sealed != b.Sealed || a.InboxSealed != b.InboxSealed ||
 		a.Inbox != b.Inbox || len(a.Slots) != len(b.Slots) || strings.Join(a.Carried, ",") != strings.Join(b.Carried, ",") {
 		return false
 	}

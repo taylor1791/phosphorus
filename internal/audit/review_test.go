@@ -430,3 +430,18 @@ func TestRotationPredecessorAndAddedRecords(t *testing.T) {
 	rep := f.check(Options{})
 	want(t, rep, RuleKeyRetiredAdded, Error)
 }
+
+// Retired records are append-only, their predecessor included.
+func TestRetiredRecordPredecessorEdited(t *testing.T) {
+	f := newFx(t)
+	removeSamAndRotate(t, f, t0.Add(time.Hour))
+	o := f.open("app", "dev", "ada/laptop")
+	if _, err := o.Rotate(f.devices("app", "dev"), "removed sam", t0.Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	f.save(o.Scope)
+	f.commit("second rotation")
+	keys := f.read("svc/app/.carbon/dev.keys.toml")
+	f.write("svc/app/.carbon/dev.keys.toml", regexp.MustCompile(`predecessor = "k[a-z0-9]{5}"`).ReplaceAllString(keys, `predecessor = "kzzzzz"`))
+	want(t, f.check(Options{}), RuleKeyRetiredChanged, Error)
+}
