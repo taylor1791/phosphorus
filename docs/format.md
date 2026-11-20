@@ -58,9 +58,20 @@ retired = 2026-11-02T17:04:11Z
 reason = "removed sam"
 successor = "k3f9q2"
 sealed = "carbon1:…"
+carried = ["sha256:…", "sha256:…"]
 inbox_sealed = "carbon1:…"   # optional: k1a8c0's own inbox identity, still sealed under k1a8c0,
                              # so drops written to its inbox open once the chain opens k1a8c0
 ```
+
+A rotation does not touch the secrets file: values and drops written under
+a key stay under its id after it is retired and open through the chain of
+retired keys. `carried` lists, sorted, `sha256:` and the hex SHA-256 of each
+secrets-file line that was under the key when it was retired, exactly as
+written above (`<name> = { key = "…", set = …, value = "…" }`, or `drop =`),
+without the trailing newline. A line under a retired key that is not
+listed was written after the rotation, by someone who held the retired
+key: carbon calls it unproven. The list is authenticated by the retired
+key's `sealed` blob (below).
 
 ## Sealed blob: `carbon1:<base64(nonce ‖ ciphertext)>`
 
@@ -72,9 +83,12 @@ joined with `\n`, no trailing newline:
 |---|---|---|---|
 | `value` | scope key `key` | the value bytes | `carbon/v1/value`, package, env, secret name, key id, set time |
 | `inbox_sealed` | that key | the inbox identity string (`AGE-SECRET-KEY-PQ-1…`) | `carbon/v1/inbox`, package, env, key id |
-| retired `sealed` | the successor key | the retired key's 32 bytes | `carbon/v1/retired`, package, env, retired key id, successor key id, retired time, reason |
+| retired `sealed` | the successor key | the retired key's 32 bytes | `carbon/v1/retired`, package, env, retired key id, successor key id, retired time, reason, carried digest |
 
 Package is the package's `name` (not its path); env is the environment name.
+The carried digest is the hex SHA-256 of the retired record's `carried`
+elements, as written, joined with `\n` (no trailing newline); an empty list
+hashes the empty string (`e3b0c442…b855`).
 
 ## Slot: `{ to = "sha256:<hex>", slot = "age1:<base64(age file)>" }`
 
@@ -143,8 +157,11 @@ python3 tools/decrypt.py unwrap "age1:…the drop field…" | age -d -i inbox.tx
 # line 6 of the output is the value in unpadded base64
 
 # 4. A value under a retired key k_old: unseal k_old with its successor first.
+#    The last associated data line is the digest of k_old's carried list.
+DIGEST=$(printf '%s' "sha256:…first…"$'\n'"sha256:…second…" | sha256sum | cut -d' ' -f1)
+#    (macOS: shasum -a 256; for an empty carried list use printf '' instead)
 OLDKEY=$(python3 tools/decrypt.py open "$KEY" "carbon1:…sealed of k_old…" \
-  carbon/v1/retired checkout prod k_old "$KID" <retired time> "<reason>" | base64 | tr -d '\n=')
+  carbon/v1/retired checkout prod k_old "$KID" <retired time> "<reason>" "$DIGEST" | base64 | tr -d '\n=')
 # (base64 without line breaks or padding, which is what decrypt.py expects as a key)
 python3 tools/decrypt.py open "$OLDKEY" "carbon1:…" carbon/v1/value checkout prod <name> k_old <set time>
 ```
@@ -161,6 +178,7 @@ time.
   `python3 tools/decrypt.py vectors testdata/vectors/sealed.json`; the Go test
   is `internal/seal` `TestVectors`.
 - `testdata/vectors/scope/`: a complete `checkout/prod` scope with an X25519
-  and a hybrid slot, two sealed values, a drop, a retired key, and a value still
-  under it. `expected.json` lists the plaintexts. The Go test is
+  and a hybrid slot, two sealed values, a drop, a retired key that carries one of
+  them, and an unproven value under it (from a branch, not carried).
+  `expected.json` lists the plaintexts. The Go test is
   `internal/scope` `TestExampleScopeVector` (regenerate with `-update`).

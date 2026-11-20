@@ -343,19 +343,30 @@ from a repository ruleset (see docs/ci.md). A repository with no protected branc
 `carbon.trunk` to `worktree`, and `check` warns that nothing is then
 reviewed.
 
-### Why did my merge conflict after a rotation?
+### What happens to existing secrets when someone is removed?
 
-When someone is removed, `apply` rotates the scope key and re-seals every
-value in the scope, so every line of the scope's secrets file changes. A
-branch that added or changed a secret in that scope then conflicts. Keep
-the rotated side's lines, then add back each line your branch added or
-changed, exactly as written there. Each line is self-contained: it still
-opens through the retired key, and the next `apply` lists it as unproven
-(see below). The error carbon prints for the conflicted file says the same.
+`apply` rotates the scope key: a new key and inbox, wrapped to the readers
+who remain, with the old key retired and sealed under the new one. It does
+not touch the secrets file. The person removed has already seen every
+existing value, so re-sealing them would protect nothing; they stay under
+the old key id and keep opening through the retired key. A rotation commit
+changes only the keys file, so a branch cut before the removal that added
+or changed a secret merges without a conflict.
 
-Two branches that both ran `apply` can also conflict: on a slot line (keep
-either, both wrap the same key) or, if both rotated, on `current` (keep one
-side's keys and secrets files and run `apply` again).
+What protects you is changing the credentials themselves: every value set
+before the removal owes a rotation (`carbon status`, `carbon check --max-debt`)
+until someone sets it again, which seals it under the new key. Values set
+after the rotation are under the new key, which the removed person never
+had.
+
+The retired key records which lines it carried at the rotation. A value
+added under it later (for example on that old branch) is not among them,
+so carbon reports it as unproven (below).
+
+Two branches that both ran `apply` can still conflict in a keys file: on a
+slot line (keep either, both wrap the same key) or, if both rotated, on
+`current` (keep one side's whole keys file and run `apply` again; a value the
+other side set under its own new key must then be set again).
 
 ### What is a drop?
 
@@ -368,10 +379,12 @@ a reader seals it as an ordinary value. An environment can refuse drops with
 
 ### What does "unproven" mean?
 
-A value stored under a retired scope key rather than the current one. It
-usually comes from a branch cut before a rotation. Writing it needed the
-retired key, which the person whose removal caused the rotation may still
-hold, so carbon cannot say a current reader wrote it. `ls` and `status` mark
+A value stored under a retired scope key that the key's record does not
+list as carried: it was written after the rotation, usually on a branch
+cut before it. (Values that were under the key when it was retired are
+carried and are ordinary values.) Writing it needed the retired key, which
+the person whose removal caused the rotation may still hold, so carbon
+cannot say a current reader wrote it. `ls` and `status` mark
 it, `check` lists it in the banner, and `apply` leaves it as it is unless
 you pass `--reseal-unproven`, which re-seals it under the current key and so
 vouches for it. Carbon also refuses to seal a new value under a key trunk
