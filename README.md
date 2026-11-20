@@ -9,7 +9,7 @@ their devices. There is no server: carbon is one Go binary plus git, and it
 works offline.
 
 The design is in
-[Carbon 1.0: in-repo secrets for monorepos](https://claude.ai/artifact/B9zrmkcLN9zsZUHZGZu1TX).
+[docs/design.md](docs/design.md).
 The proof of concept this replaces is [carbon 0.0.3](https://github.com/taylor1791/carbon).
 
 ## Status

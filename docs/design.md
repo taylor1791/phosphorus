@@ -1,6 +1,10 @@
 # Carbon 1.0: in-repo secrets for monorepos
 
-Nov 15, 2026 · @Taylor Everding
+This is the design for Carbon 1.0. It is maintained here, in the repository:
+change it in the same pull request as the behaviour it describes. The exact
+formats and rules are in [implementation.md](implementation.md), and the
+decisions and limits found while building it are in
+[deviations.md](deviations.md).
 
 ## Summary
 
@@ -16,11 +20,11 @@ The design rests on seven decisions:
 - **Anyone can add a secret; only readers can read one.** A contributor without access drops a value into the scope's inbox, so credentials never travel over chat.
 - **Honest offboarding.** Removing someone rotates keys and lists every credential they could read, because revocation cannot un-share a secret.
 
-Your reviews settled every open question. The answers are listed under Decisions made.
+Every question raised in review is settled. The answers are listed under Decisions made.
 
 ## Background: what carbon 0.0.3 proved, and where it stops
 
-Carbon 0.0.3 proved the model: services declare what they publish and consume in a file beside their code, and an age-encrypted registry in the repo replaces a central config service. Its README says not to use it in production. The table lists what I found reading the source (935 lines of nushell over sops and rage) and how 1.0 responds.
+Carbon 0.0.3 proved the model: services declare what they publish and consume in a file beside their code, and an age-encrypted registry in the repo replaces a central config service. Its README says not to use it in production. The table lists what reading the source showed (935 lines of nushell over sops and rage) and how 1.0 responds.
 
 | Area | Carbon 0.0.3 | Carbon 1.0 |
 | --- | --- | --- |
@@ -153,7 +157,7 @@ error: you cannot read checkout in prod
 | `carbon init` | Create a workspace or a package | No |
 | `carbon join` | Create an identity and add its public key | No |
 | `carbon request <package>` | Propose yourself as a reader in policy | No |
-| `carbon apply` | Apply merged policy: wrap, rotate, re-seal, promote drops | Yes |
+| `carbon apply` | Apply merged policy: wrap, rotate, promote drops | Yes |
 | `carbon remove <person>` | Remove a person, device, or machine from policy | No |
 | `carbon who <package>` / `carbon access <person>` | Explain who reads what, and through which rule | No |
 | `carbon check` | Validate graph, policy, and keys; the CI gate | No |
@@ -265,12 +269,13 @@ inbox_sealed = "carbon1:Rb1v..."        # its private half, sealed under the sco
 "lin/yubikey"             = { to = "sha256:41ab...", slot = "age1:YWdlLWVuY3J5cHRpb24..." }
 "machine:deploy-checkout" = { to = "sha256:c07e...", slot = "age1:YWdlLWVuY3J5cHRpb24..." }
 
-[keys.k1a8c0]                  # retired, kept so older branches still decrypt
+[keys.k1a8c0]                  # retired, kept because older values are still sealed under it
 created      = 2026-06-01T10:00:00Z
 retired      = 2026-11-02T17:04:11Z
 reason       = "removed sam"
 successor    = "k3f9q2"
 sealed       = "carbon1:Zk2p..."     # the old key, sealed under k3f9q2
+carried      = ["sha256:5d0e...", "sha256:b71c..."]   # the values under this key when it was retired
 inbox_sealed = "carbon1:Qm9t..."     # kept so drops made on older branches still open
 ```
 
@@ -280,7 +285,33 @@ The environment for a command resolves in this order: `--env`, then `CARBON_ENV`
 
 Carbon uses two standard constructions and no hand-written primitives. age wraps a 32-byte scope key to each reader device, and XChaCha20-Poly1305 seals each value under that key.
 
-&#91;embedded content: key hierarchy · 3 identities, 3 scopes\]
+```mermaid
+flowchart LR
+  subgraph identity["Identity keys (private half stays out of the repo)"]
+    ada["ada / laptop<br/>age key in ~/.config/carbon"]
+    lin["lin / yubikey<br/>age plugin, hardware-held"]
+    machine["machine: deploy<br/>age key in CI secret store"]
+  end
+  subgraph scope["Scope keys (one slot per reader device)"]
+    cdev["checkout / dev<br/>32-byte key"]
+    cprod["checkout / prod<br/>32-byte key"]
+    dprod["db / prod<br/>32-byte key"]
+  end
+  subgraph values["Secret values (one sealed line per secret)"]
+    vdev["checkout dev secrets<br/>session_key, stripe_api_key"]
+    vprod["checkout prod secrets<br/>session_key, stripe_api_key"]
+    vdb["db prod secrets<br/>password, replica_password"]
+  end
+  ada -- age --> cdev
+  lin -- age --> cdev
+  lin -- age --> cprod
+  lin -- age --> dprod
+  machine -- age --> cprod
+  machine -- age --> dprod
+  cdev -- XChaCha20-Poly1305 --> vdev
+  cprod -- XChaCha20-Poly1305 --> vprod
+  dprod -- XChaCha20-Poly1305 --> vdb
+```
 
 A device reaches a secret only through a slot that wraps the scope key to it. Lin reads all three scopes here; Ada reads only `checkout/dev`.
 
@@ -296,7 +327,7 @@ A device reaches a secret only through a slot that wraps the scope key to it. Li
 
 The construction gives six properties:
 
-- **A sealed value proves a key holder wrote it.** Sealing needs the scope key, so a contributor who never had access cannot forge or alter one. A person removed since still holds the keys they had, so a value under a retired key is marked unproven until a reader confirms it.
+- **A sealed value proves a key holder wrote it.** Sealing needs the scope key, so a contributor who never had access cannot forge or alter one. A person removed since still holds the keys they had, so a value that appears under a retired key after its retirement is marked unproven until a reader confirms it.
 - **A drop proves nothing about its author, and says so.** It sits under a different field, and `check` and `status` flag it until a reader promotes it. Review decides whether it is welcome.
 - **Ciphertext cannot be moved.** Renaming a sealed value, or copying it to another package or environment, fails authentication. Drops and slots carry their destination inside the payload and are checked the same way.
 - **Only a key holder can extend access to an existing key.** Wrapping a scope key requires having it. Replacing a key needs no key, because public keys are public, so that case is covered by the trunk checks under User management, not by encryption.
@@ -325,7 +356,18 @@ Hybrid keys are the default: `carbon join` generates a hybrid identity, and ever
 
 Access changes in two steps that cannot be confused: policy is reviewed and merged as text, then `carbon apply` carries it out cryptographically.
 
-&#91;embedded content: granting access · 4 steps, 3 roles\]
+```mermaid
+sequenceDiagram
+  participant D as New developer
+  participant O as Code owners
+  participant R as Current reader
+  D->>O: carbon join, then a pull request (public key added to the repo)
+  O->>O: review and merge a readable TOML diff
+  O->>R: policy is on trunk
+  R->>R: carbon apply (wraps scope keys to the new device)
+  R->>D: wrapped keys, in a second pull request
+  D->>D: carbon run (secrets decrypt locally)
+```
 
 `carbon apply` reads policy from the trunk ref, never from the working tree. A reader therefore cannot be tricked into granting access from an unreviewed branch.
 
@@ -367,8 +409,8 @@ A workspace or package can turn drops off per environment with `drops = false` u
 `carbon remove sam` deletes the person file and every team and access entry that names them. After that merges, `carbon apply` does three things for each scope Sam could read:
 
 1. Generates a new scope key and inbox key, and wraps the scope key to the remaining readers.
-2. Re-seals every value in the scope under the new key.
-3. Keeps the old key as retired, sealed under the new one, so branches cut before the removal still decrypt.
+2. Leaves every existing value where it is, under the old key, and records in the keys file which values those were. Sam has already seen them, so re-sealing them would protect nothing. Only the keys file changes.
+3. Keeps the old key as retired, sealed under the new one, so existing values and branches cut before the removal still decrypt.
 
 Removing one device, such as `carbon remove ada/laptop` after a theft, works the same way.
 
@@ -405,7 +447,7 @@ The file formats are chosen so that git's ordinary three-way merge is correct fo
 | Two branches set different secrets in one package | Different lines change. Git merges them. |
 | Two branches set the same secret | An ordinary one-line conflict. Either side is a valid value or drop, so keep one. |
 | Two branches grant access to different people | Different slot lines change. Git merges them. Two applies that wrap the same new device at once conflict on that line; either side is valid. |
-| A branch cut before a key rotation adds a secret | The value still decrypts through the retired key and is marked unproven until `carbon apply --reseal-unproven`. Git reports a conflict where the rotation re-sealed neighbouring lines; keep trunk's lines plus the new one. |
+| A branch cut before a key rotation adds a secret | It merges cleanly, because a rotation changes only the keys file. The added value sits under the retired key and is marked unproven until `carbon apply --reseal-unproven` or the author sets it again. |
 | Two branches rotate the same scope key | A conflict on the `current` line. `carbon apply` resolves it by rotating once more. |
 | A package directory moves | `git mv` is enough. Values are bound to the package name, not its path. |
 | A package is renamed | `carbon rename` re-seals its values under the new name. |
@@ -491,7 +533,7 @@ Each alternative was rejected for a specific cost.
 
 ## Migration from 0.0.3 and rollout
 
-Migration is done by `carbon-migrate`, a separate tool that is not part of the `carbon` binary. I will write it against the 1.0 command line once phase 1 exists, because it needs a working `carbon set` to target.
+Migration is done by `carbon-migrate`, a separate tool that is not part of the `carbon` binary. It lives in `migrate/` as its own Go module and drives only the public `carbon` command line.
 
 Both versions use the names `carbon.toml` and `.carbon/`, so a repo is cut over in one branch, not run side by side. The 1.0 binary recognises a 0.0.3 repo by its `[push]` and `[pull]` tables and stops with a pointer to the tool.
 
@@ -528,7 +570,7 @@ Each phase ends on a test that someone other than the author can run.
 | 1. Single user | `init`, `set`, `get`, `run`, `export`, `check`, `graph` | The 0.0.3 bats scenarios, ported, pass against 1.0; goal 8 is measured and met |
 | 2. User management | `join`, `request`, `apply`, `remove`, `who`, machines, drops, rotation debt | Onboarding, offboarding, and drop drills pass on a test repo with three people |
 | 3. Hardening | Plugin identities, signed releases, Nix flake and Homebrew packages | An external reviewer has signed off on the spec and the drop box |
-| Alongside 1 and 2 | `carbon-migrate`, in its own repository | A 0.0.3 fixture repo is migrated and every value reads back identical |
+| Alongside 1 and 2 | `carbon-migrate`, in `migrate/` as its own module | A 0.0.3 fixture repo is migrated and every value reads back identical |
 
 Dates depend on staffing, which this doc does not assume.
 
@@ -541,7 +583,6 @@ These are designed for but not in 1.0.
 - **OS keychain storage for identities.** 1.0 uses a file, a passphrase, or a hardware plugin.
 
 * **Signed key changes, opt-in per environment.** Each device gets an Ed25519 signing key, and slots and rotations carry a signature that `carbon check` verifies against trunk policy. This closes the forged-rotation limit for about 90 characters per slot line. `require_signed = true` under `[access]` turns it on.
-* **Rotation that leaves old values in place.** A removed reader has already seen every existing value, so re-sealing them protects nothing. Leaving the secrets file untouched on rotation would remove the merge conflict with branches that add a secret.
 
 ## Decisions made
 
@@ -570,10 +611,10 @@ The build was reviewed adversarially, one independent reviewer per part. The fin
 | A branch could edit the `trunk` line and choose its own policy | The setting is gone. Trunk comes from the environment, local git config, or the remote default |
 | Anyone can generate a fresh key and wrap it to every reader's public key | Only readers create scope keys; reader commands require a key that descends from trunk's; each clone pins the last key it verified |
 | A removed reader holds the key until `apply` runs, and could relabel a slot or write values in that window | Slots record the key they were wrapped to; `set` refuses a caller policy no longer names; rotation runs only on files that match trunk |
-| A removed reader can forge values under a key they kept | Values under a retired key are unproven and are re-sealed only with `--reseal-unproven` |
+| A removed reader can forge values under a key they kept | Each retired key records the values it carried. Any other value under it is unproven and is re-sealed only with `--reseal-unproven` |
 | `carbon check` passed forged rotations and rollbacks | Rotations must retire trunk's key, retired records are append-only, and every key change is in the review banner |
 | A passing `carbon check` was described as safe to merge without review | Withdrawn. It cannot prove who made a key change |
-| Rotation re-seals every line, so a branch that adds a secret conflicts | Documented as a merge limit; the fix is on the backlog |
+| Rotation re-sealed every line, so a branch that added a secret conflicted in git | Rotation leaves existing values in place and changes only the keys file |
 
 ## Open questions
 
