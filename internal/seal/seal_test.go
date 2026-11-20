@@ -29,9 +29,9 @@ func TestAssociatedDataExact(t *testing.T) {
 		t.Fatalf("inbox AD = %q", ad)
 	}
 
-	ad, _ = RetiredAD("checkout", "prod", "k1a8c0", "k3f9q2", setTime, "removed sam", "", nil)
+	ad, _ = RetiredAD("checkout", "prod", "k1a8c0", "k3f9q2", setTime, "removed sam", "", "", nil)
 	// An empty carried list hashes the empty string.
-	if string(ad) != "carbon/v1/retired\ncheckout\nprod\nk1a8c0\nk3f9q2\n2026-11-02T17:04:11Z\nremoved sam\n-\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" {
+	if string(ad) != "carbon/v1/retired\ncheckout\nprod\nk1a8c0\nk3f9q2\n2026-11-02T17:04:11Z\nremoved sam\n-\n-\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" {
 		t.Fatalf("retired AD = %q", ad)
 	}
 }
@@ -132,6 +132,18 @@ type vector struct {
 	Plaintext string   `json:"plaintext_hex"`
 	Blob      string   `json:"blob"`
 	Carried   []string `json:"carried"`
+
+	PredecessorRecord *struct {
+		ID          string   `json:"id"`
+		Created     string   `json:"created"`
+		Retired     string   `json:"retired"`
+		Reason      string   `json:"reason"`
+		Successor   string   `json:"successor"`
+		Predecessor string   `json:"predecessor"`
+		Sealed      string   `json:"sealed"`
+		Carried     []string `json:"carried"`
+		InboxSealed string   `json:"inbox_sealed"`
+	} `json:"predecessor_record"`
 }
 
 func loadVectors(t *testing.T) []vector {
@@ -170,14 +182,23 @@ func vectorAD(t *testing.T, v vector) []byte {
 	case "inbox":
 		ad, err = InboxAD(f[0], f[1], f[2])
 	case "retired":
-		if got := CarriedDigest(v.Carried); got != f[7] {
-			t.Fatalf("carried digest %s, vector says %s", got, f[7])
+		if got := CarriedDigest(v.Carried); got != f[8] {
+			t.Fatalf("carried digest %s, vector says %s", got, f[8])
+		}
+		predDigest := ""
+		if p := v.PredecessorRecord; p != nil {
+			predDigest = RecordDigest(p.ID, parse(p.Created), parse(p.Retired), p.Reason, p.Successor, p.Predecessor, p.Sealed, p.Carried, p.InboxSealed)
+			if predDigest != f[7] {
+				t.Fatalf("predecessor digest %s, vector says %s", predDigest, f[7])
+			}
+		} else if f[7] != NoPredecessor {
+			t.Fatalf("predecessor digest without a record")
 		}
 		pred := f[6]
 		if pred == NoPredecessor {
 			pred = ""
 		}
-		ad, err = RetiredAD(f[0], f[1], f[2], f[3], parse(f[4]), f[5], pred, v.Carried)
+		ad, err = RetiredAD(f[0], f[1], f[2], f[3], parse(f[4]), f[5], pred, predDigest, v.Carried)
 	default:
 		t.Fatalf("unknown kind %q", v.Kind)
 	}

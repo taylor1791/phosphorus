@@ -24,6 +24,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 
 	"github.com/taylor1791/phosphorus/internal/config"
+	"github.com/taylor1791/phosphorus/internal/seal"
 )
 
 // SecretsPath is <pkgDir>/.carbon/<env>.secrets.toml.
@@ -621,4 +622,14 @@ func (s *Secrets) Lookup(name string) (Entry, bool) {
 	}
 	e, ok := s.Entries[name]
 	return e, ok
+}
+
+// RecordDigest is seal.RecordDigest of retired record id as it stands in
+// the file, "" when id is "" or not a retired record.
+func (k *Keys) RecordDigest(id string) string {
+	r, ok := k.Keys[id]
+	if id == "" || !ok || !r.IsRetired() {
+		return ""
+	}
+	return seal.RecordDigest(id, r.Created, r.Retired, r.Reason, r.Successor, r.Predecessor, r.Sealed, r.Carried, r.InboxSealed)
 }

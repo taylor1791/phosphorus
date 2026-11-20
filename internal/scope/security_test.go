@@ -129,7 +129,7 @@ func TestVerifyTrunk(t *testing.T) {
 		fk.Keys[fk.Current] = rec
 		ek := cloneKeys(t, evil.Keys)
 		retired := &store.Key{Created: t0, Retired: t0.Add(time.Hour), Reason: "x", Successor: ek.Current, Carried: []string{}}
-		ad, _ := seal.RetiredAD("checkout", "prod", trunk.Current, ek.Current, retired.Retired, retired.Reason, "", retired.Carried)
+		ad, _ := seal.RetiredAD("checkout", "prod", trunk.Current, ek.Current, retired.Retired, retired.Reason, "", "", retired.Carried)
 		retired.Sealed, _ = seal.Seal(evil.keys[evil.CurrentID()], fake.keys[fake.CurrentID()][:], ad)
 		ek.Keys[trunk.Current] = retired
 		es := &Scope{Package: "checkout", Env: "prod", Dir: o.Dir, Keys: ek, Secrets: store.NewSecrets()}
@@ -348,7 +348,7 @@ func TestForgedRetiredRecordIsRefused(t *testing.T) {
 	blob, _ := seal.Seal(fake, []byte("evil"), vad)
 	e := store.Entry{Key: "kfake9", Set: set, Value: blob}
 	carried := []string{store.LineHash("forged", e)}
-	rad, _ := seal.RetiredAD("checkout", "dev", "kfake9", k1, t0.Add(time.Hour), "rekeyed sam/laptop", "", carried)
+	rad, _ := seal.RetiredAD("checkout", "dev", "kfake9", k1, t0.Add(time.Hour), "rekeyed sam/laptop", "", "", carried)
 	sealed, _ := seal.Seal(&samKey, fake[:], rad)
 	s.Keys.Keys["kfake9"] = &store.Key{Created: t0, Retired: t0.Add(time.Hour), Reason: "rekeyed sam/laptop", Successor: k1, Sealed: sealed, Carried: carried}
 	s.Secrets.Entries["forged"] = e

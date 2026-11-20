@@ -57,7 +57,7 @@ func injectFakeRetired(t *testing.T, w *clitest.World, env, succ string, succKey
 	carried := []string{store.LineHash(name, e)}
 	retired := set.Add(time.Hour)
 	reason := "rekeyed sam/laptop"
-	rad, _ := seal.RetiredAD("checkout", env, fid, succ, retired, reason, "", carried)
+	rad, _ := seal.RetiredAD("checkout", env, fid, succ, retired, reason, "", "", carried)
 	var sealed string
 	if succKey != nil {
 		// the fake key's bytes: re-derive via Open of the blob is not
@@ -68,7 +68,7 @@ func injectFakeRetired(t *testing.T, w *clitest.World, env, succ string, succKey
 		blob, _ = seal.Seal(fk, []byte(value), vad)
 		e = store.Entry{Key: fid, Set: set, Value: blob}
 		carried = []string{store.LineHash(name, e)}
-		rad, _ = seal.RetiredAD("checkout", env, fid, succ, retired, reason, "", carried)
+		rad, _ = seal.RetiredAD("checkout", env, fid, succ, retired, reason, "", "", carried)
 		sealed, _ = seal.Seal(succKey, raw[:], rad)
 	} else {
 		var raw [32]byte

@@ -122,18 +122,56 @@ func InboxAD(pkg, env, keyID string) ([]byte, error) {
 }
 
 // RetiredAD is the associated data of a retired key sealed under its
-// successor. Its last two lines are the predecessor id and
-// CarriedDigest(carried), so neither the backward link nor the carried list
-// can be edited without breaking the chain.
+// successor. Its last three lines are the predecessor id, the predecessor
+// record's digest and CarriedDigest(carried), so neither the backward link,
+// the older records, nor the carried list can be edited without breaking
+// the chain.
 //
 // predecessorID is the key the retired key replaced ("" for a scope's
 // first key, written as NoPredecessor), so the chain is authenticated in
 // both directions.
-func RetiredAD(pkg, env, retiredID, successorID string, retired time.Time, reason, predecessorID string, carried []string) ([]byte, error) {
+//
+// predecessorDigest is RecordDigest of the predecessor's record as it
+// stood when this key was retired ("" when there is none, written as
+// NoPredecessor): the chain is a hash chain, so no older record can be
+// rewritten without re-sealing every newer one, which needs the key after
+// the newest.
+func RetiredAD(pkg, env, retiredID, successorID string, retired time.Time, reason, predecessorID, predecessorDigest string, carried []string) ([]byte, error) {
 	if predecessorID == "" {
 		predecessorID = NoPredecessor
 	}
-	return AssociatedData(PurposeRetired, pkg, env, retiredID, successorID, FormatTime(retired), reason, predecessorID, CarriedDigest(carried))
+	if predecessorDigest == "" {
+		predecessorDigest = NoPredecessor
+	}
+	return AssociatedData(PurposeRetired, pkg, env, retiredID, successorID, FormatTime(retired), reason, predecessorID, predecessorDigest, CarriedDigest(carried))
+}
+
+// PurposeRecord starts the canonical serialisation of a retired record.
+const PurposeRecord = "carbon/v1/record"
+
+// RecordDigest is the hex SHA-256 of a retired key record's canonical
+// serialisation: these lines joined with "\n", no trailing newline:
+//
+//	carbon/v1/record
+//	<key id>
+//	<created>            RFC 3339 UTC, whole seconds
+//	<retired>            RFC 3339 UTC, whole seconds
+//	<reason>
+//	<successor id>
+//	<predecessor id>     "-" when none
+//	<sealed>             the carbon1: blob as written
+//	<carried digest>     CarriedDigest of its carried list
+//	<inbox_sealed>       the carbon1: blob as written, "-" when absent
+func RecordDigest(id string, created, retired time.Time, reason, successor, predecessor, sealed string, carried []string, inboxSealed string) string {
+	if predecessor == "" {
+		predecessor = NoPredecessor
+	}
+	if inboxSealed == "" {
+		inboxSealed = NoPredecessor
+	}
+	sum := sha256.Sum256([]byte(strings.Join([]string{PurposeRecord, id, FormatTime(created), FormatTime(retired), reason,
+		successor, predecessor, sealed, CarriedDigest(carried), inboxSealed}, "\n")))
+	return hex.EncodeToString(sum[:])
 }
 
 // NoPredecessor is the predecessor line of a scope's first key.

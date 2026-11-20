@@ -186,3 +186,39 @@ func TestRenameKeepsCarriedStatus(t *testing.T) {
 		}
 	}
 }
+
+// A rename rebuilds the hash chain oldest first: after two rotations every
+// retired key still opens under the new name, and a rotation afterwards
+// links to the renamed records.
+func TestRenameRebuildsTheHashChain(t *testing.T) {
+	lin := newPerson(t, "lin/laptop", agewrap.KindHybrid)
+	o := mustCreate(t, t.TempDir(), "old", "prod", lin)
+	o.Seal("a", []byte("A"), t0)
+	o.Rotate(devices(lin), "removed sam", t0.Add(time.Hour))
+	o.Seal("b", []byte("B"), t0.Add(2*time.Hour))
+	o.Rotate(devices(lin), "removed ada", t0.Add(3*time.Hour))
+	s := reload(t, o.Scope)
+	r, err := s.Open(lin.ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Rename("new", devices(lin)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Rotate(devices(lin), "removed kim", t0.Add(4*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	s = reload(t, r.Scope)
+	r, err = s.Open(lin.ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{"a": "A", "b": "B"} {
+		if got := reveal(t, r, name); got != want {
+			t.Fatalf("%s = %q", name, got)
+		}
+		if r.IsUnproven(name, r.Secrets.Entries[name]) {
+			t.Fatalf("%s lost its carried status", name)
+		}
+	}
+}

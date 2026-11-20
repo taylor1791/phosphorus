@@ -64,6 +64,26 @@
       "blob": "carbon1:UFFSU1RVVldYWVpbXF1eX2BhYmNkZWZn6UJVxzwC1IE2aUNADNnqqQr+9RXRV0kZi6IqHhUJNhi3cQVluzOqfQwSQAN0eLBWAiQ4MUM3MckI"
     },
     {
+      "name": "retired-first",
+      "kind": "retired",
+      "key_hex": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "nonce_hex": "6162636465666768696a6b6c6d6e6f707172737475767778",
+      "ad_fields": [
+        "checkout",
+        "prod",
+        "k0b2z7",
+        "k1a8c0",
+        "2026-06-01T10:00:00Z",
+        "removed ada/laptop",
+        "-",
+        "-",
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      ],
+      "associated_data": "carbon/v1/retired\ncheckout\nprod\nk0b2z7\nk1a8c0\n2026-06-01T10:00:00Z\nremoved ada/laptop\n-\n-\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "plaintext_hex": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "blob": "carbon1:YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4jX6/eWXFSfG9eUG2sVBjHn2K3CSxzoe0ciKKcPsx8C5BVpTiYRhTliHdhKg3h4AI"
+    },
+    {
       "name": "retired",
       "kind": "retired",
       "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
@@ -75,15 +95,27 @@
         "k3f9q2",
         "2026-11-02T17:04:11Z",
         "removed sam",
-        "-",
+        "k0b2z7",
+        "4979ebf5ec22ea06e9f2b6bc3e787a6c2e134f95269083f06223b490dd6df610",
         "0167e7504c23f5dcafbd43702bc91d6e064063c51a7e6420623d4e8587c1c6c2"
       ],
-      "associated_data": "carbon/v1/retired\ncheckout\nprod\nk1a8c0\nk3f9q2\n2026-11-02T17:04:11Z\nremoved sam\n-\n0167e7504c23f5dcafbd43702bc91d6e064063c51a7e6420623d4e8587c1c6c2",
+      "associated_data": "carbon/v1/retired\ncheckout\nprod\nk1a8c0\nk3f9q2\n2026-11-02T17:04:11Z\nremoved sam\nk0b2z7\n4979ebf5ec22ea06e9f2b6bc3e787a6c2e134f95269083f06223b490dd6df610\n0167e7504c23f5dcafbd43702bc91d6e064063c51a7e6420623d4e8587c1c6c2",
       "plaintext_hex": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
-      "blob": "carbon1:YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3NVgzpdKN0q+rnnekjf2NMaJvCb+axGTzyIS87Qns+n53R615Oqdh+PpghCRxPOwO",
+      "blob": "carbon1:YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3NVgzpdKN0q+rnnekjf2NMaJvCb+axGTzyIS87Qns+n4Yja1keTA4TT1KtnFy9Zl6",
       "carried": [
         "sha256:b99607f671936afaad63e3c322753b16cbacadf1ed00fb2eb0f62ddcc921bdd4"
-      ]
+      ],
+      "predecessor_record": {
+        "id": "k0b2z7",
+        "created": "2026-01-05T09:00:00Z",
+        "retired": "2026-06-01T10:00:00Z",
+        "reason": "removed ada/laptop",
+        "successor": "k1a8c0",
+        "predecessor": "",
+        "sealed": "carbon1:YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4jX6/eWXFSfG9eUG2sVBjHn2K3CSxzoe0ciKKcPsx8C5BVpTiYRhTliHdhKg3h4AI",
+        "carried": [],
+        "inbox_sealed": ""
+      }
     },
     {
       "name": "value-under-retired-key",

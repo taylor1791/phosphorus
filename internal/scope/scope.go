@@ -388,7 +388,7 @@ func (o *Opened) walkRetired(chain []string) {
 			o.keyErrs[id] = broken
 			continue
 		}
-		ad, err := seal.RetiredAD(o.Package, o.Env, id, r.Successor, r.Retired, r.Reason, r.Predecessor, r.Carried)
+		ad, err := seal.RetiredAD(o.Package, o.Env, id, r.Successor, r.Retired, r.Reason, r.Predecessor, o.Keys.RecordDigest(r.Predecessor), r.Carried)
 		if err != nil {
 			broken = err
 			o.keyErrs[id] = err
@@ -396,7 +396,11 @@ func (o *Opened) walkRetired(chain []string) {
 		}
 		pt, err := seal.Open(o.keys[after], r.Sealed, ad)
 		if err != nil {
-			broken = fmt.Errorf("%w: retired key %s in %s: %v", ErrTampered, id, o.KeysPath(), err)
+			what := "its record was changed"
+			if r.Predecessor != "" {
+				what = "its record, or the record of its predecessor " + r.Predecessor + " that it vouches for, was changed"
+			}
+			broken = fmt.Errorf("%w: retired key %s in %s: %s (%v); restore the keys file from trunk", ErrTampered, id, o.KeysPath(), what, err)
 			o.keyErrs[id] = broken
 			continue
 		}
@@ -729,7 +733,7 @@ func (o *Opened) Rotate(devices []policy.Device, reason string, now time.Time) (
 		predecessor = chain[0]
 	}
 	carried := o.CarriedBy(oldID)
-	ad, err := seal.RetiredAD(o.Package, o.Env, oldID, newID, now, reason, predecessor, carried)
+	ad, err := seal.RetiredAD(o.Package, o.Env, oldID, newID, now, reason, predecessor, o.Keys.RecordDigest(predecessor), carried)
 	if err != nil {
 		return "", err
 	}

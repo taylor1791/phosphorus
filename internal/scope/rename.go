@@ -84,7 +84,18 @@ func (o *Opened) Rename(newPkg string, devices []policy.Device) error {
 	}
 
 	keys := map[string]*store.Key{}
-	for _, id := range o.Keys.IDs() {
+	// Oldest first: each retired record's associated data holds the
+	// digest of its predecessor's record, which the rename re-writes.
+	chain, err := o.Keys.Chain()
+	if err != nil {
+		return fmt.Errorf("rename stopped before changing anything: %w: %v", ErrTampered, err)
+	}
+	order := []string{}
+	for i := len(chain) - 1; i >= 0; i-- {
+		order = append(order, chain[i])
+	}
+	order = append(order, o.Keys.Current)
+	for _, id := range order {
 		r := o.Keys.Keys[id]
 		k, err := o.key(id)
 		if err != nil {
@@ -123,7 +134,11 @@ func (o *Opened) Rename(newPkg string, devices []policy.Device) error {
 				}
 			}
 			sort.Strings(nr.Carried)
-			ad, err := seal.RetiredAD(newPkg, o.Env, id, r.Successor, r.Retired, r.Reason, r.Predecessor, nr.Carried)
+			predDigest := ""
+			if p := keys[r.Predecessor]; r.Predecessor != "" && p != nil {
+				predDigest = seal.RecordDigest(r.Predecessor, p.Created, p.Retired, p.Reason, p.Successor, p.Predecessor, p.Sealed, p.Carried, p.InboxSealed)
+			}
+			ad, err := seal.RetiredAD(newPkg, o.Env, id, r.Successor, r.Retired, r.Reason, r.Predecessor, predDigest, nr.Carried)
 			if err != nil {
 				return err
 			}

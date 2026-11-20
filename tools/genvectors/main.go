@@ -29,6 +29,40 @@ type vector struct {
 	// Carried is the retired key's carried list, for a retired vector; its
 	// digest is the last associated data field.
 	Carried []string `json:"carried,omitempty"`
+	// PredecessorRecord is the predecessor's retired record, for a retired
+	// vector that has one; its digest is the next-to-last field.
+	PredecessorRecord *record `json:"predecessor_record,omitempty"`
+}
+
+// record is a retired key record, as in a keys file.
+type record struct {
+	ID          string   `json:"id"`
+	Created     string   `json:"created"`
+	Retired     string   `json:"retired"`
+	Reason      string   `json:"reason"`
+	Successor   string   `json:"successor"`
+	Predecessor string   `json:"predecessor"`
+	Sealed      string   `json:"sealed"`
+	Carried     []string `json:"carried"`
+	InboxSealed string   `json:"inbox_sealed"`
+}
+
+func hexSum(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+// digest is the record digest of docs/format.md, computed from the spec.
+func (r *record) digest() string {
+	return hexSum(strings.Join([]string{"carbon/v1/record", r.ID, r.Created, r.Retired, r.Reason, r.Successor,
+		orDash(r.Predecessor), r.Sealed, hexSum(strings.Join(r.Carried, "\n")), orDash(r.InboxSealed)}, "\n"))
 }
 
 func seq(start byte, n int) []byte {
@@ -71,9 +105,20 @@ func main() {
 	lineSum := sha256.Sum256([]byte(line))
 	carried := []string{"sha256:" + hex.EncodeToString(lineSum[:])}
 	digest := sha256.Sum256([]byte(strings.Join(carried, "\n")))
+	// The scope's first key k0b2z7, retired in favour of k1a8c0 and sealed
+	// under it: no predecessor, nothing carried.
+	olderKey := seq(0xc0, 32)
+	first := mk("retired-first", "retired", retiredKey, 0x61, olderKey,
+		"checkout", "prod", "k0b2z7", "k1a8c0", "2026-06-01T10:00:00Z", "removed ada/laptop", "-", "-", hexSum(""))
+	first.Carried = []string{}
+	firstRec := &record{ID: "k0b2z7", Created: "2026-01-05T09:00:00Z", Retired: "2026-06-01T10:00:00Z", Reason: "removed ada/laptop",
+		Successor: "k1a8c0", Sealed: first.Blob, Carried: []string{}}
+	// k1a8c0, retired in favour of k3f9q2: its predecessor is k0b2z7, and
+	// the digest of k0b2z7's record is in its associated data.
 	retired := mk("retired", "retired", scopeKey, 0x60, retiredKey,
-		"checkout", "prod", "k1a8c0", "k3f9q2", "2026-11-02T17:04:11Z", "removed sam", "-", hex.EncodeToString(digest[:]))
+		"checkout", "prod", "k1a8c0", "k3f9q2", "2026-11-02T17:04:11Z", "removed sam", "k0b2z7", firstRec.digest(), hex.EncodeToString(digest[:]))
 	retired.Carried = carried
+	retired.PredecessorRecord = firstRec
 
 	doc := struct {
 		Comment string   `json:"comment"`
@@ -89,6 +134,7 @@ func main() {
 				"checkout", "dev", "multi_line", "k3f9q2", "2026-01-01T00:00:00Z"),
 			mk("inbox", "inbox", scopeKey, 0x50, []byte(inboxIdentity),
 				"checkout", "prod", "k3f9q2"),
+			first,
 			retired,
 			underRetired,
 		},
