@@ -125,7 +125,7 @@ func againstTrunk(sf *ScopeFiles, base Finding, ref string) []Finding {
 		return nil
 	}
 	if k, ok := sf.TrunkKeys.Keys[sf.Keys.Current]; ok && k.IsRetired() {
-		return nil // behind trunk (or a rollback, reported as key.changed)
+		return behindTrunk(sf, base, k)
 	}
 	var out []Finding
 	tk := sf.TrunkKeys
@@ -218,6 +218,42 @@ func (s *State) futureFindings(now time.Time) []Finding {
 					kindOf(e.IsDrop()), name, sf.Name(), e.Set.Format("2006-01-02T15:04:05Z")),
 				Hint: fmt.Sprintf("Restore the line from trunk, or set the value again: carbon set %s --package %s --env %s", name, sf.Package.Name, sf.Env)})
 		}
+	}
+	return out
+}
+
+// behindTrunk judges a branch whose current key trunk has retired (the
+// branch is behind trunk, or rolled back): every entry under that key must
+// be one trunk's retired record carried. A line it did not carry was
+// written under a key trunk has retired, by someone who held it: a new
+// name is unproven (banner), and a different line for a name trunk has is
+// secret.rolled-back.
+func behindTrunk(sf *ScopeFiles, base Finding, tr *store.Key) []Finding {
+	var out []Finding
+	carried := map[string]bool{}
+	for _, h := range tr.Carried {
+		carried[h] = true
+	}
+	for _, name := range sf.Secrets.Names() {
+		e := sf.Secrets.Entries[name]
+		if e.Key != sf.Keys.Current || carried[store.LineHash(name, e)] {
+			continue
+		}
+		f := base
+		f.Secret, f.File = name, sf.SecretFile
+		set := e.Set
+		f.Set = &set
+		fix := fmt.Sprintf("Merge trunk, then set it again (carbon set %s --package %s --env %s); that clears it.", name, sf.Package.Name, sf.Env)
+		if te, ok := sf.TrunkSecrets.Lookup(name); ok && te != e {
+			f.Severity, f.Rule = Error, RuleSecretRolledBack
+			f.Message = fmt.Sprintf("%s in %s is sealed under key %s, which trunk has retired (this branch is behind trunk), and differs from every line that key carried. carbon cannot tell an edit made before the rotation from a value forged by someone who kept that key (which may be a removed reader).", name, sf.Name(), e.Key)
+			f.Hint = fix + " If the value is known good, a reader can instead run `carbon apply --reseal-unproven` after merging trunk."
+		} else {
+			f.Severity, f.Rule = Warning, RuleSecretStaleKey
+			f.Message = fmt.Sprintf("The %s of %s in %s is under key %s, which trunk has retired (this branch is behind trunk), and that key did not carry it: whoever wrote it held the retired key, so its author is unproven.", kindOf(e.IsDrop()), name, sf.Name(), e.Key)
+			f.Hint = fix
+		}
+		out = append(out, f)
 	}
 	return out
 }

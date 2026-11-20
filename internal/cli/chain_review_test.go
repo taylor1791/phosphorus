@@ -86,3 +86,52 @@ func TestRewritingAnOlderRetiredRecordIsDetected(t *testing.T) {
 	_ = time.Now
 	_ = strings.Contains
 }
+
+// Finding 2: on a branch behind trunk, check judges the entries under the
+// branch's current key (which trunk retired) against what trunk's record
+// for that key carried.
+func TestBehindBranchIsJudged(t *testing.T) {
+	w := clitest.Standard(t)
+	co := w.PkgDir
+	setAll(t, w)
+	pre := w.Git("rev-parse", "HEAD")
+	k1id, k1 := samOldKey(t, w, w.Read(co+"/.carbon/dev.keys.toml"), "checkout/dev")
+
+	// An honest branch, cut before the removal, adds a secret.
+	w.Branch("api-token")
+	w.Replace(co+"/carbon.toml", "[secrets]\n", "[secrets]\napi_token = { description = \"partner API token\" }\n")
+	for _, env := range []string{"dev", "staging", "prod"} {
+		w.Lin.In(co).Stdin("tok_"+env).Must("set", "api_token", "--env", env)
+	}
+	w.Commit("add api_token")
+	w.Checkout("main")
+	w.Ada.Must("remove", "sam", "--yes")
+	w.Commit("remove sam")
+	w.Lin.Must("apply", "--yes")
+	ci(t, w.Repo, 0)
+
+	w.Checkout("api-token") // behind trunk, not merged
+	cj := ci(t, w.Repo, 0)
+	cj.has(t, "secret.stale-key", "warning checkout/dev api_token", "warning checkout/staging api_token")
+	cj.lacks(t, "secret.rolled-back")
+	res := w.Anyone().Must("check")
+	mustContain(t, "check", res.Stdout, "TO REVIEW", "Merge trunk, then set it again")
+
+	// sam, holding K1, changes a value on a branch cut before the rotation.
+	w.Git("checkout", "-q", "-b", "sam-old", strings.TrimSpace(pre))
+	sf := co + "/.carbon/dev.secrets.toml"
+	ss, _ := store.ParseSecrets("s", []byte(w.Read(sf)))
+	name := "stripe_api_key"
+	set := ss.Entries[name].Set.Add(time.Second)
+	vad, _ := seal.ValueAD("checkout", "dev", name, k1id, set)
+	blob, _ := seal.Seal(k1, []byte("sk_EVIL_BEHIND"), vad)
+	ss.Entries[name] = store.Entry{Key: k1id, Set: set, Value: blob}
+	w.Write(sf, string(ss.Marshal()))
+	w.Commit("tweak")
+	ci(t, w.Repo, 4).has(t, "secret.rolled-back", "error checkout/dev stripe_api_key")
+	// The merge result, which is what CI must check, says the same.
+	w.Checkout("main")
+	w.Git("checkout", "-q", "-b", "merge-result")
+	w.Merge("sam-old")
+	ci(t, w.Repo, 4).has(t, "secret.rolled-back", "error checkout/dev stripe_api_key")
+}
