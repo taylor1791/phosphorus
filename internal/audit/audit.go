@@ -89,6 +89,7 @@ const (
 	RuleInboxNotPQ            = "inbox.not-pq"
 	RuleKeyChanged            = "key.changed"
 	RuleKeyRetiredChanged     = "key.retired-changed"
+	RuleKeyRetiredAdded       = "key.retired-added"
 	RuleKeyUnverified         = "key.unverified"
 	RuleKeyRemoved            = "key.removed"
 	RuleKeyBehindTrunk        = "key.behind-trunk"
@@ -168,6 +169,7 @@ var Rules = []RuleInfo{
 	{RuleDeviceNotPQ, Error, "under require_pq, a device policy names has a key that is not hybrid", false},
 	{RuleInboxNotPQ, Error, "under require_pq, the scope's inbox key is not hybrid", false},
 	{RuleKeyChanged, Error, "the scope key or inbox differs from trunk's in a way `carbon apply` never writes (rollback, unjustified or malformed rotation)", false},
+	{RuleKeyRetiredAdded, Error, "a retired key record trunk does not have was added, other than the one a rotation of trunk's current key writes", false},
 	{RuleKeyRetiredChanged, Error, "a retired key record trunk has is changed or deleted (retired records are append-only)", false},
 	{RuleKeyUnverified, Error, "the branch uses a key trunk retired and check cannot see the merge base to prove the keys file is unchanged", false},
 	{RuleKeyRemoved, Error, "a keys file trunk has is gone while its scope exists, or stays while its scope was removed", false},

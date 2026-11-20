@@ -256,8 +256,25 @@ func (s *State) slotFindings() []Finding {
 			out = append(out, f)
 		}
 
+		// A new scope key has no history: any retired record in it was
+		// made up.
+		if reviewed && tk == nil {
+			for _, id := range sf.Keys.IDs() {
+				if sf.Keys.Keys[id].IsRetired() {
+					out = append(out, retiredAdded(base, sf, id, "a new scope key has no retired keys"))
+				}
+			}
+		}
 		if !reviewed || tk == nil || behind || rolledBack {
 			continue
+		}
+		// The only retired record a change may add is the one that retires
+		// trunk's current key in a rotation (judged by the rotation rules).
+		for _, id := range sf.Keys.IDs() {
+			if _, onTrunk := tk.Keys[id]; onTrunk || !sf.Keys.Keys[id].IsRetired() {
+				continue
+			}
+			out = append(out, retiredAdded(base, sf, id, "trunk does not have it, and only the record that retires trunk's current key "+tk.Current+" may be added"))
 		}
 		// Retired records are append-only.
 		for _, id := range tk.IDs() {
@@ -343,6 +360,10 @@ func rotationProblems(sf *ScopeFiles, tk *store.Keys, sa *policy.ScopeAccess, el
 		probs = append(probs, fmt.Sprintf("trunk's key %s is not kept as a retired record", tk.Current))
 	case old.Successor == "" || old.Reason == "" || old.Sealed == "":
 		probs = append(probs, fmt.Sprintf("retired key %s lacks successor, reason or sealed", tk.Current))
+	case old.Predecessor != trunkPredecessor(tk):
+		probs = append(probs, fmt.Sprintf("retired key %s names predecessor %q, but trunk's chain makes it %q", tk.Current, old.Predecessor, trunkPredecessor(tk)))
+	case chainErr(wt) != nil:
+		probs = append(probs, chainErr(wt).Error())
 	default:
 		// The reason must be the one apply writes from trunk's key and
 		// trunk policy (shared code), so it cannot name the wrong person.
@@ -585,4 +606,26 @@ func proposedFindings(base Finding, sf *ScopeFiles, trunk, wt *policy.ScopeAcces
 		out = append(out, f)
 	}
 	return out
+}
+
+// trunkPredecessor is the id of the key trunk's current key replaced: the
+// newest record on trunk's chain, "" when trunk's key is the scope's first.
+func trunkPredecessor(tk *store.Keys) string {
+	if chain, err := tk.Chain(); err == nil && len(chain) > 0 {
+		return chain[0]
+	}
+	return ""
+}
+
+func chainErr(ks *store.Keys) error {
+	_, err := ks.Chain()
+	return err
+}
+
+func retiredAdded(base Finding, sf *ScopeFiles, id, why string) Finding {
+	f := base
+	f.Severity, f.Rule, f.File = Error, RuleKeyRetiredAdded, sf.KeysFile
+	f.Message = fmt.Sprintf("Retired key %s in %s was added here: %s. A retired record decides which values count as carried, and only someone holding a retired key could seal one.", id, sf.Name(), why)
+	f.Hint = fmt.Sprintf("Remove [keys.%s] from %s (or restore the file from trunk: git checkout <trunk> -- %s).", id, sf.KeysFile, sf.KeysFile)
+	return f
 }

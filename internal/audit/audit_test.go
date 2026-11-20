@@ -31,7 +31,7 @@ func TestRulesListEveryRuleOnce(t *testing.T) {
 		}
 		seen[r.ID] = true
 	}
-	if len(seen) != 60 {
+	if len(seen) != 61 {
 		t.Fatalf("%d rules; update this test when adding one", len(seen))
 	}
 }

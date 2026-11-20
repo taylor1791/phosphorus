@@ -411,3 +411,22 @@ func TestRotationCarriesExactlyTrunksEntries(t *testing.T) {
 	f.save(o.Scope)
 	none(t, f.check(Options{}), RuleKeyChanged)
 }
+
+// A rotation's retired record must name as predecessor the key trunk's
+// chain implies, and a branch may add no other retired record.
+func TestRotationPredecessorAndAddedRecords(t *testing.T) {
+	f := newFx(t)
+	removeSam(f)
+	rotateDev(t, f, "removed sam", now)
+	keys := f.read("svc/app/.carbon/dev.keys.toml")
+	f.write("svc/app/.carbon/dev.keys.toml", regexp.MustCompile(`(successor = "k[a-z0-9]{5}"\n)`).ReplaceAllString(keys, `${1}predecessor = "kzzzzz"`+"\n"))
+	got := want(t, f.check(Options{}), RuleKeyChanged, Error)
+	if !strings.Contains(got.Message, "predecessor") {
+		t.Fatal(got.Message)
+	}
+	// An extra retired record next to a correct rotation.
+	f.write("svc/app/.carbon/dev.keys.toml", keys+"\n[keys.kfake9]\ncreated = 2026-01-01T00:00:00Z\nretired = 2026-01-02T00:00:00Z\nreason = \"x\"\nsuccessor = \""+
+		regexp.MustCompile(`current = "(k[a-z0-9]{5})"`).FindStringSubmatch(keys)[1]+"\"\nsealed = \"carbon1:AAAA\"\ncarried = []\n")
+	rep := f.check(Options{})
+	want(t, rep, RuleKeyRetiredAdded, Error)
+}

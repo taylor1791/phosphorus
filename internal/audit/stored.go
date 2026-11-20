@@ -87,6 +87,31 @@ func (s *State) storedFindings() []Finding {
 			}
 			out = append(out, f)
 		}
+		// A carried list vouches for lines that were there at the rotation;
+		// check counts it only for a line trunk still has, for that name.
+		// A carried line copied back after trunk deleted it (or under a new
+		// name) is as unproven as any other line under a retired key.
+		if s.TrunkIsReviewed() && sf.RenamedFrom == "" {
+			for _, name := range sf.Secrets.Names() {
+				e := sf.Secrets.Entries[name]
+				if e.Key == sf.Keys.Current || sc.IsUnproven(name, e) {
+					continue // current, or already reported above
+				}
+				if sf.TrunkSecrets != nil && sf.TrunkSecrets.Entries[name] == e {
+					continue
+				}
+				if te, ok := sf.TrunkSecrets.Lookup(name); ok && te.Key == e.Key {
+					continue // replaced under the same retired key: secret.rolled-back
+				}
+				f := base
+				f.Severity, f.Rule, f.Secret, f.File = Warning, RuleSecretStaleKey, name, sf.SecretFile
+				set := e.Set
+				f.Set = &set
+				f.Message = fmt.Sprintf("The %s of %s in %s is under retired key %s, and trunk does not have this line for %s: a retired key's carried list vouches only for lines still on trunk, so its author is unproven (a removed reader may hold that key).", kindOf(e.IsDrop()), name, sf.Name(), e.Key, name)
+				f.Hint = "A reader of " + sf.Name() + " sets it again (carbon set " + name + " --package " + p.Name + " --env " + sf.Env + "), or vouches for it with `carbon apply --reseal-unproven`."
+				out = append(out, f)
+			}
+		}
 	}
 	return out
 }
@@ -128,8 +153,8 @@ func againstTrunk(sf *ScopeFiles, base Finding, ref string) []Finding {
 				// rotation carried): a different line there could only be
 				// written by someone holding the retired key.
 				f.Severity, f.Rule = Error, RuleSecretRolledBack
-				f.Message = fmt.Sprintf("%s in %s was replaced under retired key %s: only someone holding that key, which may be a removed reader, can write there.", name, sf.Name(), we.Key)
-				f.Hint = "Restore trunk's line for " + name + " in " + sf.SecretFile + "; a reader sets a new value with `carbon set` if it must change."
+				f.Message = fmt.Sprintf("%s in %s is sealed under key %s, which trunk has retired, and differs from trunk's line. carbon cannot tell an edit made on a branch cut before the rotation from a value forged by someone who kept that key (which may be a removed reader).", name, sf.Name(), we.Key)
+				f.Hint = fmt.Sprintf("Merge trunk and set it again: carbon set %s --package %s --env %s. If the value is known good, a reader can instead run `carbon apply --reseal-unproven`. Or restore trunk's line in %s.", name, sf.Package.Name, sf.Env, sf.SecretFile)
 				out = append(out, f)
 				continue
 			}
