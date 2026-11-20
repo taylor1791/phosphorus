@@ -15,9 +15,16 @@ func init() {
 		Summary: "List secret names and their state",
 		Help: `ls lists the package's declared and stored secrets in one environment, with
 no key needed. States: sealed (set by a reader), drop (in the inbox, not yet
-reviewed), stale (under a retired key: the author is unproven, since a
-removed reader may still hold that key), unset (declared, no value), and
-undeclared (stored, not declared).`,
+reviewed), stale (under a retired key that did not carry it: the author is
+unproven, since a removed reader may still hold that key), unset (declared,
+no value), and undeclared (stored, not declared). A value a rotation left
+under the old key, which that key's record carries, is shown as "sealed
+(retired key)" with the old key id.
+
+ls opens nothing, so these states come from the files' structure alone: a
+retired record that would fail authentication looks the same here. carbon
+check (against trunk) and the commands that open the scope (get, run,
+export, apply) are authoritative.`,
 		Run: runLs,
 	})
 }
@@ -31,7 +38,10 @@ type lsEntry struct {
 	Private  bool   `json:"private"`
 	// Unproven: under a retired key, so its author is not proven to be a
 	// current reader. SetAfterRetired: and set after that key was retired.
-	Unproven        bool   `json:"unproven"`
+	Unproven bool `json:"unproven"`
+	// RetiredKey: stored under a key other than the current one (carried
+	// or not). Judged from the files alone; ls opens nothing.
+	RetiredKey      bool   `json:"retired_key"`
 	SetAfterRetired bool   `json:"set_after_retired"`
 	KeyID           string `json:"key,omitempty"`
 	Set             string `json:"set,omitempty"`
@@ -64,7 +74,8 @@ func runLs(c *Context) error {
 	for _, st := range s.List(pkg.Secrets) {
 		e := lsEntry{Name: st.Name, State: st.State(), Declared: st.Declared, Stored: st.Stored,
 			Drop: st.Drop, Private: st.Private, KeyID: st.KeyID,
-			Unproven: st.Unproven, SetAfterRetired: st.SetAfterRetired}
+			Unproven: st.Unproven, SetAfterRetired: st.SetAfterRetired,
+			RetiredKey: st.Stored && s.HasKey() && st.KeyID != s.Keys.Current}
 		if st.Stored {
 			e.Set = seal.FormatTime(st.Set)
 		}
@@ -79,6 +90,9 @@ func runLs(c *Context) error {
 		rows := [][]string{{"NAME", "STATE", "SET", "KEY"}}
 		for _, e := range res.Secrets {
 			state := e.State
+			if e.RetiredKey && (state == "sealed" || state == "drop") {
+				state += " (retired key)"
+			}
 			if e.Unproven {
 				state = "stale: retired key, author unproven"
 				if e.SetAfterRetired {

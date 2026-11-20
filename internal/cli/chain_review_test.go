@@ -3,6 +3,7 @@ package cli_test
 // Regression tests for the chain re-review.
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -134,4 +135,32 @@ func TestBehindBranchIsJudged(t *testing.T) {
 	w.Git("checkout", "-q", "-b", "merge-result")
 	w.Merge("sam-old")
 	ci(t, w.Repo, 4).has(t, "secret.rolled-back", "error checkout/dev stripe_api_key")
+}
+
+// Finding 3: ls opens nothing, so a carried value under a retired key is
+// shown with a neutral marker and its key id, never as plain "sealed".
+func TestLsMarksCarriedValuesUnderRetiredKeys(t *testing.T) {
+	w := clitest.Standard(t)
+	co := w.PkgDir
+	setAll(t, w)
+	w.Ada.Must("remove", "sam", "--yes")
+	w.Commit("remove sam")
+	w.Lin.Must("apply", "--yes")
+	ks, _ := store.ParseKeys("k", []byte(w.Read(co+"/.carbon/dev.keys.toml")))
+	old := ks.Keys[ks.Current].Predecessor
+	if old == "" {
+		chain, _ := ks.Chain()
+		old = chain[0]
+	}
+	res := w.Anyone().In(co).Must("ls", "--env", "dev")
+	mustContain(t, "ls", res.Stdout, "sealed (retired key)", old)
+	mustNotContain(t, "ls", res.Stdout, "unproven")
+	nextSecond()
+	w.Lin.In(co).Stdin("sk_new").Must("set", "stripe_api_key", "--env", "dev")
+	res = w.Anyone().In(co).Must("ls", "--env", "dev")
+	if !regexp.MustCompile(`(?m)^stripe_api_key\s+sealed\s+\S+\s+` + ks.Current + `$`).MatchString(res.Stdout) {
+		t.Fatalf("a value under the current key:\n%s", res.Stdout)
+	}
+	help := w.Anyone().Must("ls", "--help").Stdout
+	mustContain(t, "ls --help", help, "structure alone", "authoritative")
 }
