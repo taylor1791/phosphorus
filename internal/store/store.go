@@ -166,7 +166,12 @@ type Key struct {
 	Retired   time.Time
 	Reason    string
 	Successor string
-	Sealed    string
+	// Predecessor is the id of the key this key replaced, "" for a
+	// scope's first key. Authenticated in Sealed's associated data, it
+	// links the chain backwards, so a record that claims a successor it
+	// was never the predecessor of is detected.
+	Predecessor string
+	Sealed      string
 	// Carried lists, for a retired key, the LineHash of every entry that
 	// was under it when it was retired, sorted. Entries under a retired
 	// key that are not listed were added later: their author is unproven.
@@ -198,6 +203,7 @@ type keyTOML struct {
 	Retired     *time.Time          `toml:"retired"`
 	Reason      string              `toml:"reason"`
 	Successor   string              `toml:"successor"`
+	Predecessor string              `toml:"predecessor"`
 	Sealed      string              `toml:"sealed"`
 	Carried     *[]string           `toml:"carried"`
 }
@@ -243,7 +249,7 @@ func ParseKeys(path string, data []byte) (*Keys, error) {
 			return nil, fail("[keys.%s]: not a key id", id)
 		}
 		k := &Key{Inbox: r.Inbox, InboxSealed: r.InboxSealed, Slots: map[string]string{}, SlotTo: map[string]string{},
-			Reason: r.Reason, Successor: r.Successor, Sealed: r.Sealed}
+			Reason: r.Reason, Successor: r.Successor, Predecessor: r.Predecessor, Sealed: r.Sealed}
 		if r.Created == nil {
 			return nil, fail("[keys.%s]: missing created", id)
 		}
@@ -268,6 +274,8 @@ func ParseKeys(path string, data []byte) (*Keys, error) {
 				return nil, fail("[keys.%s] is retired without a reason", id)
 			case strings.ContainsAny(k.Reason, "\r\n"):
 				return nil, fail("[keys.%s] reason contains a newline", id)
+			case k.Predecessor != "" && (!config.ValidKeyID(k.Predecessor) || k.Predecessor == id):
+				return nil, fail("[keys.%s] predecessor is not a valid key id", id)
 			case !config.ValidKeyID(k.Successor):
 				return nil, fail("[keys.%s] is retired without a valid successor", id)
 			case !strings.HasPrefix(k.Sealed, "carbon1:"):
@@ -288,7 +296,7 @@ func ParseKeys(path string, data []byte) (*Keys, error) {
 			switch {
 			case r.Carried != nil:
 				return nil, fail("[keys.%s] has a carried list but no retired time", id)
-			case k.Reason != "" || k.Successor != "" || k.Sealed != "":
+			case k.Reason != "" || k.Successor != "" || k.Sealed != "" || k.Predecessor != "":
 				return nil, fail("[keys.%s] has retirement fields but no retired time", id)
 			case k.Inbox == "":
 				return nil, fail("[keys.%s] has no inbox", id)
@@ -350,6 +358,9 @@ func (k *Keys) Marshal() []byte {
 			fmt.Fprintf(&b, "retired = %s\n", formatTime(r.Retired))
 			fmt.Fprintf(&b, "reason = %s\n", config.Quote(r.Reason))
 			fmt.Fprintf(&b, "successor = %s\n", config.Quote(r.Successor))
+			if r.Predecessor != "" {
+				fmt.Fprintf(&b, "predecessor = %s\n", config.Quote(r.Predecessor))
+			}
 			fmt.Fprintf(&b, "sealed = %s\n", config.Quote(r.Sealed))
 			q := make([]string, len(r.Carried))
 			for i, h := range r.Carried {
@@ -533,4 +544,81 @@ func oldSlotForm(loose map[string]any) (string, string, bool) {
 		}
 	}
 	return "", "", false
+}
+
+// ChainError names a retired record that is not on the scope's chain of
+// keys: another record already holds its place, or nothing links to it.
+type ChainError struct {
+	ID  string
+	Why string
+}
+
+func (e *ChainError) Error() string {
+	return fmt.Sprintf("retired key %s is not on this scope's chain of keys: %s", e.ID, e.Why)
+}
+
+// Chain returns the retired key ids on the chain back from the current
+// key, newest first: the one record whose successor is the current key,
+// then, from each record, the record its Predecessor names, which must
+// have that record as its successor. Every other retired record is an
+// error (*ChainError): a second record claiming the same successor, or a
+// record nothing reaches. Readers authenticate each link when they open
+// the chain (Predecessor is in the associated data); Chain checks only the
+// structure, which is what keyless callers can see.
+func (k *Keys) Chain() ([]string, error) {
+	claims := map[string][]string{}
+	for _, id := range k.IDs() {
+		if r := k.Keys[id]; r.IsRetired() {
+			claims[r.Successor] = append(claims[r.Successor], id)
+		}
+	}
+	var chain []string
+	on := map[string]bool{}
+	at := k.Current
+	next := ""
+	if c := claims[at]; len(c) > 1 {
+		return nil, &ChainError{ID: c[1], Why: fmt.Sprintf("%s and %s both claim to be the key that %s replaced", c[0], c[1], at)}
+	} else if len(c) == 1 {
+		next = c[0]
+	}
+	for next != "" {
+		if on[next] {
+			return nil, &ChainError{ID: next, Why: "the predecessors form a cycle"}
+		}
+		r := k.Keys[next]
+		for _, other := range claims[at] {
+			if other != next {
+				return nil, &ChainError{ID: other, Why: fmt.Sprintf("it claims %s as its successor, but %s names %s as its predecessor", at, at, next)}
+			}
+		}
+		chain = append(chain, next)
+		on[next] = true
+		at = next
+		next = r.Predecessor
+		if next == "" {
+			if c := claims[at]; len(c) > 0 {
+				return nil, &ChainError{ID: c[0], Why: fmt.Sprintf("it claims %s as its successor, but %s was the scope's first key", at, at)}
+			}
+			break
+		}
+		p, ok := k.Keys[next]
+		if !ok || !p.IsRetired() || p.Successor != at {
+			return nil, &ChainError{ID: at, Why: fmt.Sprintf("its predecessor %s is missing or does not name it as successor", next)}
+		}
+	}
+	for _, id := range k.IDs() {
+		if k.Keys[id].IsRetired() && !on[id] {
+			return nil, &ChainError{ID: id, Why: "no key on the chain names it as its predecessor"}
+		}
+	}
+	return chain, nil
+}
+
+// Lookup returns the entry for name; it is safe on a nil *Secrets.
+func (s *Secrets) Lookup(name string) (Entry, bool) {
+	if s == nil {
+		return Entry{}, false
+	}
+	e, ok := s.Entries[name]
+	return e, ok
 }

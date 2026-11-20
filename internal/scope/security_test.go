@@ -5,6 +5,7 @@ package scope
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -128,7 +129,7 @@ func TestVerifyTrunk(t *testing.T) {
 		fk.Keys[fk.Current] = rec
 		ek := cloneKeys(t, evil.Keys)
 		retired := &store.Key{Created: t0, Retired: t0.Add(time.Hour), Reason: "x", Successor: ek.Current, Carried: []string{}}
-		ad, _ := seal.RetiredAD("checkout", "prod", trunk.Current, ek.Current, retired.Retired, retired.Reason, retired.Carried)
+		ad, _ := seal.RetiredAD("checkout", "prod", trunk.Current, ek.Current, retired.Retired, retired.Reason, "", retired.Carried)
 		retired.Sealed, _ = seal.Seal(evil.keys[evil.CurrentID()], fake.keys[fake.CurrentID()][:], ad)
 		ek.Keys[trunk.Current] = retired
 		es := &Scope{Package: "checkout", Env: "prod", Dir: o.Dir, Keys: ek, Secrets: store.NewSecrets()}
@@ -311,5 +312,63 @@ func TestDiffSlotsByRecipient(t *testing.T) {
 	d = o2.DiffSlots(devices(lin))
 	if len(d.Rekeyed) != 1 || len(d.Extra) != 1 || d.Extra[0] != "lin/laptop" {
 		t.Fatalf("relabelled slot: %+v", d)
+	}
+}
+
+// A removed reader who kept a retired key cannot forge a record that
+// carries a value of his choosing: the chain is authenticated backwards
+// (each retired key names its predecessor in its associated data), and a
+// record off the chain makes the scope refuse, naming it.
+func TestForgedRetiredRecordIsRefused(t *testing.T) {
+	lin := newPerson(t, "lin/laptop", agewrap.KindHybrid)
+	sam := newPerson(t, "sam/laptop", agewrap.KindHybrid)
+	o := mustCreate(t, t.TempDir(), "checkout", "dev", lin, sam)
+	o.Seal("a", []byte("v"), t0)
+	k1 := o.CurrentID()
+	samKey := *o.keys[k1]
+	if _, err := o.Rotate(devices(lin), "removed sam", t0.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := o.Rotate(devices(lin), "removed ada/laptop", t0.Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	s := reload(t, o.Scope)
+	if s.Keys.Keys[k1].Predecessor != "" {
+		t.Fatal("first key has a predecessor")
+	}
+	chain, err := s.Keys.Chain()
+	if err != nil || len(chain) != 2 || chain[1] != k1 || s.Keys.Keys[chain[0]].Predecessor != k1 {
+		t.Fatalf("chain %v %v", chain, err)
+	}
+	// sam forges kfake9 -> k1 with a fresh key sealed under k1, carrying
+	// a value of his choosing.
+	fake, _ := seal.NewKey()
+	set := t0.Add(30 * time.Minute)
+	vad, _ := seal.ValueAD("checkout", "dev", "forged", "kfake9", set)
+	blob, _ := seal.Seal(fake, []byte("evil"), vad)
+	e := store.Entry{Key: "kfake9", Set: set, Value: blob}
+	carried := []string{store.LineHash("forged", e)}
+	rad, _ := seal.RetiredAD("checkout", "dev", "kfake9", k1, t0.Add(time.Hour), "rekeyed sam/laptop", "", carried)
+	sealed, _ := seal.Seal(&samKey, fake[:], rad)
+	s.Keys.Keys["kfake9"] = &store.Key{Created: t0, Retired: t0.Add(time.Hour), Reason: "rekeyed sam/laptop", Successor: k1, Sealed: sealed, Carried: carried}
+	s.Secrets.Entries["forged"] = e
+	if _, err := s.Open(lin.ids); !errors.Is(err, ErrTampered) || !strings.Contains(err.Error(), "kfake9") {
+		t.Fatalf("Open with a forged record: %v", err)
+	}
+	if !s.IsUnproven("forged", e) {
+		t.Fatal("a value carried by a record off the chain counts as carried")
+	}
+	// Rewriting k1's predecessor to point at the forgery breaks k1's
+	// authentication instead.
+	s.Keys.Keys[k1].Predecessor = "kfake9"
+	r, err := s.Open(lin.ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reveal("a"); !errors.Is(err, ErrTampered) {
+		t.Fatalf("value under a record with an edited predecessor: %v", err)
+	}
+	if _, err := r.Reveal("forged"); err == nil {
+		t.Fatal("the forged value opened")
 	}
 }

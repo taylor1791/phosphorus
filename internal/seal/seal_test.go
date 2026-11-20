@@ -29,9 +29,9 @@ func TestAssociatedDataExact(t *testing.T) {
 		t.Fatalf("inbox AD = %q", ad)
 	}
 
-	ad, _ = RetiredAD("checkout", "prod", "k1a8c0", "k3f9q2", setTime, "removed sam", nil)
+	ad, _ = RetiredAD("checkout", "prod", "k1a8c0", "k3f9q2", setTime, "removed sam", "", nil)
 	// An empty carried list hashes the empty string.
-	if string(ad) != "carbon/v1/retired\ncheckout\nprod\nk1a8c0\nk3f9q2\n2026-11-02T17:04:11Z\nremoved sam\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" {
+	if string(ad) != "carbon/v1/retired\ncheckout\nprod\nk1a8c0\nk3f9q2\n2026-11-02T17:04:11Z\nremoved sam\n-\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" {
 		t.Fatalf("retired AD = %q", ad)
 	}
 }
@@ -170,10 +170,14 @@ func vectorAD(t *testing.T, v vector) []byte {
 	case "inbox":
 		ad, err = InboxAD(f[0], f[1], f[2])
 	case "retired":
-		if got := CarriedDigest(v.Carried); got != f[6] {
-			t.Fatalf("carried digest %s, vector says %s", got, f[6])
+		if got := CarriedDigest(v.Carried); got != f[7] {
+			t.Fatalf("carried digest %s, vector says %s", got, f[7])
 		}
-		ad, err = RetiredAD(f[0], f[1], f[2], f[3], parse(f[4]), f[5], v.Carried)
+		pred := f[6]
+		if pred == NoPredecessor {
+			pred = ""
+		}
+		ad, err = RetiredAD(f[0], f[1], f[2], f[3], parse(f[4]), f[5], pred, v.Carried)
 	default:
 		t.Fatalf("unknown kind %q", v.Kind)
 	}

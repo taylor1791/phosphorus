@@ -27,6 +27,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -285,6 +286,13 @@ func (s *Scope) Open(ids []agewrap.Identity, prefer ...string) (*Opened, error) 
 	if s.Keys == nil {
 		return nil, ErrNoKey
 	}
+	// Every retired record must be on the chain back from the current
+	// key; a stray one (for example a record forged by someone holding a
+	// retired key, claiming a place it was never given) is never ignored.
+	chain, err := s.Keys.Chain()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s: %v; restore it from trunk (git checkout <trunk> -- %s)", ErrTampered, s.KeysPath(), err, s.KeysPath())
+	}
 	cur := s.Keys.CurrentKey()
 	o := &Opened{Scope: s, keys: map[string]*seal.Key{}, inboxes: map[string]agewrap.Identity{}, keyErrs: map[string]error{}}
 	o.ids = ids
@@ -344,7 +352,7 @@ func (s *Scope) Open(ids []agewrap.Identity, prefer ...string) (*Opened, error) 
 			ErrInboxMismatch, s.KeysPath(), s.Keys.Current)
 	}
 	o.inboxes[s.Keys.Current] = inbox
-	o.walkRetired()
+	o.walkRetired(chain)
 	return o, nil
 }
 
@@ -365,53 +373,52 @@ func (o *Opened) openInbox(keyID, sealed string) (agewrap.Identity, error) {
 	return ids[0], nil
 }
 
-// walkRetired opens every retired key reachable from the current key
-// through successors.
-func (o *Opened) walkRetired() {
-	for progress := true; progress; {
-		progress = false
-		for _, id := range o.Keys.IDs() {
-			r := o.Keys.Keys[id]
-			if !r.IsRetired() || o.keys[id] != nil || o.keyErrs[id] != nil {
-				continue
-			}
-			succ := o.keys[r.Successor]
-			if succ == nil {
-				if o.keyErrs[r.Successor] != nil {
-					o.keyErrs[id] = o.keyErrs[r.Successor]
-					progress = true
+// walkRetired opens the chain of retired keys back from the current key,
+// in order (store.Keys.Chain): each record is unsealed by the key after it,
+// with its predecessor and carried list in the associated data, so every
+// link is authenticated in both directions. A link that does not open
+// makes it and every older key unavailable (values under them report
+// why). The chain's structure was checked by Open.
+func (o *Opened) walkRetired(chain []string) {
+	after := o.Keys.Current
+	var broken error
+	for _, id := range chain {
+		r := o.Keys.Keys[id]
+		if broken != nil {
+			o.keyErrs[id] = broken
+			continue
+		}
+		ad, err := seal.RetiredAD(o.Package, o.Env, id, r.Successor, r.Retired, r.Reason, r.Predecessor, r.Carried)
+		if err != nil {
+			broken = err
+			o.keyErrs[id] = err
+			continue
+		}
+		pt, err := seal.Open(o.keys[after], r.Sealed, ad)
+		if err != nil {
+			broken = fmt.Errorf("%w: retired key %s in %s: %v", ErrTampered, id, o.KeysPath(), err)
+			o.keyErrs[id] = broken
+			continue
+		}
+		k, err := seal.KeyFromBytes(pt)
+		clear(pt)
+		if err != nil {
+			broken = fmt.Errorf("%w: retired key %s: %v", ErrTampered, id, err)
+			o.keyErrs[id] = broken
+			continue
+		}
+		o.keys[id] = k
+		if r.InboxSealed != "" {
+			if in, err := o.openInbox(id, r.InboxSealed); err == nil {
+				o.inboxes[id] = in
+			} else {
+				if o.inboxErrs == nil {
+					o.inboxErrs = map[string]error{}
 				}
-				continue
-			}
-			progress = true
-			ad, err := seal.RetiredAD(o.Package, o.Env, id, r.Successor, r.Retired, r.Reason, r.Carried)
-			if err != nil {
-				o.keyErrs[id] = err
-				continue
-			}
-			pt, err := seal.Open(succ, r.Sealed, ad)
-			if err != nil {
-				o.keyErrs[id] = fmt.Errorf("%w: retired key %s in %s: %v", ErrTampered, id, o.KeysPath(), err)
-				continue
-			}
-			k, err := seal.KeyFromBytes(pt)
-			clear(pt)
-			if err != nil {
-				o.keyErrs[id] = fmt.Errorf("%w: retired key %s: %v", ErrTampered, id, err)
-				continue
-			}
-			o.keys[id] = k
-			if r.InboxSealed != "" {
-				if in, err := o.openInbox(id, r.InboxSealed); err == nil {
-					o.inboxes[id] = in
-				} else {
-					if o.inboxErrs == nil {
-						o.inboxErrs = map[string]error{}
-					}
-					o.inboxErrs[id] = err
-				}
+				o.inboxErrs[id] = err
 			}
 		}
+		after = id
 	}
 }
 
@@ -712,8 +719,17 @@ func (o *Opened) Rotate(devices []policy.Device, reason string, now time.Time) (
 	if err != nil {
 		return "", err
 	}
+	// The key being retired replaced the newest retired key, if any.
+	chain, err := o.Keys.Chain()
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrTampered, err)
+	}
+	predecessor := ""
+	if len(chain) > 0 {
+		predecessor = chain[0]
+	}
 	carried := o.CarriedBy(oldID)
-	ad, err := seal.RetiredAD(o.Package, o.Env, oldID, newID, now, reason, carried)
+	ad, err := seal.RetiredAD(o.Package, o.Env, oldID, newID, now, reason, predecessor, carried)
 	if err != nil {
 		return "", err
 	}
@@ -722,7 +738,7 @@ func (o *Opened) Rotate(devices []policy.Device, reason string, now time.Time) (
 		return "", err
 	}
 	old := o.Keys.Keys[oldID]
-	old.Retired, old.Reason, old.Successor, old.Sealed, old.Carried = now, reason, newID, sealedOld, carried
+	old.Retired, old.Reason, old.Successor, old.Sealed, old.Carried, old.Predecessor = now, reason, newID, sealedOld, carried, predecessor
 	old.Inbox, old.Slots, old.SlotTo = "", nil, nil
 	o.Keys.Keys[newID] = rec
 	o.Keys.Current = newID
@@ -982,6 +998,10 @@ func removedWho(extra, slots []string, sa *policy.ScopeAccess) string {
 // place; an unproven one was written later by someone holding a retired
 // key, which a removed reader may. An entry under an unknown key id is
 // unproven too.
+//
+// Carried lists count only on the chain of keys back from the current key
+// (store.Keys.Chain); a record off it carries nothing. Opened.IsUnproven
+// further requires the record to have opened, which authenticates it.
 func (s *Scope) IsUnproven(name string, e store.Entry) bool {
 	if s.Keys == nil || e.Key == s.Keys.Current {
 		return false
@@ -990,7 +1010,20 @@ func (s *Scope) IsUnproven(name string, e store.Entry) bool {
 	if !ok || !r.IsRetired() {
 		return true
 	}
+	chain, err := s.Keys.Chain()
+	if err != nil || !slices.Contains(chain, e.Key) {
+		return true
+	}
 	h := store.LineHash(name, e)
 	i := sort.SearchStrings(r.Carried, h)
 	return i == len(r.Carried) || r.Carried[i] != h
+}
+
+// IsUnproven is Scope.IsUnproven, and an entry under a retired key that
+// did not open (its record failed authentication) is unproven too.
+func (o *Opened) IsUnproven(name string, e store.Entry) bool {
+	if o.Scope.IsUnproven(name, e) {
+		return true
+	}
+	return e.Key != o.Keys.Current && o.keys[e.Key] == nil
 }

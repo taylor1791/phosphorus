@@ -63,7 +63,8 @@ func main() {
 
 	// A value under the retired key, carried by its retirement: the carried
 	// list holds the SHA-256 of its secrets-file line; the retired blob's
-	// last associated data field is the SHA-256 of the list joined by "\n".
+	// last associated data field is the SHA-256 of the list joined by "\n";
+	// the one before it is the predecessor key id, "-" for a first key.
 	underRetired := mk("value-under-retired-key", "value", retiredKey, 0x70, []byte("sk_live_old"),
 		"checkout", "prod", "stripe_api_key", "k1a8c0", "2026-09-14T09:30:02Z")
 	line := `stripe_api_key = { key = "k1a8c0", set = 2026-09-14T09:30:02Z, value = "` + underRetired.Blob + `" }`
@@ -71,7 +72,7 @@ func main() {
 	carried := []string{"sha256:" + hex.EncodeToString(lineSum[:])}
 	digest := sha256.Sum256([]byte(strings.Join(carried, "\n")))
 	retired := mk("retired", "retired", scopeKey, 0x60, retiredKey,
-		"checkout", "prod", "k1a8c0", "k3f9q2", "2026-11-02T17:04:11Z", "removed sam", hex.EncodeToString(digest[:]))
+		"checkout", "prod", "k1a8c0", "k3f9q2", "2026-11-02T17:04:11Z", "removed sam", "-", hex.EncodeToString(digest[:]))
 	retired.Carried = carried
 
 	doc := struct {

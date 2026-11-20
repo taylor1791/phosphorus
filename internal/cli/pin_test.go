@@ -58,7 +58,7 @@ func forgeKeys(t *testing.T, w *clitest.World, value string) string {
 	}
 	var fake [32]byte
 	rand.Read(fake[:])
-	rad, _ := seal.RetiredAD("checkout", "prod", old.Current, newID, now, "removed sam", nil)
+	rad, _ := seal.RetiredAD("checkout", "prod", old.Current, newID, now, "removed sam", "", nil)
 	sealedOld, _ := seal.Seal(key, fake[:], rad)
 	forged := &store.Keys{Scope: "checkout/prod", Current: newID, Keys: map[string]*store.Key{
 		newID:       rec,

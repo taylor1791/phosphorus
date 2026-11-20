@@ -75,11 +75,12 @@
         "k3f9q2",
         "2026-11-02T17:04:11Z",
         "removed sam",
+        "-",
         "0167e7504c23f5dcafbd43702bc91d6e064063c51a7e6420623d4e8587c1c6c2"
       ],
-      "associated_data": "carbon/v1/retired\ncheckout\nprod\nk1a8c0\nk3f9q2\n2026-11-02T17:04:11Z\nremoved sam\n0167e7504c23f5dcafbd43702bc91d6e064063c51a7e6420623d4e8587c1c6c2",
+      "associated_data": "carbon/v1/retired\ncheckout\nprod\nk1a8c0\nk3f9q2\n2026-11-02T17:04:11Z\nremoved sam\n-\n0167e7504c23f5dcafbd43702bc91d6e064063c51a7e6420623d4e8587c1c6c2",
       "plaintext_hex": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
-      "blob": "carbon1:YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3NVgzpdKN0q+rnnekjf2NMaJvCb+axGTzyIS87Qns+n6BJ64bZqEm4UF9axN5c7wG",
+      "blob": "carbon1:YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3NVgzpdKN0q+rnnekjf2NMaJvCb+axGTzyIS87Qns+n53R615Oqdh+PpghCRxPOwO",
       "carried": [
         "sha256:b99607f671936afaad63e3c322753b16cbacadf1ed00fb2eb0f62ddcc921bdd4"
       ]

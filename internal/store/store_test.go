@@ -240,3 +240,30 @@ func TestCarried(t *testing.T) {
 		t.Fatalf("empty carried: %v", err)
 	}
 }
+
+// Chain follows predecessors back from the current key and rejects every
+// record off it.
+func TestChain(t *testing.T) {
+	rec := func(succ, pred string) *Key {
+		return &Key{Created: time.Unix(0, 0), Retired: time.Unix(1, 0), Reason: "r", Successor: succ, Predecessor: pred, Sealed: "carbon1:x", Carried: []string{}}
+	}
+	ks := &Keys{Scope: "a/dev", Current: "kccccc", Keys: map[string]*Key{
+		"kccccc": {Created: time.Unix(0, 0), Inbox: "age1x", InboxSealed: "carbon1:x"},
+		"kbbbbb": rec("kccccc", "kaaaaa"),
+		"kaaaaa": rec("kbbbbb", ""),
+	}}
+	if c, err := ks.Chain(); err != nil || strings.Join(c, ",") != "kbbbbb,kaaaaa" {
+		t.Fatalf("chain %v %v", c, err)
+	}
+	for name, extra := range map[string]*Key{
+		"second claim on the current key":   rec("kccccc", ""),
+		"claim on a key with a predecessor": rec("kbbbbb", ""),
+		"claim on the first key":            rec("kaaaaa", ""),
+	} {
+		ks.Keys["kfake9"] = extra
+		var ce *ChainError
+		if _, err := ks.Chain(); !errors.As(err, &ce) || ce.ID != "kfake9" && ce.ID != "kbbbbb" {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}

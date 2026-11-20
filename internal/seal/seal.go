@@ -122,11 +122,22 @@ func InboxAD(pkg, env, keyID string) ([]byte, error) {
 }
 
 // RetiredAD is the associated data of a retired key sealed under its
-// successor. Its last line is CarriedDigest(carried), so the retired
-// record's carried list cannot be edited without breaking the chain.
-func RetiredAD(pkg, env, retiredID, successorID string, retired time.Time, reason string, carried []string) ([]byte, error) {
-	return AssociatedData(PurposeRetired, pkg, env, retiredID, successorID, FormatTime(retired), reason, CarriedDigest(carried))
+// successor. Its last two lines are the predecessor id and
+// CarriedDigest(carried), so neither the backward link nor the carried list
+// can be edited without breaking the chain.
+//
+// predecessorID is the key the retired key replaced ("" for a scope's
+// first key, written as NoPredecessor), so the chain is authenticated in
+// both directions.
+func RetiredAD(pkg, env, retiredID, successorID string, retired time.Time, reason, predecessorID string, carried []string) ([]byte, error) {
+	if predecessorID == "" {
+		predecessorID = NoPredecessor
+	}
+	return AssociatedData(PurposeRetired, pkg, env, retiredID, successorID, FormatTime(retired), reason, predecessorID, CarriedDigest(carried))
 }
+
+// NoPredecessor is the predecessor line of a scope's first key.
+const NoPredecessor = "-"
 
 // CarriedDigest is the hex SHA-256 of a retired key's carried list: its
 // elements, as written, joined with "\n" (no trailing newline). An empty

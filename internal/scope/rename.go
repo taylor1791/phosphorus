@@ -123,7 +123,7 @@ func (o *Opened) Rename(newPkg string, devices []policy.Device) error {
 				}
 			}
 			sort.Strings(nr.Carried)
-			ad, err := seal.RetiredAD(newPkg, o.Env, id, r.Successor, r.Retired, r.Reason, nr.Carried)
+			ad, err := seal.RetiredAD(newPkg, o.Env, id, r.Successor, r.Retired, r.Reason, r.Predecessor, nr.Carried)
 			if err != nil {
 				return err
 			}

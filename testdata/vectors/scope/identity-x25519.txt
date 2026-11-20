@@ -1,4 +1,4 @@
 # TEST KEY for carbon's format vectors. Never use it for anything else.
 # created: 2026-11-16T00:00:00Z
-# public key: age1mapp7w99a60nru2tnuz8fzcszvrr08ap34clhwew97jx2w5n89csd4e387
-AGE-SECRET-KEY-1TE32U35ZEWWTM5RYM0SS3VKZK886CAA852EEZ0VHRSGVT26V0ZSS3LGXVP
+# public key: age1h5yzefvd0hw5aav8zcnyapgzs0lg0wnw9puuxjcq6ys2xrg2kumsmw9fpt
+AGE-SECRET-KEY-1MZTGEJ2JH86K565F975V8E86JS3TGY2GLKR3MPTEEKKLFZC4QDTSM93UZ6
