@@ -322,6 +322,11 @@ func TestJourneyOffboarding(t *testing.T) {
 	w.Branch("rotate")
 	res = w.Lin.Must("apply", "--yes")
 	mustContain(t, "apply", res.Stdout, "sam", "checkout/dev", "checkout/staging")
+	// The rotation commit touches only the keys files: values stay where
+	// they are (sam has seen them already) and open through the retired key.
+	if got := w.Git("show", "--name-only", "--format=", "HEAD"); got != co+"/.carbon/dev.keys.toml\n"+co+"/.carbon/staging.keys.toml" {
+		t.Fatalf("the rotation commit touched %q", got)
+	}
 	cj = ci(t, w.Repo, 0)
 	cj.has(t, "key.rotated", "checkout/dev", "checkout/staging")
 	cj.has(t, "debt.removal", "warning checkout/dev stripe_api_key")
@@ -704,4 +709,85 @@ func TestJourneyCIShapes(t *testing.T) {
 	// A trunk name that does not resolve is an error, never a fallback.
 	res = w.Deploy.In("../ci").With("CARBON_TRUNK=origin/nope").Fails(1, "run", "--env", "prod", "--package", "checkout", "--", "printenv", "STRIPE")
 	mustNotContain(t, "deploy with bad trunk", res.Stdout, "sk_prod")
+}
+
+// Journey: a rotation leaves the secrets file alone. A branch cut before a
+// removal adds a secret; the removal merges and a reader rotates on trunk;
+// the old branch merges trunk with no conflict, and check flags its new
+// value as unproven until a reader vouches for it.
+func TestJourneyBranchCutBeforeARotation(t *testing.T) {
+	w := clitest.Standard(t)
+	co := w.PkgDir
+	setAll(t, w)
+
+	w.Branch("api-token")
+	w.Replace(co+"/carbon.toml", "[secrets]\n", "[secrets]\napi_token = { description = \"partner API token\" }\n")
+	for _, env := range []string{"dev", "staging", "prod"} {
+		w.Lin.In(co).Stdin("tok_"+env).Must("set", "api_token", "--env", env)
+	}
+	w.Commit("add api_token")
+	ci(t, w.Repo, 0).lacks(t, "secret.stale-key")
+
+	w.Checkout("main")
+	w.Ada.Must("remove", "sam", "--yes")
+	w.Commit("remove sam")
+	secretsBefore := w.Read(co+"/.carbon/dev.secrets.toml") + w.Read(co+"/.carbon/staging.secrets.toml")
+	w.Lin.Must("apply", "--yes")
+	if got := w.Git("show", "--name-only", "--format=", "HEAD"); got != co+"/.carbon/dev.keys.toml\n"+co+"/.carbon/staging.keys.toml" {
+		t.Fatalf("the rotation commit touched %q", got)
+	}
+	if stat := w.Git("diff", "--stat", "HEAD~1", "HEAD"); strings.Contains(stat, "secrets.toml") {
+		t.Fatalf("rotation diff:\n%s", stat)
+	}
+	if w.Read(co+"/.carbon/dev.secrets.toml")+w.Read(co+"/.carbon/staging.secrets.toml") != secretsBefore {
+		t.Fatal("the rotation changed a secrets file")
+	}
+	ci(t, w.Repo, 0).lacks(t, "secret.stale-key", "key.changed")
+	// Everyone still reads the old values, carried under the retired key;
+	// ls shows them as ordinary sealed values.
+	if got := w.Ada.In(co).Must("get", "stripe_api_key", "--env", "dev").Stdout; got != "sk_dev" {
+		t.Fatalf("ada get = %q", got)
+	}
+	res := w.Lin.In(co).Must("ls", "--env", "dev")
+	mustNotContain(t, "ls", res.Stdout, "unproven", "stale")
+	// A value set after the rotation is under the new key: sam cannot read it.
+	nextSecond()
+	w.Lin.In(co).Stdin("sk_new").Must("set", "stripe_api_key", "--env", "dev")
+	w.Commit("new stripe key")
+	res = w.Sam.In(co).Run("get", "stripe_api_key", "--env", "dev")
+	if res.Code == 0 || strings.Contains(res.Stdout+res.Stderr, "sk_new") {
+		t.Fatalf("sam read a value set after his removal:\n%s", res)
+	}
+
+	// The old branch merges trunk: no conflict in any secrets or keys file.
+	w.Checkout("api-token")
+	w.Merge("main")
+	cj := ci(t, w.Repo, 0)
+	cj.has(t, "secret.stale-key", "checkout/dev api_token", "checkout/staging api_token")
+	for _, f := range cj.Findings {
+		if f.Rule == "secret.stale-key" && f.Secret != "api_token" {
+			t.Fatalf("a carried value is flagged: %+v", f)
+		}
+	}
+	found := false
+	for _, b := range cj.banner() {
+		found = found || b == "secret.stale-key"
+	}
+	if !found {
+		t.Fatalf("not in the banner\n%s", cj)
+	}
+	res = w.Lin.Must("status")
+	mustContain(t, "status", res.Stdout, "Unproven", "api_token")
+	// A reader vouches for it.
+	res = w.Lin.Must("apply", "--yes", "--reseal-unproven")
+	mustContain(t, "apply", res.Stdout, "api_token", "re-seals as trusted")
+	ci(t, w.Repo, 0).lacks(t, "secret.stale-key")
+	if got := w.Ada.In(co).Must("get", "api_token", "--env", "dev").Stdout; got != "tok_dev" {
+		t.Fatalf("api_token = %q", got)
+	}
+	w.Checkout("main")
+	w.Merge("api-token")
+	cj = ci(t, w.Repo, 0)
+	cj.lacks(t, "secret.stale-key", "key.changed", "secret.rolled-back")
+	w.Sam.In(co).Fails(3, "get", "api_token", "--env", "dev")
 }
