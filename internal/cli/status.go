@@ -276,7 +276,7 @@ func runStatus(c *Context) error {
 			if e.IsDrop() {
 				res.Drops = append(res.Drops, statusDrop{Scope: sf.Name(), Secret: name,
 					Set: e.Set.Format("2006-01-02T15:04:05Z"), Reader: readable[sf.Name()]})
-			} else if sf.Keys != nil && e.Key != sf.Keys.Current {
+			} else if sf.Keys != nil && (&scope.Scope{Keys: sf.Keys, Secrets: sf.Secrets}).IsUnproven(name, e) {
 				res.Unproven = append(res.Unproven, statusDrop{Scope: sf.Name(), Secret: name,
 					Set: e.Set.Format("2006-01-02T15:04:05Z"), Reader: readable[sf.Name()]})
 			}

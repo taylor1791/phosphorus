@@ -344,11 +344,16 @@ func TestRotateRetireAndChain(t *testing.T) {
 	if !old.IsRetired() || old.Reason != "removed sam" || old.Successor != newID || len(old.Slots) != 0 || old.Inbox != "" {
 		t.Fatalf("retired record %+v", old)
 	}
+	// The secrets file is untouched: entries stay under the old key, which
+	// lists them as carried.
 	for _, name := range []string{"stripe", "hook"} {
 		e := o.Secrets.Entries[name]
-		if e.Key != newID || !e.Set.Equal(t0) {
-			t.Fatalf("%s not re-sealed keeping set: %+v", name, e)
+		if e.Key != firstID || !e.Set.Equal(t0) || o.IsUnproven(name, e) {
+			t.Fatalf("%s moved by the rotation, or not carried: %+v", name, e)
 		}
+	}
+	if len(old.Carried) != 2 {
+		t.Fatalf("carried %v", old.Carried)
 	}
 	if !o.Secrets.Entries["hook"].IsDrop() {
 		t.Fatal("rotation promoted a drop")
@@ -377,9 +382,16 @@ func TestRotateRetireAndChain(t *testing.T) {
 	if err != nil || string(v.Bytes) != "dropped-on-branch" || !v.Drop {
 		t.Fatalf("drop under retired inbox: %+v %v", v, err)
 	}
-	moved, err := r.Refresh()
+	res, err := r.ResealUnproven()
+	var moved []string
+	for _, m := range res.Moved {
+		moved = append(moved, m.Name)
+	}
 	if err != nil || !reflect.DeepEqual(moved, []string{"branch_drop", "from_branch"}) {
-		t.Fatalf("Refresh = %v %v", moved, err)
+		t.Fatalf("ResealUnproven = %v %v", moved, err)
+	}
+	if e := s.Secrets.Entries["stripe"]; e.Key != firstID {
+		t.Fatalf("a carried value was re-sealed: %+v", e)
 	}
 	if e := s.Secrets.Entries["from_branch"]; e.Key != newID || !e.Set.Equal(t0.Add(time.Hour)) || e.IsDrop() {
 		t.Fatalf("refreshed value %+v", e)
@@ -416,22 +428,36 @@ func TestRotateRetireAndChain(t *testing.T) {
 	if _, err := r4.Reveal("from_branch"); !errors.Is(err, ErrTampered) {
 		t.Fatalf("edited retirement reason: %v", err)
 	}
-	if reveal(t, r4, "stripe") != "sk_1" {
-		t.Fatal("current values broke")
+	// stripe is carried under k1 too, so it breaks the same way.
+	if _, err := r4.Reveal("stripe"); !errors.Is(err, ErrTampered) {
+		t.Fatalf("carried value under an edited record: %v", err)
+	}
+	rec.Reason = "removed sam"
+
+	// So does editing the carried list: its digest is authenticated.
+	rec.Carried = append([]string{}, rec.Carried[1:]...)
+	r5, err := s.Open(lin.ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r5.Reveal("stripe"); !errors.Is(err, ErrTampered) {
+		t.Fatalf("edited carried list: %v", err)
 	}
 }
 
-func TestRotateRefusesWhenAValueIsBroken(t *testing.T) {
+// A rotation does not open values, so a damaged one does not stop it; the
+// line is left exactly as it was.
+func TestRotateLeavesBrokenValuesAlone(t *testing.T) {
 	lin := newPerson(t, "lin/laptop", agewrap.KindHybrid)
 	o := mustCreate(t, t.TempDir(), "p", "dev", lin)
 	o.Seal("a", []byte("x"), t0)
 	editEntry(t, o.Scope, "a", func(e *store.Entry) { e.Set = e.Set.Add(time.Second) })
-	before := string(o.Keys.Marshal())
-	if _, err := o.Rotate(devices(lin), "removed sam", t0); !errors.Is(err, ErrTampered) {
+	broken := o.Secrets.Entries["a"]
+	if _, err := o.Rotate(devices(lin), "removed sam", t0); err != nil {
 		t.Fatalf("err = %v", err)
 	}
-	if string(o.Keys.Marshal()) != before {
-		t.Fatal("failed rotation changed the keys file")
+	if o.Secrets.Entries["a"] != broken {
+		t.Fatal("rotation changed a broken line")
 	}
 	if _, err := o.Rotate(devices(lin), "two\nlines", t0); err == nil {
 		t.Fatal("multi-line reason accepted")

@@ -7,6 +7,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -25,6 +26,9 @@ type vector struct {
 	AD        string   `json:"associated_data"`
 	Plaintext string   `json:"plaintext_hex"`
 	Blob      string   `json:"blob"`
+	// Carried is the retired key's carried list, for a retired vector; its
+	// digest is the last associated data field.
+	Carried []string `json:"carried,omitempty"`
 }
 
 func seq(start byte, n int) []byte {
@@ -57,6 +61,19 @@ func main() {
 		}
 	}
 
+	// A value under the retired key, carried by its retirement: the carried
+	// list holds the SHA-256 of its secrets-file line; the retired blob's
+	// last associated data field is the SHA-256 of the list joined by "\n".
+	underRetired := mk("value-under-retired-key", "value", retiredKey, 0x70, []byte("sk_live_old"),
+		"checkout", "prod", "stripe_api_key", "k1a8c0", "2026-09-14T09:30:02Z")
+	line := `stripe_api_key = { key = "k1a8c0", set = 2026-09-14T09:30:02Z, value = "` + underRetired.Blob + `" }`
+	lineSum := sha256.Sum256([]byte(line))
+	carried := []string{"sha256:" + hex.EncodeToString(lineSum[:])}
+	digest := sha256.Sum256([]byte(strings.Join(carried, "\n")))
+	retired := mk("retired", "retired", scopeKey, 0x60, retiredKey,
+		"checkout", "prod", "k1a8c0", "k3f9q2", "2026-11-02T17:04:11Z", "removed sam", hex.EncodeToString(digest[:]))
+	retired.Carried = carried
+
 	doc := struct {
 		Comment string   `json:"comment"`
 		Vectors []vector `json:"vectors"`
@@ -71,10 +88,8 @@ func main() {
 				"checkout", "dev", "multi_line", "k3f9q2", "2026-01-01T00:00:00Z"),
 			mk("inbox", "inbox", scopeKey, 0x50, []byte(inboxIdentity),
 				"checkout", "prod", "k3f9q2"),
-			mk("retired", "retired", scopeKey, 0x60, retiredKey,
-				"checkout", "prod", "k1a8c0", "k3f9q2", "2026-11-02T17:04:11Z", "removed sam"),
-			mk("value-under-retired-key", "value", retiredKey, 0x70, []byte("sk_live_old"),
-				"checkout", "prod", "stripe_api_key", "k1a8c0", "2026-09-14T09:30:02Z"),
+			retired,
+			underRetired,
 		},
 	}
 	enc := json.NewEncoder(os.Stdout)

@@ -36,11 +36,17 @@ branch cannot grant itself access. For each scope it:
     wrapped to the devices trunk policy names (only if you are one of them);
   - adds a slot for each device trunk policy names that has none (a grant);
   - rotates the key when it has a slot for a device trunk policy no longer
-    names: a new key and inbox, every value re-sealed keeping its set time,
-    the old key retired with reason "removed <who>";
+    names, or whose recorded key the device no longer has: a new key and
+    inbox, the old key retired with reason "removed <who>" or "rekeyed
+    <device>". The secrets file is left as it is: existing values stay
+    under the old key (the person removed has seen them already) and still
+    open through it; the retired key records them as carried. Values set
+    before the removal owe a rotation at their source (rotation debt);
+    setting them again seals them under the new key;
   - promotes drops to sealed values;
-  - lists values under retired keys and leaves them as they are. Whoever
-    wrote those held a retired key, which a removed reader may still hold,
+  - lists unproven values (under a retired key that does not record them
+    as carried) and leaves them as they are. Whoever wrote those held a
+    retired key, which a removed reader may still hold,
     so their author is unproven. --reseal-unproven re-seals them under the
     current key, which vouches for them; they are listed in the plan you
     confirm. The "set after its key was retired" mark is advisory: a forger
@@ -56,7 +62,7 @@ the files it changed. --no-commit leaves them uncommitted.`,
 		Flags: func(fs *flag.FlagSet) {
 			fs.Bool("no-commit", false, "write the changes but do not commit them")
 			fs.Bool("dry-run", false, "print the plan and change nothing")
-			fs.Bool("reseal-unproven", false, "re-seal values under retired keys under the current key, vouching for them")
+			fs.Bool("reseal-unproven", false, "re-seal unproven values (under a retired key, not carried) under the current key, vouching for them")
 		},
 		Run: runApply,
 	})
@@ -74,7 +80,6 @@ type applyRotation struct {
 	From   string `json:"from"`
 	To     string `json:"to,omitempty"` // known once applied
 	Reason string `json:"reason"`
-	Values int    `json:"values"`
 }
 
 // applyScope is the plan, and then the outcome, for one scope.
@@ -539,19 +544,15 @@ func (c *Context) planApplyScope(w *Workspace, pol *policy.Policy, pkg *config.P
 				p.Revoke = append(p.Revoke, d.ID)
 			}
 		}
-		values := len(s.Secrets.Entries)
-		if p.SkipUnproven {
-			values -= len(p.Unproven)
-		}
-		p.Rotate = &applyRotation{From: s.Keys.Current, Reason: reason, Values: values}
+		p.Rotate = &applyRotation{From: s.Keys.Current, Reason: reason}
 		if len(eligible) == 0 {
 			return block(fmt.Sprintf("%s must rotate (%s), but trunk policy names nobody who could hold the new key", p.Scope, p.Rotate.Reason),
 				"Name at least one reader for "+p.Scope+" in policy, merge it, and run `carbon apply` again.")
 		}
-		// A rotation re-seals every value as the rotator's own. It may only
-		// start from exactly trunk's files: anything this branch added under
-		// the still-current key could have been written by the reader being
-		// removed.
+		// A rotation records every entry under the old key as carried,
+		// vouching for it. It may only start from exactly trunk's files:
+		// anything this branch added under the still-current key could have
+		// been written by the reader being removed.
 		if pol.Origin == policy.OriginTrunk {
 			same, err := applySameAsTrunk(w, pol, s, trunkDir)
 			if err != nil {
@@ -743,29 +744,14 @@ func (c *Context) executeApplyScope(w *Workspace, p *applyScope, ids []agewrap.I
 		lines = append(lines, fmt.Sprintf("%s: create key %s for %s", p.Scope, o.CurrentID(), strings.Join(DeviceIDs(p.eligible), ", ")))
 	case p.Rotate != nil:
 		from := o.CurrentID()
-		// Without --reseal-unproven: entries under retired keys stay as they are; the
-		// retired chain still opens them after the rotation.
-		held := map[string]store.Entry{}
-		if p.SkipUnproven {
-			for _, u := range p.Unproven {
-				held[u.Name] = o.Secrets.Entries[u.Name]
-				delete(o.Secrets.Entries, u.Name)
-			}
-		}
-		to, bad, err := o.RotateSkippingBadDrops(p.eligible, p.Rotate.Reason, now)
-		for name, e := range held {
-			o.Secrets.Entries[name] = e
-		}
+		// The secrets file is not touched: every entry stays under its key
+		// and keeps opening through the retired chain.
+		to, err := o.Rotate(p.eligible, p.Rotate.Reason, now)
 		if err != nil {
 			return nil, nil, err
 		}
-		for _, b := range bad {
-			if !slicesContains(p.BadDrops, b) {
-				p.BadDrops = append(p.BadDrops, b)
-			}
-		}
 		p.Rotate.To = to
-		lines = append(lines, fmt.Sprintf("%s: rotate %s -> %s (%s), re-seal %d value(s)", p.Scope, from, to, p.Rotate.Reason, p.Rotate.Values))
+		lines = append(lines, fmt.Sprintf("%s: rotate %s -> %s (%s)", p.Scope, from, to, p.Rotate.Reason))
 		if len(p.missing) > 0 {
 			lines = append(lines, fmt.Sprintf("%s: grant %s", p.Scope, strings.Join(DeviceIDs(p.missing), ", ")))
 		}
@@ -786,7 +772,7 @@ func (c *Context) executeApplyScope(w *Workspace, p *applyScope, ids []agewrap.I
 		if !e.IsDrop() || slicesContains(p.BadDrops, name) {
 			continue
 		}
-		if p.SkipUnproven && e.Key != o.CurrentID() {
+		if p.SkipUnproven && o.IsUnproven(name, e) {
 			continue
 		}
 		ok, err := o.PromoteAt(name, now)
@@ -802,7 +788,7 @@ func (c *Context) executeApplyScope(w *Workspace, p *applyScope, ids []agewrap.I
 		lines = append(lines, fmt.Sprintf("%s: promote %s", p.Scope, strings.Join(promoted, ", ")))
 	}
 	if !p.SkipUnproven {
-		r, err := o.RefreshDetailed()
+		r, err := o.ResealUnproven()
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1003,7 +989,7 @@ func printApplyScope(out io.Writer, p *applyScope) {
 		if p.Rotate.To != "" {
 			to = p.Rotate.To
 		}
-		rows = append(rows, []string{"  rotates", fmt.Sprintf("%s -> %s, re-sealing %d value(s); reason %q", p.Rotate.From, to, p.Rotate.Values, p.Rotate.Reason)})
+		rows = append(rows, []string{"  rotates", fmt.Sprintf("%s -> %s; reason %q; values stay where they are", p.Rotate.From, to, p.Rotate.Reason)})
 	}
 	for _, n := range p.Promote {
 		rows = append(rows, []string{"  promotes drop", n})

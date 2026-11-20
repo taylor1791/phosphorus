@@ -9,6 +9,8 @@ package store
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -120,15 +122,29 @@ func ParseSecrets(path string, data []byte) (*Secrets, error) {
 func (s *Secrets) Marshal() []byte {
 	var b bytes.Buffer
 	for _, name := range s.Names() {
-		e := s.Entries[name]
-		field, blob := "value", e.Value
-		if e.IsDrop() {
-			field, blob = "drop", e.Drop
-		}
-		fmt.Fprintf(&b, "%s = { key = %s, set = %s, %s = %s }\n",
-			name, config.Quote(e.Key), formatTime(e.Set), field, config.Quote(blob))
+		b.WriteString(EntryLine(name, s.Entries[name]))
+		b.WriteByte('\n')
 	}
 	return b.Bytes()
+}
+
+// EntryLine is the line the deterministic writer emits for one entry,
+// without its trailing newline.
+func EntryLine(name string, e Entry) string {
+	field, blob := "value", e.Value
+	if e.IsDrop() {
+		field, blob = "drop", e.Drop
+	}
+	return fmt.Sprintf("%s = { key = %s, set = %s, %s = %s }",
+		name, config.Quote(e.Key), formatTime(e.Set), field, config.Quote(blob))
+}
+
+// LineHash is "sha256:" and the hex SHA-256 of EntryLine(name, e): how a
+// retired key's carried list names the entries that were under it when it
+// was retired.
+func LineHash(name string, e Entry) string {
+	sum := sha256.Sum256([]byte(EntryLine(name, e)))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // Key is one [keys.<id>] table. A current key has Created, Inbox,
@@ -151,6 +167,11 @@ type Key struct {
 	Reason    string
 	Successor string
 	Sealed    string
+	// Carried lists, for a retired key, the LineHash of every entry that
+	// was under it when it was retired, sorted. Entries under a retired
+	// key that are not listed were added later: their author is unproven.
+	// It is authenticated: its digest is part of Sealed's associated data.
+	Carried []string
 }
 
 // IsRetired reports whether the key has been retired.
@@ -178,6 +199,7 @@ type keyTOML struct {
 	Reason      string              `toml:"reason"`
 	Successor   string              `toml:"successor"`
 	Sealed      string              `toml:"sealed"`
+	Carried     *[]string           `toml:"carried"`
 }
 
 type slotTOML struct {
@@ -250,9 +272,22 @@ func ParseKeys(path string, data []byte) (*Keys, error) {
 				return nil, fail("[keys.%s] is retired without a valid successor", id)
 			case !strings.HasPrefix(k.Sealed, "carbon1:"):
 				return nil, fail("[keys.%s] is retired without a sealed key", id)
+			case r.Carried == nil:
+				return nil, fail("[keys.%s] is retired without a carried list", id)
 			}
+			for i, h := range *r.Carried {
+				if !slotToRe.MatchString(h) {
+					return nil, fail("[keys.%s] carried: %q is not \"sha256:<64 hex>\"", id, h)
+				}
+				if i > 0 && (*r.Carried)[i-1] >= h {
+					return nil, fail("[keys.%s] carried must be sorted, without repeats", id)
+				}
+			}
+			k.Carried = append([]string{}, *r.Carried...)
 		} else {
 			switch {
+			case r.Carried != nil:
+				return nil, fail("[keys.%s] has a carried list but no retired time", id)
 			case k.Reason != "" || k.Successor != "" || k.Sealed != "":
 				return nil, fail("[keys.%s] has retirement fields but no retired time", id)
 			case k.Inbox == "":
@@ -316,6 +351,11 @@ func (k *Keys) Marshal() []byte {
 			fmt.Fprintf(&b, "reason = %s\n", config.Quote(r.Reason))
 			fmt.Fprintf(&b, "successor = %s\n", config.Quote(r.Successor))
 			fmt.Fprintf(&b, "sealed = %s\n", config.Quote(r.Sealed))
+			q := make([]string, len(r.Carried))
+			for i, h := range r.Carried {
+				q[i] = config.Quote(h)
+			}
+			fmt.Fprintf(&b, "carried = [%s]\n", strings.Join(q, ", "))
 			if r.InboxSealed != "" {
 				fmt.Fprintf(&b, "inbox_sealed = %s\n", config.Quote(r.InboxSealed))
 			}

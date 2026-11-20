@@ -221,6 +221,9 @@ func TestLsMarksValuesUnderRetiredKeys(t *testing.T) {
 	w.Lin.Stdin("sk").In(w.PkgDir).Must("set", "stripe_api_key", "--env", "prod")
 	w.Lin.Stdin("wh").In(w.PkgDir).Must("set", "webhook_secret", "--env", "prod")
 	old := regexp.MustCompile(`(?m)^webhook_secret = .*$`).FindString(w.Read(secretsFile))
+	w.Lin.Stdin("wh2").In(w.PkgDir).Must("set", "webhook_secret", "--env", "prod")
+	// The rotation carries the current lines; the older line put back
+	// afterwards, under the now retired key, is not one of them.
 	rotate(t, w, "prod", "removed sam")
 	w.Replace(secretsFile, regexp.MustCompile(`(?m)^webhook_secret = .*$`).FindString(w.Read(secretsFile)), old)
 	res := w.Lin.In(w.PkgDir).Must("ls", "--env", "prod")

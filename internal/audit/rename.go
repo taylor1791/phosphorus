@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/taylor1791/phosphorus/internal/config"
+	"github.com/taylor1791/phosphorus/internal/scope"
 	"github.com/taylor1791/phosphorus/internal/store"
 )
 
@@ -91,6 +92,14 @@ func renameProblems(sf *ScopeFiles, tk *store.Keys, ts *store.Secrets) []string 
 		we, ok := sf.Secrets.Entries[name]
 		if !ok || we.Key != te.Key || !we.Set.Equal(te.Set) || we.IsDrop() != te.IsDrop() {
 			probs = append(probs, name+" changed")
+			continue
+		}
+		// A rename re-writes carried lists along with the lines: an entry
+		// trunk's retired key carried must still be carried, and one it did
+		// not carry must not become carried.
+		was := (&scope.Scope{Keys: tk, Secrets: ts}).IsUnproven(name, te)
+		if (&scope.Scope{Keys: wk, Secrets: sf.Secrets}).IsUnproven(name, we) != was {
+			probs = append(probs, name+"'s carried status changed")
 		}
 	}
 	return probs

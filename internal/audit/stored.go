@@ -79,11 +79,11 @@ func (s *State) storedFindings() []Finding {
 				f.Severity, f.Rule = Warning, RuleSecretStaleAfter
 				f.Message = fmt.Sprintf("SUSPECT: the %s of %s in %s is under key %s, retired %s, but claims it was set %s, after the retirement. Only someone holding the old key could write it, which includes whoever was removed; its author is unproven.",
 					kind, st.Name, sf.Name(), st.KeyID, st.Retired.Format("2006-01-02T15:04:05Z"), st.Set.Format("2006-01-02T15:04:05Z"))
-				f.Hint = fmt.Sprintf("Review it like a drop. If nobody on the team wrote it, delete the line from %s and set the value again; otherwise `carbon apply` asks before re-sealing it.", sf.SecretFile)
+				f.Hint = fmt.Sprintf("Review it like a drop. If nobody on the team wrote it, delete the line from %s and set the value again; otherwise a reader vouches for it with `carbon apply --reseal-unproven`.", sf.SecretFile)
 			default:
 				f.Severity, f.Rule = Warning, RuleSecretStaleKey
-				f.Message = fmt.Sprintf("The %s of %s in %s is under retired key %s: readers still open it, but its author is unproven (a removed reader may hold that key).", kind, st.Name, sf.Name(), st.KeyID)
-				f.Hint = "A reader of " + sf.Name() + " runs `carbon apply`, which lists it and asks before re-sealing it under the current key."
+				f.Message = fmt.Sprintf("The %s of %s in %s is under retired key %s, which does not list it as carried (it was written after the rotation): readers still open it, but its author is unproven (a removed reader may hold that key).", kind, st.Name, sf.Name(), st.KeyID)
+				f.Hint = "A reader of " + sf.Name() + " vouches for it with `carbon apply --reseal-unproven`, or sets it again; `carbon apply` alone lists it and leaves it."
 			}
 			out = append(out, f)
 		}
@@ -123,6 +123,16 @@ func againstTrunk(sf *ScopeFiles, base Finding, ref string) []Finding {
 			continue
 		}
 		if we.Key == te.Key {
+			if k, ok := tk.Keys[we.Key]; ok && k.IsRetired() && we != te {
+				// Trunk's line is under a key trunk has retired (a value a
+				// rotation carried): a different line there could only be
+				// written by someone holding the retired key.
+				f.Severity, f.Rule = Error, RuleSecretRolledBack
+				f.Message = fmt.Sprintf("%s in %s was replaced under retired key %s: only someone holding that key, which may be a removed reader, can write there.", name, sf.Name(), we.Key)
+				f.Hint = "Restore trunk's line for " + name + " in " + sf.SecretFile + "; a reader sets a new value with `carbon set` if it must change."
+				out = append(out, f)
+				continue
+			}
 			if we.Set.Before(te.Set) {
 				f.Severity, f.Rule = Warning, RuleSecretOlderThanTrunk
 				f.Message = fmt.Sprintf("OLDER VALUE: %s in %s is set %s here but %s on trunk, under the same key %s: an older line was restored. Anyone who once had the file can do that.",

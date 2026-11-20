@@ -79,7 +79,7 @@ func runGet(c *Context) error {
 	if v.Drop {
 		c.Notice("note: %s is a drop, not yet reviewed; a reader's `carbon apply` promotes it.", name)
 	} else if v.Stale {
-		c.Notice("note: %s is sealed under retired key %s; the next `carbon apply` re-seals it.", name, v.KeyID)
+		c.Notice("note: %s is unproven: it is under retired key %s, which does not record it as carried, so whoever wrote it held that key. `carbon apply --reseal-unproven` vouches for it.", name, v.KeyID)
 	}
 	if c.JSON() {
 		return c.WriteJSON(getResult{Scope: s.Name(), Name: name, Value: string(v.Bytes),

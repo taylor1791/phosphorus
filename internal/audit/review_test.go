@@ -5,6 +5,7 @@ package audit
 // and a removed reader using a retired key they kept.
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -173,7 +174,7 @@ func TestRotationThatRedatesAValue(t *testing.T) {
 	rotateDev(t, f, "removed sam", now)
 	f.replace("svc/app/.carbon/dev.secrets.toml", "set = 2026-11-01T00:00:00Z", "set = 2026-11-15T00:00:00Z")
 	got := want(t, f.check(Options{}), RuleKeyChanged, Error)
-	if !strings.Contains(got.Message, "set time") {
+	if !strings.Contains(got.Message, "changed or removed") {
 		t.Fatal(got.Message)
 	}
 }
@@ -184,7 +185,7 @@ func TestRotationThatDropsAValue(t *testing.T) {
 	rotateDev(t, f, "removed sam", now)
 	f.write("svc/app/.carbon/dev.secrets.toml", "")
 	got := want(t, f.check(Options{}), RuleKeyChanged, Error)
-	if !strings.Contains(got.Message, "vanished: token") {
+	if !strings.Contains(got.Message, "changed or removed") || !strings.Contains(got.Message, "token") {
 		t.Fatal(got.Message)
 	}
 }
@@ -386,4 +387,27 @@ func TestSlotWithZeroStanzas(t *testing.T) {
 	if got.Device != "ada/laptop" {
 		t.Fatal(got.Device)
 	}
+}
+
+// A rotation's carried list must name exactly trunk's entries under the
+// retired key: dropping one would make a legitimate value look unproven,
+// adding one would vouch for a line nobody carried.
+func TestRotationCarriesExactlyTrunksEntries(t *testing.T) {
+	f := newFx(t)
+	removeSam(f)
+	rotateDev(t, f, "removed sam", now)
+	none(t, f.check(Options{}), RuleKeyChanged)
+	keys := f.read("svc/app/.carbon/dev.keys.toml")
+	f.write("svc/app/.carbon/dev.keys.toml", regexp.MustCompile(`carried = \[[^\]]*\]`).ReplaceAllString(keys, "carried = []"))
+	got := want(t, f.check(Options{}), RuleKeyChanged, Error)
+	if !strings.Contains(got.Message, "carry exactly") {
+		t.Fatal(got.Message)
+	}
+	// A value set again under the new key on the rotation branch is an
+	// ordinary new value.
+	f.write("svc/app/.carbon/dev.keys.toml", keys)
+	o := f.open("app", "dev", "ada/laptop")
+	f.seal(o, "token", now.Add(time.Minute))
+	f.save(o.Scope)
+	none(t, f.check(Options{}), RuleKeyChanged)
 }

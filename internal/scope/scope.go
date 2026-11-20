@@ -384,7 +384,7 @@ func (o *Opened) walkRetired() {
 				continue
 			}
 			progress = true
-			ad, err := seal.RetiredAD(o.Package, o.Env, id, r.Successor, r.Retired, r.Reason)
+			ad, err := seal.RetiredAD(o.Package, o.Env, id, r.Successor, r.Retired, r.Reason, r.Carried)
 			if err != nil {
 				o.keyErrs[id] = err
 				continue
@@ -433,7 +433,7 @@ type Value struct {
 	Set   time.Time
 	KeyID string
 	Drop  bool // written to the inbox, not yet promoted
-	Stale bool // under a key other than the current one
+	Stale bool // unproven: under a retired key that does not list it as carried (IsUnproven)
 }
 
 // Zero overwrites the value bytes.
@@ -451,7 +451,7 @@ func (o *Opened) Reveal(name string) (*Value, error) {
 	if !ok {
 		return nil, fmt.Errorf("%s %s: %w", o.Name(), name, ErrNotFound)
 	}
-	v := &Value{Name: name, Set: e.Set, KeyID: e.Key, Drop: e.IsDrop(), Stale: e.Key != o.Keys.Current}
+	v := &Value{Name: name, Set: e.Set, KeyID: e.Key, Drop: e.IsDrop(), Stale: o.IsUnproven(name, e)}
 	if e.IsDrop() {
 		inbox, ok := o.inboxes[e.Key]
 		if !ok {
@@ -593,7 +593,7 @@ type StaleEntry struct {
 	SetAfterRetired bool
 }
 
-// StaleEntries lists entries not under the current key, in name order. It
+// StaleEntries lists the unproven entries (IsUnproven), in name order. It
 // needs no key.
 func (s *Scope) StaleEntries() []StaleEntry {
 	if s.Keys == nil {
@@ -602,7 +602,7 @@ func (s *Scope) StaleEntries() []StaleEntry {
 	var out []StaleEntry
 	for _, name := range s.Secrets.Names() {
 		e := s.Secrets.Entries[name]
-		if e.Key == s.Keys.Current {
+		if !s.IsUnproven(name, e) {
 			continue
 		}
 		st := StaleEntry{Name: name, KeyID: e.Key, Set: e.Set, Drop: e.IsDrop()}
@@ -615,7 +615,7 @@ func (s *Scope) StaleEntries() []StaleEntry {
 	return out
 }
 
-// RefreshResult says what RefreshDetailed did.
+// RefreshResult says what ResealUnproven did.
 type RefreshResult struct {
 	// Moved are the entries re-written under the current key, as they were
 	// before the move (so SetAfterRetired still describes them).
@@ -625,23 +625,13 @@ type RefreshResult struct {
 	SkippedDrops []string
 }
 
-// Refresh is RefreshDetailed, returning only the names moved.
-func (o *Opened) Refresh() ([]string, error) {
-	r, err := o.RefreshDetailed()
-	var names []string
-	for _, m := range r.Moved {
-		names = append(names, m.Name)
-	}
-	return names, err
-}
-
-// RefreshDetailed moves every entry under a retired key to the current key,
-// keeping its set time: values are re-sealed, drops are re-dropped to the
-// current inbox (they stay drops). A value that does not open is an error;
+// ResealUnproven moves every unproven entry (StaleEntries) to the current
+// key, keeping its set time: values are re-sealed, drops are re-dropped to
+// the current inbox (they stay drops). Carried entries are left alone. A value that does not open is an error;
 // a drop that does not open is skipped and reported. Callers should show
 // result.Moved (StaleEntries before the call) for confirmation: re-sealing
 // launders an unproven author into a current-key value.
-func (o *Opened) RefreshDetailed() (RefreshResult, error) {
+func (o *Opened) ResealUnproven() (RefreshResult, error) {
 	var r RefreshResult
 	for _, st := range o.StaleEntries() {
 		if err := o.move(st.Name); err != nil {
@@ -695,101 +685,63 @@ func (o *Opened) AddSlots(devices []policy.Device) ([]string, error) {
 	return added, nil
 }
 
-// Rotate is RotateSkippingBadDrops without the list of skipped drops.
+// Rotate replaces the current key: a new key and inbox pair with slots for
+// devices, and the old key retired, sealed under the new one, with reason
+// ("removed <who>" for a removal). The secrets file is not touched: every
+// entry stays under the key id it was written with and keeps opening
+// through the retired chain. A removed reader has seen those values
+// already, so re-sealing them would protect nothing, and leaving them makes
+// a rotation commit touch only the keys file. The retired record lists in
+// Carried the line hash of every entry under it at this moment; an entry
+// under it that is not listed was added later and its author is unproven.
+// It returns the new key id.
 func (o *Opened) Rotate(devices []policy.Device, reason string, now time.Time) (string, error) {
-	id, _, err := o.RotateSkippingBadDrops(devices, reason, now)
-	return id, err
-}
-
-// RotateSkippingBadDrops replaces the current key: a new key and inbox pair
-// with slots for devices, every entry re-written under the new key keeping
-// its set time (drops stay drops, in the new inbox), and the old key
-// retired, sealed under the new one, with reason ("removed <who>" for a
-// removal). It returns the new key id and the drops that did not open,
-// which are left exactly as they were (under their old key id). A sealed
-// value that does not open stops the rotation before anything changes.
-func (o *Opened) RotateSkippingBadDrops(devices []policy.Device, reason string, now time.Time) (string, []string, error) {
 	if reason == "" || strings.ContainsAny(reason, "\r\n") {
-		return "", nil, errors.New("a rotation needs a one-line reason")
+		return "", errors.New("a rotation needs a one-line reason")
 	}
 	if len(devices) == 0 {
-		return "", nil, ErrNoDevices
+		return "", ErrNoDevices
 	}
 	now = wholeSecond(now)
-	var values []*Value
-	var skipped []string
-	defer func() {
-		for _, v := range values {
-			v.Zero()
-		}
-	}()
-	for _, name := range o.Secrets.Names() {
-		v, err := o.Reveal(name)
-		if err != nil {
-			if o.Secrets.Entries[name].IsDrop() {
-				skipped = append(skipped, name)
-				continue
-			}
-			return "", nil, fmt.Errorf("rotation stopped before changing anything: %w", err)
-		}
-		values = append(values, v)
-	}
 	oldID := o.Keys.Current
 	oldKey, err := o.key(oldID)
 	if err != nil {
-		return "", nil, err
+		return "", err
 	}
 	newID, rec, newKey, newInbox, err := o.newKeyRecord(devices, now, o.Keys.Keys)
 	if err != nil {
-		return "", nil, err
+		return "", err
 	}
-	ad, err := seal.RetiredAD(o.Package, o.Env, oldID, newID, now, reason)
+	carried := o.CarriedBy(oldID)
+	ad, err := seal.RetiredAD(o.Package, o.Env, oldID, newID, now, reason, carried)
 	if err != nil {
-		return "", nil, err
+		return "", err
 	}
 	sealedOld, err := seal.Seal(newKey, oldKey[:], ad)
 	if err != nil {
-		return "", nil, err
+		return "", err
 	}
-
-	// Re-write entries into a fresh secrets table before touching state.
-	entries := map[string]store.Entry{}
-	for _, name := range skipped {
-		entries[name] = o.Secrets.Entries[name]
-	}
-	for _, v := range values {
-		if v.Drop {
-			r, err := agewrap.ParseRecipient(rec.Inbox)
-			if err != nil {
-				return "", nil, err
-			}
-			blob, err := agewrap.WriteDrop(r, agewrap.Drop{Package: o.Package, Env: o.Env, Name: v.Name, Set: v.Set, Value: v.Bytes})
-			if err != nil {
-				return "", nil, err
-			}
-			entries[v.Name] = store.Entry{Key: newID, Set: v.Set, Drop: blob}
-			continue
-		}
-		vad, err := seal.ValueAD(o.Package, o.Env, v.Name, newID, v.Set)
-		if err != nil {
-			return "", nil, err
-		}
-		blob, err := seal.Seal(newKey, v.Bytes, vad)
-		if err != nil {
-			return "", nil, err
-		}
-		entries[v.Name] = store.Entry{Key: newID, Set: v.Set, Value: blob}
-	}
-
 	old := o.Keys.Keys[oldID]
-	old.Retired, old.Reason, old.Successor, old.Sealed = now, reason, newID, sealedOld
+	old.Retired, old.Reason, old.Successor, old.Sealed, old.Carried = now, reason, newID, sealedOld, carried
 	old.Inbox, old.Slots, old.SlotTo = "", nil, nil
 	o.Keys.Keys[newID] = rec
 	o.Keys.Current = newID
-	o.Secrets.Entries = entries
 	o.keys[newID] = newKey
 	o.inboxes[newID] = newInbox
-	return newID, skipped, nil
+	return newID, nil
+}
+
+// CarriedBy returns the sorted line hashes of the entries under key id in
+// the secrets file: what a rotation of id records as carried.
+func (s *Scope) CarriedBy(id string) []string {
+	out := []string{}
+	for _, name := range s.Secrets.Names() {
+		if e := s.Secrets.Entries[name]; e.Key == id {
+			out = append(out, store.LineHash(name, e))
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Inbox is where non-readers drop values: a key id and its inbox recipient.
@@ -894,7 +846,7 @@ func (s *Scope) List(declared map[string]config.Secret) []Status {
 			byName[name] = st
 		}
 		st.Stored, st.Drop, st.KeyID, st.Set = true, e.IsDrop(), e.Key, e.Set
-		st.Stale = s.Keys != nil && e.Key != s.Keys.Current
+		st.Stale = s.IsUnproven(name, e)
 		st.Unproven = st.Stale && !st.Drop
 		if st.Stale {
 			if r, ok := s.Keys.Keys[e.Key]; ok && r.IsRetired() && e.Set.After(r.Retired) {
@@ -1021,4 +973,24 @@ func removedWho(extra, slots []string, sa *policy.ScopeAccess) string {
 		}
 	}
 	return strings.Join(out, ", ")
+}
+
+// IsUnproven reports whether an entry's author is unproven: it is under a
+// key other than the current one, and the retired record of that key does
+// not list its line as carried (the entries under the key when it was
+// retired). A carried entry is an ordinary value that a rotation left in
+// place; an unproven one was written later by someone holding a retired
+// key, which a removed reader may. An entry under an unknown key id is
+// unproven too.
+func (s *Scope) IsUnproven(name string, e store.Entry) bool {
+	if s.Keys == nil || e.Key == s.Keys.Current {
+		return false
+	}
+	r, ok := s.Keys.Keys[e.Key]
+	if !ok || !r.IsRetired() {
+		return true
+	}
+	h := store.LineHash(name, e)
+	i := sort.SearchStrings(r.Carried, h)
+	return i == len(r.Carried) || r.Carried[i] != h
 }

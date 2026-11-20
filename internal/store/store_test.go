@@ -26,6 +26,7 @@ retired = 2026-11-02T17:04:11Z
 reason = "removed sam"
 successor = "k3f9q2"
 sealed = "carbon1:Zk2p"
+carried = ["sha256:6df86903b5b7351b0706576dc05f046e103145a5211d03c6c6d7f01c9512d29d"]
 inbox_sealed = "carbon1:Old1"
 
 [keys.k3f9q2]
@@ -205,5 +206,37 @@ func TestSlotRecipientHash(t *testing.T) {
 	nk.SetSlot("a/b", "sha256:"+strings.Repeat("0", 64), "age1:x")
 	if nk.Slots["a/b"] != "age1:x" || nk.SlotTo["a/b"] == "" {
 		t.Fatal("SetSlot")
+	}
+}
+
+// A retired key lists the line hashes of the entries it carried, sorted;
+// the list is required, and LineHash is over the line the writer emits.
+func TestCarried(t *testing.T) {
+	k, err := ParseKeys("x", []byte(keysSample))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := ParseSecrets("x", []byte(secretsSample))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := k.Keys["k1a8c0"].Carried; len(got) != 1 || got[0] != LineHash("stripe_api_key", s.Entries["stripe_api_key"]) {
+		t.Fatalf("carried %v", got)
+	}
+	if string(k.Marshal()) != keysSample {
+		t.Fatalf("round trip:\n%s", k.Marshal())
+	}
+	for name, src := range map[string]string{
+		"missing":        strings.Replace(keysSample, "carried = [", "#carried = [", 1),
+		"bad hash":       strings.Replace(keysSample, `carried = ["sha256:`, `carried = ["md5:`, 1),
+		"on current key": strings.Replace(keysSample, "inbox = \"age1pq1x7c4\"\n", "inbox = \"age1pq1x7c4\"\ncarried = []\n", 1),
+	} {
+		if _, err := ParseKeys("x", []byte(src)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	empty := strings.Replace(keysSample, `carried = ["sha256:`, `carried = [] # "sha256:`, 1)
+	if k, err := ParseKeys("x", []byte(empty)); err != nil || k.Keys["k1a8c0"].Carried == nil {
+		t.Fatalf("empty carried: %v", err)
 	}
 }

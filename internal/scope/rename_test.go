@@ -142,3 +142,47 @@ func TestVerifyTrunkAfterRename(t *testing.T) {
 		t.Fatalf("rotated past trunk after rename: %v", err)
 	}
 }
+
+// A rename re-writes every line, so it re-writes the carried lists too:
+// what a retired key carried stays carried, and what it did not stays
+// unproven.
+func TestRenameKeepsCarriedStatus(t *testing.T) {
+	lin := newPerson(t, "lin/laptop", agewrap.KindHybrid)
+	o := mustCreate(t, t.TempDir(), "old", "prod", lin)
+	o.Seal("carried", []byte("C"), t0)
+	firstID := o.CurrentID()
+	kept := &Opened{Scope: &Scope{Package: o.Package, Env: o.Env, Dir: o.Dir, Keys: o.Keys, Secrets: store.NewSecrets()}, keys: o.keys, inboxes: o.inboxes}
+	if _, err := o.Rotate(devices(lin), "removed sam", t0.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	// Someone who kept the first key writes under it afterwards.
+	cur := kept.Keys.Current
+	kept.Keys.Current = firstID
+	kept.Seal("later", []byte("L"), t0.Add(30*time.Minute))
+	kept.Keys.Current = cur
+	o.Secrets.Entries["later"] = kept.Secrets.Entries["later"]
+	s := reload(t, o.Scope)
+	r, err := s.Open(lin.ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.IsUnproven("carried", r.Secrets.Entries["carried"]) || !r.IsUnproven("later", r.Secrets.Entries["later"]) {
+		t.Fatal("status before the rename")
+	}
+	if err := r.Rename("new", devices(lin)); err != nil {
+		t.Fatal(err)
+	}
+	s = reload(t, r.Scope)
+	r, err = s.Open(lin.ids) // the retired chain, carried digest included, still opens
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.IsUnproven("carried", r.Secrets.Entries["carried"]) || !r.IsUnproven("later", r.Secrets.Entries["later"]) {
+		t.Fatalf("status after the rename: %v", r.Keys.Keys[firstID].Carried)
+	}
+	for _, n := range []string{"carried", "later"} {
+		if _, err := r.Reveal(n); err != nil {
+			t.Fatalf("%s: %v", n, err)
+		}
+	}
+}

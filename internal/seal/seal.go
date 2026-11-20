@@ -10,7 +10,9 @@ package seal
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -120,9 +122,18 @@ func InboxAD(pkg, env, keyID string) ([]byte, error) {
 }
 
 // RetiredAD is the associated data of a retired key sealed under its
-// successor.
-func RetiredAD(pkg, env, retiredID, successorID string, retired time.Time, reason string) ([]byte, error) {
-	return AssociatedData(PurposeRetired, pkg, env, retiredID, successorID, FormatTime(retired), reason)
+// successor. Its last line is CarriedDigest(carried), so the retired
+// record's carried list cannot be edited without breaking the chain.
+func RetiredAD(pkg, env, retiredID, successorID string, retired time.Time, reason string, carried []string) ([]byte, error) {
+	return AssociatedData(PurposeRetired, pkg, env, retiredID, successorID, FormatTime(retired), reason, CarriedDigest(carried))
+}
+
+// CarriedDigest is the hex SHA-256 of a retired key's carried list: its
+// elements, as written, joined with "\n" (no trailing newline). An empty
+// list hashes the empty string.
+func CarriedDigest(carried []string) string {
+	sum := sha256.Sum256([]byte(strings.Join(carried, "\n")))
+	return hex.EncodeToString(sum[:])
 }
 
 // Seal encrypts plaintext under key with a random nonce and returns the

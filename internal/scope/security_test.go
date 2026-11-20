@@ -127,8 +127,8 @@ func TestVerifyTrunk(t *testing.T) {
 		fk.Current = trunk.Current
 		fk.Keys[fk.Current] = rec
 		ek := cloneKeys(t, evil.Keys)
-		retired := &store.Key{Created: t0, Retired: t0.Add(time.Hour), Reason: "x", Successor: ek.Current}
-		ad, _ := seal.RetiredAD("checkout", "prod", trunk.Current, ek.Current, retired.Retired, retired.Reason)
+		retired := &store.Key{Created: t0, Retired: t0.Add(time.Hour), Reason: "x", Successor: ek.Current, Carried: []string{}}
+		ad, _ := seal.RetiredAD("checkout", "prod", trunk.Current, ek.Current, retired.Retired, retired.Reason, retired.Carried)
 		retired.Sealed, _ = seal.Seal(evil.keys[evil.CurrentID()], fake.keys[fake.CurrentID()][:], ad)
 		ek.Keys[trunk.Current] = retired
 		es := &Scope{Package: "checkout", Env: "prod", Dir: o.Dir, Keys: ek, Secrets: store.NewSecrets()}
@@ -151,7 +151,7 @@ func TestVerifyTrunk(t *testing.T) {
 
 // Finding 4: a removed reader keeps the old key and can seal under its id.
 // Reveal still works (old branches), but the value is marked unproven and
-// Refresh reports it instead of silently laundering it.
+// ResealUnproven reports it instead of silently laundering it.
 func TestRetiredKeyForgeryIsFlagged(t *testing.T) {
 	lin := newPerson(t, "lin/laptop", agewrap.KindHybrid)
 	sam := newPerson(t, "sam/laptop", agewrap.KindHybrid)
@@ -183,9 +183,9 @@ func TestRetiredKeyForgeryIsFlagged(t *testing.T) {
 	if v, err := r.Reveal("stripe_api_key"); err != nil || !v.Stale {
 		t.Fatalf("Reveal: %+v %v", v, err)
 	}
-	res, err := r.RefreshDetailed()
+	res, err := r.ResealUnproven()
 	if err != nil || len(res.Moved) != 1 || !res.Moved[0].SetAfterRetired {
-		t.Fatalf("RefreshDetailed = %+v %v", res, err)
+		t.Fatalf("ResealUnproven = %+v %v", res, err)
 	}
 }
 
@@ -203,19 +203,21 @@ func TestRotateSkipsDropsThatDoNotOpen(t *testing.T) {
 	junkEntry := o.Secrets.Entries["junk"]
 	s := reload(t, o.Scope)
 	r, _ := s.Open(lin.ids)
-	newID, skipped, err := r.RotateSkippingBadDrops(devices(lin), "removed sam", t0.Add(time.Hour))
-	if err != nil || len(skipped) != 1 || skipped[0] != "junk" {
-		t.Fatalf("rotate: %v skipped %v", err, skipped)
+	valueEntry := s.Secrets.Entries["a"]
+	if _, err := r.Rotate(devices(lin), "removed sam", t0.Add(time.Hour)); err != nil {
+		t.Fatalf("rotate: %v", err)
 	}
-	if s.Secrets.Entries["junk"] != junkEntry || s.Secrets.Entries["a"].Key != newID {
-		t.Fatal("junk drop changed, or the value was not re-sealed")
+	// A rotation never touches the secrets file.
+	if s.Secrets.Entries["junk"] != junkEntry || s.Secrets.Entries["a"] != valueEntry {
+		t.Fatal("the rotation changed an entry")
 	}
 	if reveal(t, r, "a") != "v" {
 		t.Fatal("value lost")
 	}
-	res, err := r.RefreshDetailed()
-	if err != nil || len(res.SkippedDrops) != 1 || len(res.Moved) != 0 {
-		t.Fatalf("refresh: %+v %v", res, err)
+	// Both were carried, so nothing is unproven.
+	res, err := r.ResealUnproven()
+	if err != nil || len(res.SkippedDrops) != 0 || len(res.Moved) != 0 {
+		t.Fatalf("reseal: %+v %v", res, err)
 	}
 	if _, err := r.Rotate(devices(lin), "removed ada", t0.Add(2*time.Hour)); err != nil {
 		t.Fatalf("Rotate with a junk drop: %v", err)

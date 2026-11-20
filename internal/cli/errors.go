@@ -150,13 +150,11 @@ func ConflictErr(path string) *Error {
 	if strings.HasSuffix(path, ".keys.toml") {
 		e.Hint = "Resolve the conflict by keeping one side of each conflicting line; each line is self-contained:\n" +
 			"- Both sides added a slot for the same device (two applies): keep either line; both wrap the same key.\n" +
-			"- Both sides rotated the key: keep either side's whole file (and the same side's secrets file), then run `carbon apply` to rotate once more."
+			"- Both sides rotated the key: keep either side's whole keys file, then run `carbon apply` to rotate once more. A value the other side\n" +
+			"  set under its own new key no longer opens (check reports secret.unknown-key): set it again."
 	}
 	if strings.HasSuffix(path, ".secrets.toml") {
 		e.Hint = "Resolve the conflict by keeping one side of each conflicting line; each line is self-contained:\n" +
-			"- One side rotated the key (every line re-sealed) and the other added or set secrets: keep the rotated side's lines,\n" +
-			"  then add back each line the other side added or changed, exactly as it was. It still opens through the retired key,\n" +
-			"  and the next `carbon apply` lists it as unproven (it re-seals it only with --reseal-unproven).\n" +
 			"- Both sides set the same secret: keep either line; each is a valid value or drop."
 	}
 	return e

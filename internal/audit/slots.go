@@ -379,22 +379,34 @@ func rotationProblems(sf *ScopeFiles, tk *store.Keys, sa *policy.ScopeAccess, el
 	if cur.Inbox == "" || cur.InboxSealed == "" {
 		probs = append(probs, "the new key has no inbox")
 	}
-	if sf.TrunkSecrets != nil && !sf.BadSecrets {
-		var gone, redated []string
-		for _, name := range sf.TrunkSecrets.Names() {
+	// The secrets file is not part of a rotation: every entry trunk has must
+	// be byte-identical here, except one a reader set again afterwards under
+	// the new current key. The retired record must carry exactly trunk's
+	// entries under the retired id.
+	trunkSecrets := sf.TrunkSecrets
+	if trunkSecrets == nil {
+		trunkSecrets = store.NewSecrets()
+	}
+	if !sf.BadSecrets {
+		var changed []string
+		for _, name := range trunkSecrets.Names() {
 			we, ok := sf.Secrets.Entries[name]
-			switch {
-			case !ok:
-				gone = append(gone, name)
-			case !we.Set.Equal(sf.TrunkSecrets.Entries[name].Set):
-				redated = append(redated, name)
+			if ok && we == trunkSecrets.Entries[name] {
+				continue
 			}
+			if ok && we.Key == wt.Current {
+				continue // set again under the new key: an ordinary new value
+			}
+			changed = append(changed, name)
 		}
-		if len(gone) > 0 {
-			probs = append(probs, "values on trunk vanished: "+strings.Join(gone, ", "))
+		if len(changed) > 0 {
+			probs = append(probs, "entries trunk has were changed or removed (a rotation leaves the secrets file as it is): "+strings.Join(changed, ", "))
 		}
-		if len(redated) > 0 {
-			probs = append(probs, "values changed their set time (a rotation re-seals, it does not re-date): "+strings.Join(redated, ", "))
+	}
+	if ok && old.IsRetired() {
+		want := (&scope.Scope{Keys: tk, Secrets: trunkSecrets}).CarriedBy(tk.Current)
+		if strings.Join(old.Carried, ",") != strings.Join(want, ",") {
+			probs = append(probs, fmt.Sprintf("retired key %s does not carry exactly trunk's entries under it", tk.Current))
 		}
 	}
 	return probs
@@ -432,7 +444,7 @@ func reaches(ks *store.Keys, id, want string) bool {
 func sameRecord(a, b *store.Key) bool {
 	if !a.Created.Equal(b.Created) || !a.Retired.Equal(b.Retired) || a.Reason != b.Reason ||
 		a.Successor != b.Successor || a.Sealed != b.Sealed || a.InboxSealed != b.InboxSealed ||
-		a.Inbox != b.Inbox || len(a.Slots) != len(b.Slots) {
+		a.Inbox != b.Inbox || len(a.Slots) != len(b.Slots) || strings.Join(a.Carried, ",") != strings.Join(b.Carried, ",") {
 		return false
 	}
 	for dev, blob := range a.Slots {

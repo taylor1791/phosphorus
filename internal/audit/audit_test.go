@@ -243,16 +243,19 @@ func TestSecretUnknownKey(t *testing.T) {
 
 func TestSecretStaleKey(t *testing.T) {
 	f := newFx(t)
-	secrets := f.read("svc/app/.carbon/dev.secrets.toml")
+	// Someone who kept the old key writes a line under it after the
+	// rotation: the retired record does not list it as carried.
+	kept := f.open("app", "dev", "ada/laptop")
 	o := f.open("app", "dev", "ada/laptop")
 	if _, err := o.Rotate(f.devices("app", "dev"), "scheduled", t0.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	f.save(o.Scope)
-	f.write("svc/app/.carbon/dev.secrets.toml", secrets) // the old line, under the now retired key
+	f.seal(kept, "token", t0.Add(time.Minute)) // set before the retirement
+	f.write("svc/app/.carbon/dev.secrets.toml", string(kept.Secrets.Marshal()))
 	rep := f.check(Options{})
 	got := want(t, rep, RuleSecretStaleKey, Warning)
-	if !strings.Contains(got.Message, "unproven") || !strings.Contains(got.Hint, "asks before re-sealing") {
+	if !strings.Contains(got.Message, "unproven") || !strings.Contains(got.Hint, "--reseal-unproven") {
 		t.Fatalf("%+v", got)
 	}
 	none(t, rep, RuleSecretUnknownKey)
@@ -264,16 +267,14 @@ func TestSecretStaleAfterRetirement(t *testing.T) {
 	// A value under the old key claims to be set after that key retired:
 	// someone who kept the old key wrote it.
 	retired := t0.Add(time.Hour)
+	kept := f.open("app", "dev", "ada/laptop")
 	o := f.open("app", "dev", "ada/laptop")
-	f.seal(o, "token", retired.Add(24*time.Hour))
-	f.save(o.Scope)
-	forged := f.read("svc/app/.carbon/dev.secrets.toml")
-	o = f.open("app", "dev", "ada/laptop")
 	if _, err := o.Rotate(f.devices("app", "dev"), "scheduled", retired); err != nil {
 		t.Fatal(err)
 	}
 	f.save(o.Scope)
-	f.write("svc/app/.carbon/dev.secrets.toml", forged)
+	f.seal(kept, "token", retired.Add(24*time.Hour))
+	f.write("svc/app/.carbon/dev.secrets.toml", string(kept.Secrets.Marshal()))
 	rep := f.check(Options{})
 	got := want(t, rep, RuleSecretStaleAfter, Warning)
 	if got.Secret != "token" || got.Set == nil || !strings.Contains(got.Message, "SUSPECT") {

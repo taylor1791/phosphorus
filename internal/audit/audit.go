@@ -149,7 +149,7 @@ var Rules = []RuleInfo{
 	{RuleSecretUnset, Error, "a declared secret has no value in an environment (every workspace environment counts)", false},
 	{RuleSecretUndeclared, Error, "a stored value has no declaration", false},
 	{RuleSecretUnknownKey, Error, "a stored value names a key id the scope's keys file does not have", false},
-	{RuleSecretStaleKey, Warning, "a stored value is under a retired key: its author is unproven; `carbon apply` asks before re-sealing it", true},
+	{RuleSecretStaleKey, Warning, "a stored value is under a retired key that does not list it as carried: its author is unproven; `carbon apply --reseal-unproven` vouches for it", true},
 	{RuleSecretStaleAfter, Warning, "a value under a retired key claims a set time after that key was retired: suspect", true},
 	{RuleSecretRolledBack, Error, "a value is under an older key than trunk's value for the same name: replaced by someone holding a retired key", false},
 	{RuleSecretOlderThanTrunk, Warning, "a value under the same key as trunk's has an earlier set time: an older line restored", true},

@@ -295,23 +295,16 @@ func TestApplyOffboardingDrill(t *testing.T) {
 	w.Commit("sam sets session_key after his removal")
 	w.Checkout("main")
 
-	// In dev every value line was re-sealed, so the branch's new line
-	// conflicts (a known merge limit). carbon names the resolution; keeping
-	// main's lines plus the branch's new line resolves it.
+	// A rotation changes only the keys file, so the branch's new line
+	// merges without a conflict. It is under the retired key and not
+	// carried by it: unproven.
 	dev := co + "/.carbon/dev.secrets.toml"
-	mainDev := w.Read(dev)
-	if _, err := tryGit(w, "merge", "-q", "--no-edit", "old-dev"); err == nil {
-		t.Fatal("expected the known conflict between a rotation and an added secret")
-	}
-	res = w.Lin.Fails(1, "get", "stripe_api_key", "--package", "checkout", "--env", "dev")
-	contains(t, "conflict hint", res.Stderr, "keep the rotated side's lines", "add back each line the other side added")
-	branchLine := regexp.MustCompile(`(?m)^session_key .*$`).FindString(w.Git("show", "old-dev:"+dev))
-	w.Write(dev, branchLine+"\n"+mainDev)
-	w.Git("add", dev)
-	w.Git("commit", "-q", "--no-edit")
+	w.Merge("old-dev")
 	if v, _ := umGet(t, w.Ada, "checkout", "dev", "session_key"); v != "sess_from_sam" {
 		t.Fatal(v)
 	}
+	res = w.Lin.In(co).Must("ls", "--env", "dev")
+	contains(t, "ls", res.Stdout, "session_key      stale: retired key, author unproven")
 
 	// The plan lists it as unproven, flagged as set after its key retired.
 	// --yes does not vouch for it: it is listed and left alone.
@@ -760,8 +753,11 @@ func TestApplyIsAllOrNothingPerScope(t *testing.T) {
 	w := clitest.Standard(t)
 	co := w.PkgDir
 	umSetAll(t, w)
-	// A sealed value copied to another name fails authentication, which
-	// stops prod's rotation.
+	// prod was rotated once; then a sealed value under the retired key is
+	// copied to another name: unproven, and it fails authentication, which
+	// stops prod when apply is asked to re-seal unproven values.
+	rotate(t, w, "prod", "rotated by hand")
+	w.Commit("rotate prod")
 	umCopyLine(w, co+"/.carbon/prod.secrets.toml", "stripe_api_key", "session_key")
 	w.Replace(co+"/carbon.toml", `prod = ["@payments", "machine:deploy-checkout"]`, `prod = ["@payments", "nia"]`)
 	nia := w.Person("nia")
@@ -770,7 +766,7 @@ func TestApplyIsAllOrNothingPerScope(t *testing.T) {
 	w.Commit("nia joins; a tampered value")
 	prodKeys, prodSecrets := w.Read(co+"/.carbon/prod.keys.toml"), w.Read(co+"/.carbon/prod.secrets.toml")
 
-	res := w.Lin.Fails(1, "apply", "--yes")
+	res := w.Lin.Fails(1, "apply", "--yes", "--reseal-unproven")
 	contains(t, "apply", res.Stdout, "Failed in checkout/prod (unchanged)", "session_key", "Applied 2 scope(s)")
 	if w.Read(co+"/.carbon/prod.keys.toml") != prodKeys || w.Read(co+"/.carbon/prod.secrets.toml") != prodSecrets {
 		t.Fatal("the failed scope was changed")

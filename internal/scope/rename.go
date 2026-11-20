@@ -2,6 +2,7 @@ package scope
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/taylor1791/phosphorus/internal/agewrap"
 	"github.com/taylor1791/phosphorus/internal/config"
@@ -39,6 +40,49 @@ func (o *Opened) Rename(newPkg string, devices []policy.Device) error {
 		}
 	}()
 
+	entries := map[string]store.Entry{}
+	for _, v := range values {
+		e := o.Secrets.Entries[v.Name]
+		if v.Drop {
+			inbox, ok := o.inboxes[e.Key]
+			if !ok {
+				return fmt.Errorf("rename stopped before changing anything: %s %s: the inbox of key %s cannot be opened", o.Name(), v.Name, e.Key)
+			}
+			r, err := agewrap.ParseRecipient(inbox.Recipient)
+			if err != nil {
+				return err
+			}
+			blob, err := agewrap.WriteDrop(r, agewrap.Drop{Package: newPkg, Env: o.Env, Name: v.Name, Set: v.Set, Value: v.Bytes})
+			if err != nil {
+				return err
+			}
+			entries[v.Name] = store.Entry{Key: e.Key, Set: e.Set, Drop: blob}
+			continue
+		}
+		k, err := o.key(e.Key)
+		if err != nil {
+			return err
+		}
+		ad, err := seal.ValueAD(newPkg, o.Env, v.Name, e.Key, e.Set)
+		if err != nil {
+			return err
+		}
+		blob, err := seal.Seal(k, v.Bytes, ad)
+		if err != nil {
+			return err
+		}
+		entries[v.Name] = store.Entry{Key: e.Key, Set: e.Set, Value: blob}
+	}
+
+	// A retired key's carried list names entry lines, which the rename
+	// re-writes: map each carried entry to its new line.
+	newHash := map[string]string{}
+	for name, e := range o.Secrets.Entries {
+		if ne, ok := entries[name]; ok {
+			newHash[store.LineHash(name, e)] = store.LineHash(name, ne)
+		}
+	}
+
 	keys := map[string]*store.Key{}
 	for _, id := range o.Keys.IDs() {
 		r := o.Keys.Keys[id]
@@ -72,7 +116,14 @@ func (o *Opened) Rename(newPkg string, devices []policy.Device) error {
 			if err != nil {
 				return err
 			}
-			ad, err := seal.RetiredAD(newPkg, o.Env, id, r.Successor, r.Retired, r.Reason)
+			nr.Carried = []string{}
+			for _, h := range r.Carried {
+				if nh, ok := newHash[h]; ok {
+					nr.Carried = append(nr.Carried, nh)
+				}
+			}
+			sort.Strings(nr.Carried)
+			ad, err := seal.RetiredAD(newPkg, o.Env, id, r.Successor, r.Retired, r.Reason, nr.Carried)
 			if err != nil {
 				return err
 			}
@@ -94,40 +145,6 @@ func (o *Opened) Rename(newPkg string, devices []policy.Device) error {
 			}
 		}
 		keys[id] = &nr
-	}
-
-	entries := map[string]store.Entry{}
-	for _, v := range values {
-		e := o.Secrets.Entries[v.Name]
-		if v.Drop {
-			inbox, ok := o.inboxes[e.Key]
-			if !ok {
-				return fmt.Errorf("rename stopped before changing anything: %s %s: the inbox of key %s cannot be opened", o.Name(), v.Name, e.Key)
-			}
-			r, err := agewrap.ParseRecipient(inbox.Recipient)
-			if err != nil {
-				return err
-			}
-			blob, err := agewrap.WriteDrop(r, agewrap.Drop{Package: newPkg, Env: o.Env, Name: v.Name, Set: v.Set, Value: v.Bytes})
-			if err != nil {
-				return err
-			}
-			entries[v.Name] = store.Entry{Key: e.Key, Set: e.Set, Drop: blob}
-			continue
-		}
-		k, err := o.key(e.Key)
-		if err != nil {
-			return err
-		}
-		ad, err := seal.ValueAD(newPkg, o.Env, v.Name, e.Key, e.Set)
-		if err != nil {
-			return err
-		}
-		blob, err := seal.Seal(k, v.Bytes, ad)
-		if err != nil {
-			return err
-		}
-		entries[v.Name] = store.Entry{Key: e.Key, Set: e.Set, Value: blob}
 	}
 
 	o.Package = newPkg
