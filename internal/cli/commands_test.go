@@ -229,7 +229,7 @@ func TestDropByNonReaderThenReaderReads(t *testing.T) {
 	contains(t, "stderr", res.Stderr, "You cannot read checkout/prod, so this will be a drop: write-only for you.")
 	contains(t, "stdout", res.Stdout, "Dropped. Readers can use it at once; `carbon check` will flag it for review.",
 		"Commit services/checkout/.carbon/prod.secrets.toml")
-	contains(t, "secrets", w.Read(co+"/.carbon/prod.secrets.toml"), "webhook_secret = { key = \"k", "drop = \"age1:")
+	contains(t, "secrets", w.Read(co+"/.carbon/prod.secrets.toml"), "[webhook_secret]\nkey = \"k", "drop = \"age1:")
 	if strings.Contains(res.Stdout+res.Stderr, "whsec_42") {
 		t.Fatal("value echoed")
 	}
@@ -330,7 +330,11 @@ func TestTamperingIsDetected(t *testing.T) {
 	w.Commit("values")
 	restore := func() { w.Git("checkout", "--", co) }
 	line := func(file, name string) string {
-		return regexp.MustCompile(`(?m)^` + name + ` = .*$`).FindString(w.Read(file))
+		b := secretBlock(w.Read(file), name)
+		if b == "" {
+			t.Fatalf("no [%s] in %s", name, file)
+		}
+		return b
 	}
 
 	t.Run("value moved to another name", func(t *testing.T) {
@@ -386,7 +390,7 @@ func TestTamperingIsDetected(t *testing.T) {
 		defer restore()
 		w.Write(sec, "<<<<<<< HEAD\n"+w.Read(sec)+"=======\n>>>>>>> other\n")
 		res := w.Lin.In(co).Fails(1, "ls", "--env", "prod")
-		contains(t, "stderr", res.Stderr, "prod.secrets.toml has unresolved git conflict markers", "keeping one side")
+		contains(t, "stderr", res.Stderr, "prod.secrets.toml has unresolved git conflict markers", "a whole [name] table at a time")
 	})
 }
 
@@ -417,4 +421,11 @@ func readFile(t *testing.T, p string) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+// secretBlock returns the [name] table for name in a secrets file's text,
+// header through last field, without a trailing newline; "" when absent.
+func secretBlock(text, name string) string {
+	re := regexp.MustCompile(`(?m)^\[` + regexp.QuoteMeta(name) + `\]\n(?:[^\n\[]+\n?)*`)
+	return strings.TrimRight(re.FindString(text), "\n")
 }

@@ -312,7 +312,7 @@ func TestApplyOffboardingDrill(t *testing.T) {
 	res = w.Lin.Must("apply", "--yes", "--env", "dev")
 	contains(t, "unproven", res.Stdout, "leaves unproven", "session_key",
 		"set after its key was retired (advisory: a forger can back-date)", "--reseal-unproven")
-	if umHead(w) != head || !strings.Contains(w.Read(dev), "session_key = { key = \"") {
+	if umHead(w) != head || !strings.Contains(w.Read(dev), "[session_key]\nkey = \"") {
 		t.Fatal("--yes re-sealed an unproven value")
 	}
 	res = w.Lin.Must("apply", "--reseal-unproven", "--dry-run", "--env", "dev")
@@ -409,7 +409,7 @@ func TestApplyDropDrill(t *testing.T) {
 	contains(t, "ada apply", res.Stdout, "promotes drop", "webhook_secret", "lin (laptop)")
 	res = w.Lin.Must("apply", "--yes", "--env", "prod")
 	contains(t, "apply", res.Stdout, "promotes drop", "webhook_secret", "Committed")
-	contains(t, "secrets", w.Read(co+"/.carbon/prod.secrets.toml"), "webhook_secret = { key = ")
+	contains(t, "secrets", w.Read(co+"/.carbon/prod.secrets.toml"), "[webhook_secret]\nkey = ")
 	if strings.Contains(w.Read(co+"/.carbon/prod.secrets.toml"), "drop =") {
 		t.Fatal("still a drop")
 	}
@@ -712,16 +712,15 @@ func TestRename(t *testing.T) {
 	}
 }
 
-// umCopyLine prepends a copy of the line for name, renamed to as: a value
+// umCopyLine prepends a copy of the table for name, renamed to as: a value
 // or drop moved to another name, which fails authentication.
 func umCopyLine(w *clitest.World, file, name, as string) {
 	sec := w.Read(file)
-	for _, l := range strings.Split(sec, "\n") {
-		if strings.HasPrefix(l, name+" ") {
-			sec = strings.Replace(l, name, as, 1) + "\n" + sec
-		}
+	b := secretBlock(sec, name)
+	if b == "" {
+		panic("umCopyLine: no [" + name + "] in " + file)
 	}
-	w.Write(file, sec)
+	w.Write(file, strings.Replace(b, name, as, 1)+"\n\n"+sec)
 }
 
 func TestApplyLeavesBadDropsAndRotates(t *testing.T) {
@@ -732,7 +731,7 @@ func TestApplyLeavesBadDropsAndRotates(t *testing.T) {
 	umCopyLine(w, co+"/.carbon/prod.secrets.toml", "webhook_secret", "session_key")
 	w.Replace(co+"/carbon.toml", `prod = ["@payments", "machine:deploy-checkout"]`, `prod = ["@payments"]`)
 	w.Commit("remove the deploy machine from prod; a bad drop")
-	bad := regexp.MustCompile(`(?m)^session_key .*$`).FindString(w.Read(co + "/.carbon/prod.secrets.toml"))
+	bad := secretBlock(w.Read(co+"/.carbon/prod.secrets.toml"), "session_key")
 
 	res := w.Lin.Must("apply", "--yes", "--env", "prod", "--dry-run")
 	contains(t, "plan", res.Stdout, "leaves drop", "session_key", "promotes drop", "webhook_secret", `reason "removed machine:deploy-checkout"`)

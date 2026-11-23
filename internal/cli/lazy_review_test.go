@@ -3,7 +3,6 @@ package cli_test
 import (
 	"crypto/rand"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -144,25 +143,25 @@ func TestResurrectedCarriedLineIsUnproven(t *testing.T) {
 	w.Replace(co+"/carbon.toml", "old_token = { description = \"x\" }\n", "")
 	for _, env := range []string{"dev", "staging", "prod"} {
 		f := co + "/.carbon/" + env + ".secrets.toml"
-		var keep []string
-		for _, l := range strings.Split(w.Read(f), "\n") {
-			if !strings.HasPrefix(l, "old_token") {
-				keep = append(keep, l)
-			}
+		ss, err := store.ParseSecrets(f, []byte(w.Read(f)))
+		if err != nil {
+			t.Fatal(err)
 		}
-		w.Write(f, strings.Join(keep, "\n"))
+		if _, ok := ss.Entries["old_token"]; !ok {
+			t.Fatalf("no old_token in %s", f)
+		}
+		delete(ss.Entries, "old_token")
+		w.Write(f, string(ss.Marshal()))
 	}
 	w.Commit("drop old_token")
 	ci(t, w.Repo, 0)
 	w.Branch("sam")
 	w.Replace(co+"/carbon.toml", "[secrets]\n", "[secrets]\nold_token = { description = \"x\" }\n")
-	var line string
-	for _, l := range strings.Split(devSecrets, "\n") {
-		if strings.HasPrefix(l, "old_token") {
-			line = l
-		}
+	line := secretBlock(devSecrets, "old_token")
+	if line == "" {
+		t.Fatal("no old_token in the saved dev secrets")
 	}
-	w.Write(co+"/.carbon/dev.secrets.toml", line+"\n"+w.Read(co+"/.carbon/dev.secrets.toml"))
+	w.Write(co+"/.carbon/dev.secrets.toml", line+"\n\n"+w.Read(co+"/.carbon/dev.secrets.toml"))
 	w.Commit("restore")
 	cj := ci(t, w.Repo, 4) // old_token is unset in staging and prod
 	cj.has(t, "secret.stale-key", "checkout/dev old_token")

@@ -288,7 +288,7 @@ func TestDropByNonReaderIsVisibleInRunAndExport(t *testing.T) {
 	// Ada cannot read db/dev: her set is a drop to trunk's inbox.
 	res := w.Ada.In("services/db").Stdin(dropValue).Must("set", "password")
 	contains(t, "stderr", res.Stderr, "this will be a drop")
-	contains(t, "secrets", w.Read("services/db/.carbon/dev.secrets.toml"), "password = { key = ", "drop = \"age1:")
+	contains(t, "secrets", w.Read("services/db/.carbon/dev.secrets.toml"), "[password]\nkey = ", "drop = \"age1:")
 
 	res = w.Lin.With("FROM_SHELL=x").In(w.PkgDir).Must("run", "--", helper, "env")
 	if got := envMap(parseChild(t, res).Env)["DB_PASSWORD"]; got != dropValue {

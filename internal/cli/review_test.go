@@ -262,18 +262,18 @@ func TestEditSkipsUnreadableValues(t *testing.T) {
 	w.Ada.In(w.PkgDir).Stdin(dropValue).Must("set", "webhook_secret", "--env", "prod")
 	// Damage the drop: its set time is authenticated inside the payload.
 	f := w.PkgDir + "/.carbon/prod.secrets.toml"
-	re := regexp.MustCompile(`(webhook_secret = \{ key = "[a-z0-9]+", set = )(\d{4})`)
+	re := regexp.MustCompile(`(\[webhook_secret\]\nkey = "[a-z0-9]+"\nset = )(\d{4})`)
 	if !re.MatchString(w.Read(f)) {
 		t.Fatalf("no drop line:\n%s", w.Read(f))
 	}
 	w.Write(f, re.ReplaceAllString(w.Read(f), "${1}2001"))
-	damaged := regexp.MustCompile(`webhook_secret = .*`).FindString(w.Read(f))
+	damaged := secretBlock(w.Read(f), "webhook_secret")
 
 	r, log := editRun(t, w, w.Lin, `HELPER_EDIT_SET={"stripe_api_key":"new-prod"}`)
 	res := r.Must("edit", "--env", "prod")
 	checkEditLog(t, log)
 	contains(t, "stdout", res.Stdout, "Sealed 1 changed secret(s) in checkout/prod: stripe_api_key.")
-	if got := regexp.MustCompile(`webhook_secret = .*`).FindString(w.Read(f)); got != damaged {
+	if got := secretBlock(w.Read(f), "webhook_secret"); got != damaged {
 		t.Fatalf("damaged drop was touched:\n%s\n%s", damaged, got)
 	}
 	noLeak(t, res)

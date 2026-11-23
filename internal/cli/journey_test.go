@@ -791,3 +791,51 @@ func TestJourneyBranchCutBeforeARotation(t *testing.T) {
 	cj.lacks(t, "secret.stale-key", "key.changed", "secret.rolled-back")
 	w.Sam.In(co).Fails(3, "get", "api_token", "--env", "dev")
 }
+
+// Two branches that set the same secret conflict in git, the error says how
+// to resolve it, a resolution that mixes the two sides' lines does not open,
+// and either side's whole table does.
+func TestSameSecretSetOnTwoBranchesConflicts(t *testing.T) {
+	w := clitest.Standard(t)
+	co := w.PkgDir
+	setAll(t, w)
+	w.Commit("values")
+	f := co + "/.carbon/dev.secrets.toml"
+
+	w.Branch("theirs")
+	nextSecond()
+	w.Lin.In(co).Stdin("sk_theirs").Must("set", "stripe_api_key", "--env", "dev")
+	w.Commit("theirs")
+	theirs := secretBlock(w.Read(f), "stripe_api_key")
+	w.Checkout("main")
+	nextSecond()
+	w.Lin.In(co).Stdin("sk_ours").Must("set", "stripe_api_key", "--env", "dev")
+	w.Commit("ours")
+	ours := secretBlock(w.Read(f), "stripe_api_key")
+	oursFile := w.Read(f)
+
+	if _, err := w.TryGit("merge", "-q", "--no-edit", "theirs"); err == nil {
+		t.Fatal("two sets of the same secret merged without a conflict")
+	}
+	res := w.Lin.In(co).Fails(1, "get", "stripe_api_key", "--env", "dev")
+	contains(t, "stderr", res.Stderr, "unresolved git conflict markers", "all three from the same side", "keep both tables")
+
+	// Mixed: our key and set lines with their value line.
+	oursLines, theirLines := strings.Split(ours, "\n"), strings.Split(theirs, "\n")
+	if len(oursLines) != 4 || len(theirLines) != 4 || oursLines[2] == theirLines[2] {
+		t.Fatalf("unexpected tables:\n%s\n%s", ours, theirs)
+	}
+	mixed := strings.Join([]string{oursLines[0], oursLines[1], oursLines[2], theirLines[3]}, "\n")
+	w.Write(f, strings.Replace(oursFile, ours, mixed, 1))
+	res = w.Lin.In(co).Fails(1, "get", "stripe_api_key", "--env", "dev")
+	contains(t, "stderr", res.Stderr, "failed authentication")
+
+	// One side's whole table.
+	w.Write(f, strings.Replace(oursFile, ours, theirs, 1))
+	if got := w.Lin.In(co).Must("get", "stripe_api_key", "--env", "dev").Stdout; got != "sk_theirs" {
+		t.Fatalf("get = %q", got)
+	}
+	if got := w.Lin.In(co).Must("get", "webhook_secret", "--env", "dev").Stdout; got != "wh_dev" {
+		t.Fatalf("get = %q", got)
+	}
+}

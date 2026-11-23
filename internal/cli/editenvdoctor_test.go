@@ -12,12 +12,11 @@ import (
 
 func secretsLine(t *testing.T, w *clitest.World, env, name string) string {
 	t.Helper()
-	for _, l := range strings.Split(w.Read(w.PkgDir+"/.carbon/"+env+".secrets.toml"), "\n") {
-		if strings.HasPrefix(l, name+" = ") {
-			return l
-		}
+	b := secretBlock(w.Read(w.PkgDir+"/.carbon/"+env+".secrets.toml"), name)
+	if b == "" {
+		t.Fatalf("no [%s] in %s", name, env)
 	}
-	return ""
+	return b
 }
 
 // editRun runs `carbon edit` as p with the helper as EDITOR, logging what

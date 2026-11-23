@@ -706,7 +706,7 @@ the defence for most of them.
 
 A rotation no longer conflicts with a branch that adds or changes a secret
 (Deviations 9): it changes only the keys file, so a branch cut before the
-rotation merges with no conflict in the secrets or keys file. Its new line
+rotation merges with no conflict in the secrets or keys file. Its new entry
 is under the retired key and not carried by it, so it is unproven: `check`
 lists it in the banner (`secret.stale-key`), and it stays so until a reader
 runs `carbon apply --reseal-unproven` or someone sets it again after merging
@@ -719,4 +719,10 @@ it again. `set`
 and `edit` refuse to seal on a branch whose current key trunk has retired
 (Decisions 14), so that branch must merge trunk before it can set or edit
 secrets in the scope. The conflict-marker error for a secrets file now
-covers only both sides setting the same secret (keep either line).
+covers both sides setting the same secret (keep one side's whole `[name]`
+table: its `key`, `set` and `value` or `drop` lines, all from the same side)
+and two branches adding different secrets at the same place in name order
+(keep both tables). Every set writes a new `value` or `drop` line, so two
+branches that set the same secret always conflict, and lines mixed from the
+two sides do not open, because the name, key id and set time are
+authenticated with the value.

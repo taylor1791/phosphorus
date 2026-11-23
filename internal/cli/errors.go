@@ -124,7 +124,7 @@ func AsError(err error) *Error {
 	case errors.Is(err, scope.ErrTampered):
 		return &Error{Code: ExitError, Message: "a stored secret or key failed authentication", Err: err,
 			Details: []string{err.Error()},
-			Hint:    "Look at the git history of the file for an edited or copied line, and restore it."}
+			Hint:    "Look at the git history of the file for an edited or copied entry, and restore it."}
 	}
 	return &Error{Code: ExitError, Message: err.Error(), Err: err}
 }
@@ -154,8 +154,10 @@ func ConflictErr(path string) *Error {
 			"  set under its own new key no longer opens (check reports secret.unknown-key): set it again."
 	}
 	if strings.HasSuffix(path, ".secrets.toml") {
-		e.Hint = "Resolve the conflict by keeping one side of each conflicting line; each line is self-contained:\n" +
-			"- Both sides set the same secret: keep either line; each is a valid value or drop."
+		e.Hint = "Resolve the conflict a whole [name] table at a time; a table's key, set and value (or drop) belong together:\n" +
+			"- Both sides set the same secret: keep one side's key, set and value (or drop) lines, all three from the same side.\n" +
+			"  Either side is a valid value or drop; lines mixed from both sides fail authentication.\n" +
+			"- Each side added a different secret in the same place: keep both tables, in name order, with a blank line between."
 	}
 	return e
 }

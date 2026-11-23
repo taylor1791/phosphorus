@@ -123,7 +123,7 @@ func TestCreateSealOpenReveal(t *testing.T) {
 		t.Fatalf("keys file:\n%s", keys)
 	}
 	sec, _ := os.ReadFile(s.SecretsPath())
-	if !strings.Contains(string(sec), "set = 2026-11-02T17:04:12Z, value = \"carbon1:") {
+	if !strings.Contains(string(sec), "[stripe_api_key]\nkey = \"k") || !strings.Contains(string(sec), "\nset = 2026-11-02T17:04:12Z\nvalue = \"carbon1:") {
 		t.Fatalf("secrets file:\n%s", sec)
 	}
 }

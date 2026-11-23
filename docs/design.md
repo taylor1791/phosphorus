@@ -16,7 +16,7 @@ The design rests on seven decisions:
 - **Boring cryptography.** age wraps keys and XChaCha20-Poly1305 seals values. Nothing is novel, and every secret is recoverable with stock tools and a short script.
 - **A scope is one package in one environment.** Each scope has its own key, so reading `payments` in `prod` implies nothing about `search` in `dev`.
 - **Policy is plain TOML, enforced by encryption.** Reviewers read a one-line diff. CI checks the wrapped keys against it without holding a key.
-- **Built for branches.** One line per secret, one line per reader device, and no file-wide MAC, so independent changes merge.
+- **Built for branches.** One table per secret, one line per reader device, and no file-wide MAC, so independent changes merge.
 - **Anyone can add a secret; only readers can read one.** A contributor without access drops a value into the scope's inbox, so credentials never travel over chat.
 - **Honest offboarding.** Removing someone rotates keys and lists every credential they could read, because revocation cannot un-share a secret.
 
@@ -168,7 +168,7 @@ Every command takes `--json` and uses stable exit codes. Commands that change ac
 
 ## Repository layout and file formats
 
-People write three kinds of file; `carbon` writes two. All are TOML, sorted, and one logical item per line so diffs and merges stay small.
+People write three kinds of file; `carbon` writes two. All are TOML and sorted. A secret is a small table and a reader device is one line, so diffs and merges stay small.
 
 ```text
 carbon.toml                    workspace: environments, default access
@@ -246,9 +246,20 @@ payments    = ["lin"]
 ### Sealed values and drops: `.carbon/prod.secrets.toml`
 
 ```toml
-session_key = { key = "k3f9q2", set = 2026-11-02T17:04:11Z, value = "carbon1:9wN3..." }
-stripe_api_key = { key = "k1a8c0", set = 2026-09-14T09:30:02Z, value = "carbon1:Qm7r..." }
-webhook_secret = { key = "k3f9q2", set = 2026-11-10T08:12:40Z, drop = "age1:YWdlLWVuY3J5..." }
+[session_key]
+key = "k3f9q2"
+set = 2026-11-02T17:04:11Z
+value = "carbon1:9wN3..."
+
+[stripe_api_key]
+key = "k1a8c0"
+set = 2026-09-14T09:30:02Z
+value = "carbon1:Qm7r..."
+
+[webhook_secret]
+key = "k3f9q2"
+set = 2026-11-10T08:12:40Z
+drop = "age1:YWdlLWVuY3J5..."
 ```
 
 A `value` was sealed by a reader. `stripe_api_key` was set before the last rotation and stays under the retired key `k1a8c0`, which carried it. A `drop` was written by someone who may not be one, and stays marked that way until a reader's `carbon apply` promotes it.

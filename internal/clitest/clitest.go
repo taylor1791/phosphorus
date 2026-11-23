@@ -207,6 +207,17 @@ func (r *Repo) Git(args ...string) string {
 	return strings.TrimSpace(stdout.String())
 }
 
+// TryGit runs git in the root and returns trimmed stdout and the error, for
+// commands a test expects to fail (a conflicting merge).
+func (r *Repo) TryGit(args ...string) (string, error) {
+	r.T.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = r.Dir
+	cmd.Env = r.baseEnv(filepath.Join(r.base, "git-home"))
+	out, err := cmd.Output()
+	return strings.TrimSpace(string(out)), err
+}
+
 // Commit stages everything and commits on the current branch.
 func (r *Repo) Commit(msg string) {
 	r.T.Helper()

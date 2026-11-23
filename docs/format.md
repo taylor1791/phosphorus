@@ -23,17 +23,29 @@ UTC with whole seconds, e.g. `2026-11-02T17:04:11Z`.
 
 ## Files
 
-`<package dir>/.carbon/<env>.secrets.toml`, one line per secret:
+`<package dir>/.carbon/<env>.secrets.toml`, one table per secret, sorted by
+name, with a blank line between tables:
 
 ```toml
-stripe_api_key = { key = "k3f9q2", set = 2026-09-14T09:30:02Z, value = "carbon1:…" }
-webhook_secret = { key = "k3f9q2", set = 2026-11-10T08:12:40Z, drop = "age1:…" }
+[stripe_api_key]
+key = "k3f9q2"
+set = 2026-09-14T09:30:02Z
+value = "carbon1:…"
+
+[webhook_secret]
+key = "k3f9q2"
+set = 2026-11-10T08:12:40Z
+drop = "age1:…"
 ```
+
+That is what carbon writes. The reader takes any TOML spelling of the same
+tables, including the inline form `name = { key = …, set = …, value = … }`;
+the next write puts the file back in table form.
 
 `key` is the id of the scope key the value is sealed under, or whose inbox the
 drop was written to. For a `value`, `set` is part of the associated data:
 editing it breaks decryption. For a `drop`, the set time is inside the
-encrypted payload and a reader compares it with the line after decrypting;
+encrypted payload and a reader compares it with the entry after decrypting;
 it is not authenticated as associated data, and whoever wrote the drop
 chose it.
 
@@ -110,15 +122,16 @@ first is structurally on the chain; it cannot be forged without the current
 key, so it fails to open, and only the values it would carry fail.
 
 `carried` lists, sorted, `sha256:` and the hex SHA-256 of the canonical line
-(below) of each entry that was under the key when it was retired. A line under
+(below) of each entry that was under the key when it was retired. An entry under
 a retired key that is not listed was written after the rotation, by someone
 who held the retired key: carbon calls it unproven. `carried` counts only for
 records on the chain, and, for a reader holding a key, only for records
 that opened, which authenticates them (the list's digest is in the `sealed`
 blob's associated data, below).
 
-**Canonical line.** The hash is SHA-256 over the line exactly as carbon's
-deterministic writer emits it, without the trailing newline:
+**Canonical line.** The hash is SHA-256 over a one-line serialisation of the
+entry, with no trailing newline. It is a form for hashing only, not the text
+of the file (which holds tables):
 
 ```
 <name> = { key = "<key id>", set = <set time>, value = "<carbon1: blob>" }
@@ -133,7 +146,7 @@ of the same entry (extra spaces, a different key order, a literal string).
 Every consumer (carbon's rotation, readers, `check`, `ls`, `status`,
 `apply`) parses the entry and hashes its canonical re-emission, so the hash
 depends only on the entry's name, `key`, `set` and `value` or `drop`, never on
-how the line is formatted on disk. An independent tool must do the same.
+how the entry is spelled on disk. An independent tool must do the same.
 
 ## Sealed blob: `carbon1:<base64(nonce ‖ ciphertext)>`
 

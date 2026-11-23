@@ -2,9 +2,8 @@
 // <package dir>/.carbon/<env>.secrets.toml and <env>.keys.toml.
 //
 // Parsing is strict (unknown keys, malformed ids, and conflict markers are
-// errors). Writing is deterministic: fixed field order, map keys sorted, one
-// logical item per line, LF endings and a trailing newline, so that
-// independent changes merge.
+// errors). Writing is deterministic: fixed field order, map keys sorted, LF
+// endings and a trailing newline, so that independent changes merge.
 package store
 
 import (
@@ -46,7 +45,7 @@ type ParseError struct {
 func (e *ParseError) Error() string { return e.Path + ": " + e.Err.Error() }
 func (e *ParseError) Unwrap() error { return e.Err }
 
-// Entry is one line of a secrets file. Exactly one of Value and Drop is set.
+// Entry is one [name] table of a secrets file. Exactly one of Value and Drop is set.
 type Entry struct {
 	Key   string    // key id the value is sealed under, or whose inbox the drop was written to
 	Set   time.Time // UTC, whole seconds
@@ -119,18 +118,30 @@ func ParseSecrets(path string, data []byte) (*Secrets, error) {
 	return s, nil
 }
 
-// Marshal renders the secrets file.
+// Marshal renders the secrets file: one [name] table per entry, a field per
+// line, tables separated by a blank line. The reader also accepts the inline
+// form (name = { ... }); the writer never emits it.
 func (s *Secrets) Marshal() []byte {
 	var b bytes.Buffer
-	for _, name := range s.Names() {
-		b.WriteString(EntryLine(name, s.Entries[name]))
-		b.WriteByte('\n')
+	for i, name := range s.Names() {
+		e := s.Entries[name]
+		field, blob := "value", e.Value
+		if e.IsDrop() {
+			field, blob = "drop", e.Drop
+		}
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		fmt.Fprintf(&b, "[%s]\nkey = %s\nset = %s\n%s = %s\n",
+			name, config.Quote(e.Key), formatTime(e.Set), field, config.Quote(blob))
 	}
 	return b.Bytes()
 }
 
-// EntryLine is the line the deterministic writer emits for one entry,
-// without its trailing newline.
+// EntryLine is the canonical one-line form of an entry, the input to
+// LineHash. It is a serialisation for hashing, not the text of the file
+// (Marshal writes tables), so a carried hash does not depend on how the
+// entry is spelled on disk.
 func EntryLine(name string, e Entry) string {
 	field, blob := "value", e.Value
 	if e.IsDrop() {

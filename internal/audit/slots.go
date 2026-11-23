@@ -71,7 +71,7 @@ func (s *State) slotFindings() []Finding {
 				if dropsOff {
 					f.Severity, f.Rule = Error, RuleDropForbidden
 					f.Message = fmt.Sprintf("%s in %s is a drop, and drops are off in %s (drops = false): a value written by someone who may not read the scope.", name, sf.Name(), sf.Name())
-					f.Hint = fmt.Sprintf("Remove the line from %s, and ask a reader to set it: carbon set %s --package %s --env %s", sf.SecretFile, name, sf.Package.Name, sf.Env)
+					f.Hint = fmt.Sprintf("Remove the [%s] table from %s, and ask a reader to set it: carbon set %s --package %s --env %s", name, sf.SecretFile, name, sf.Package.Name, sf.Env)
 				} else {
 					f.Severity, f.Rule = Info, RuleDropPending
 					f.Message = fmt.Sprintf("%s in %s is a DROP, set %s: written to the inbox, possibly by someone who cannot read %s. Review it like code before merging.",

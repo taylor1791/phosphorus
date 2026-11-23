@@ -119,7 +119,7 @@ A team lists people only. A person reader means all of that person's devices.
 
 ## Files carbon writes
 
-Written by a deterministic writer: keys sorted, one logical item per line, LF
+Written by a deterministic writer: keys sorted, one field or slot per line, LF
 endings, a trailing newline. Read back strictly (unknown keys are errors).
 Nothing marks keys files as generated (no `linguist-generated` line in
 `.gitattributes`): review tools must show which key and slot lines changed.
@@ -127,11 +127,22 @@ Nothing marks keys files as generated (no `linguist-generated` line in
 ### `<package dir>/.carbon/<env>.secrets.toml`
 
 ```toml
-session_key = { key = "k3f9q2", set = 2026-11-02T17:04:11Z, value = "carbon1:..." }
-webhook_secret = { key = "k3f9q2", set = 2026-11-10T08:12:40Z, drop = "age1:..." }
+[session_key]
+key = "k3f9q2"
+set = 2026-11-02T17:04:11Z
+value = "carbon1:..."
+
+[webhook_secret]
+key = "k3f9q2"
+set = 2026-11-10T08:12:40Z
+drop = "age1:..."
 ```
 
-Exactly one of `value` or `drop`. `set` is UTC, whole seconds.
+One `[name]` table per secret, sorted by name, fields in the order shown, a
+blank line between tables (`store.Secrets.Marshal`). The reader accepts any
+TOML spelling of the same tables, the inline form
+`name = { key = ..., set = ..., value = ... }` included; the writer always
+emits tables. Exactly one of `value` or `drop`. `set` is UTC, whole seconds.
 
 ### `<package dir>/.carbon/<env>.keys.toml`
 
@@ -181,8 +192,8 @@ A retired key has a required `carried` list, written on one line after `sealed`
 (`store.Key.Carried`): sorted, without repeats, each element `sha256:` and
 the hex SHA-256 of the canonical line of an entry that was under that key
 when it was retired (`store.EntryLine`, `store.LineHash`). The canonical
-line is the line exactly as the deterministic writer emits it, without the
-trailing newline:
+line is a one-line serialisation used only for hashing (the file itself
+holds tables), without a trailing newline:
 `<name> = { key = "<key id>", set = <time>, value = "<carbon1: blob>" }`,
 or with `drop = "<age1: blob>"` in place of `value`; single spaces exactly
 as shown, `<time>` RFC 3339 UTC with whole seconds, strings in TOML
@@ -190,7 +201,7 @@ basic-string quoting (`config.Quote`). The strict secrets-file reader does
 not reject other TOML spellings of the same entry; every consumer
 (rotation, readers, `check`, `ls`, `status`, `apply`) parses the entry and
 hashes `store.EntryLine` of it, so the hash depends only on the entry's
-name, `key`, `set` and `value` or `drop`, never on how the line is formatted
+name, `key`, `set` and `value` or `drop`, never on how the entry is spelled
 on disk. Only entries whose `key` is the retired id are listed;
 the list may be empty. The strict reader refuses a retired key without
 `carried` and a current key with one. `carried` is authenticated by the

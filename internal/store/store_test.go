@@ -12,9 +12,20 @@ import (
 	"github.com/taylor1791/phosphorus/internal/config"
 )
 
-const secretsSample = `session_key = { key = "k3f9q2", set = 2026-11-02T17:04:11Z, value = "carbon1:9wN3" }
-stripe_api_key = { key = "k1a8c0", set = 2026-09-14T09:30:02Z, value = "carbon1:Qm7r" }
-webhook_secret = { key = "k3f9q2", set = 2026-11-10T08:12:40Z, drop = "age1:YWdl" }
+const secretsSample = `[session_key]
+key = "k3f9q2"
+set = 2026-11-02T17:04:11Z
+value = "carbon1:9wN3"
+
+[stripe_api_key]
+key = "k1a8c0"
+set = 2026-09-14T09:30:02Z
+value = "carbon1:Qm7r"
+
+[webhook_secret]
+key = "k3f9q2"
+set = 2026-11-10T08:12:40Z
+drop = "age1:YWdl"
 `
 
 const keysSample = `scope = "checkout/prod"
@@ -210,7 +221,7 @@ func TestSlotRecipientHash(t *testing.T) {
 }
 
 // A retired key lists the line hashes of the entries it carried, sorted;
-// the list is required, and LineHash is over the line the writer emits.
+// the list is required, and LineHash is over the canonical one-line form.
 func TestCarried(t *testing.T) {
 	k, err := ParseKeys("x", []byte(keysSample))
 	if err != nil {
@@ -265,5 +276,25 @@ func TestChain(t *testing.T) {
 		if _, err := ks.Chain(); !errors.As(err, &ce) || ce.ID != "kfake9" && ce.ID != "kbbbbb" {
 			t.Errorf("%s: %v", name, err)
 		}
+	}
+}
+
+// The writer emits tables; the reader takes the inline form too, and the
+// carried hash is the same for either spelling.
+func TestSecretsInlineFormStillParses(t *testing.T) {
+	inline := `session_key = { key = "k3f9q2", set = 2026-11-02T17:04:11Z, value = "carbon1:9wN3" }
+stripe_api_key = { key = "k1a8c0", set = 2026-09-14T09:30:02Z, value = "carbon1:Qm7r" }
+webhook_secret = { key = "k3f9q2", set = 2026-11-10T08:12:40Z, drop = "age1:YWdl" }
+`
+	s, err := ParseSecrets("x", []byte(inline))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(s.Marshal()) != secretsSample {
+		t.Fatalf("inline form did not rewrite as tables:\n%s", s.Marshal())
+	}
+	if got, want := EntryLine("stripe_api_key", s.Entries["stripe_api_key"]),
+		`stripe_api_key = { key = "k1a8c0", set = 2026-09-14T09:30:02Z, value = "carbon1:Qm7r" }`; got != want {
+		t.Fatalf("canonical line changed: %s", got)
 	}
 }

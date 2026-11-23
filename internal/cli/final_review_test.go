@@ -96,7 +96,7 @@ func TestApplyLeavesDropsThatAreNotOnTrunk(t *testing.T) {
 func setTime(t *testing.T, w *clitest.World, file, name, newSet string) {
 	t.Helper()
 	s := w.Read(file)
-	re := regexp.MustCompile(`(?m)^(` + name + ` = \{ key = "[^"]+", set = )[0-9TZ:-]+`)
+	re := regexp.MustCompile(`(?m)^(\[` + name + `\]\nkey = "[^"]+"\nset = )[0-9TZ:-]+`)
 	if !re.MatchString(s) {
 		t.Fatalf("no line for %s in\n%s", name, s)
 	}
